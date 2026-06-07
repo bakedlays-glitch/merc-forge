@@ -35,6 +35,7 @@ const TilesetEditor = lazy(() => import("./routes/TilesetEditor"));
 const TilesetEditorTileset = lazy(() => import("./routes/TilesetEditorTileset"));
 const Tools = lazy(() => import("./routes/Tools"));
 const IniEditor = lazy(() => import("./routes/IniEditor"));
+const Setup = lazy(() => import("./routes/Setup"));
 const ToolsStiViewer = lazy(() => import("./routes/ToolsStiViewer"));
 const ToolsSlfExtractor = lazy(() => import("./routes/ToolsSlfExtractor"));
 
@@ -147,6 +148,7 @@ export default function App() {
           <Route path="/tileset-editor" element={<TilesetEditor />} />
           <Route path="/tileset-editor/:tileset" element={<TilesetEditorTileset />} />
           <Route path="/ini-editor" element={<IniEditor />} />
+          <Route path="/setup" element={<Setup />} />
           <Route path="/tools" element={<Tools />} />
           <Route path="/tools/sti-viewer" element={<ToolsStiViewer />} />
           <Route path="/tools/slf-extractor" element={<ToolsSlfExtractor />} />

@@ -26,6 +26,11 @@ router = APIRouter()
 class SettingsPatch(BaseModel):
     baseline_install_path: Optional[str] = None
     backup_mode: Optional[str] = None
+    # Install ids whose first-run setup offer has been shown/dismissed.
+    # NOTE: this model is CLOSED — unknown keys sent by clients are
+    # silently dropped (adversarial-review finding); every persisted
+    # setting needs an explicit field here.
+    setup_offered_installs: Optional[list[str]] = None
     # Explicit clears (PATCH semantics: omitted = leave alone,
     # empty string = delete).
 
@@ -51,4 +56,6 @@ def put_settings(patch: SettingsPatch) -> dict:
             update["baseline_install_path"] = None  # delete
     if "backup_mode" in fields:
         update["backup_mode"] = fields["backup_mode"] or None
+    if "setup_offered_installs" in fields:
+        update["setup_offered_installs"] = fields["setup_offered_installs"] or None
     return get_state().update_settings(update)

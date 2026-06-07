@@ -456,3 +456,72 @@ export interface GraphicsDeployResult {
   actions: string[];
   backup_id: string;
 }
+
+// ---- INI presets + setup flow (MercForge UI Phase 3) ----
+
+export interface IniPresetChange {
+  ini_file: string;
+  section: string;
+  key: string;
+  value: string | null;
+  delete: boolean;
+  target: "override" | "canon" | null;
+}
+
+export interface IniPreset {
+  id: string; // wire id: "builtin:x" | "install:y"
+  name: string;
+  description: string;
+  default_target: "override" | "canon";
+  source: "builtin" | "install";
+  effect_timing: "new_game" | "relaunch";
+  savegame_risk: boolean;
+  apply_disabled: string | null;
+  warnings: string[];
+  changes: IniPresetChange[];
+}
+
+export interface IniPresetsResponse {
+  presets: IniPreset[];
+  file_warnings: string[];
+}
+
+export interface PresetDryRunFile {
+  ini_file: string;
+  path: string;
+  preset?: string;
+  changes: Array<{ section: string; key: string; value: string | null; current: string | null }>;
+}
+
+export interface PresetApplyResult {
+  ok: boolean;
+  dry_run: boolean;
+  preset: string;
+  batches?: Array<{ target: string; files: PresetDryRunFile[] }>;
+  applied?: number;
+  backup_id?: string;
+  effect_timing: string;
+  savegame_risk?: boolean;
+}
+
+export interface SetupDisplayState {
+  renderer: "cnc-ddraw" | "engine";
+  windowed: boolean;
+  resolution: string | null;
+  available_resolutions: Array<string | { code: number; label: string }>;
+}
+
+export interface SetupState {
+  display: SetupDisplayState;
+  intro: Record<string, string | undefined>;
+  graphics: GraphicsStatusResponse;
+  offered: boolean;
+}
+
+export interface SetupApplyResult {
+  ok: boolean;
+  dry_run: boolean;
+  plan?: PresetDryRunFile[];
+  applied?: number;
+  backup_id?: string;
+}

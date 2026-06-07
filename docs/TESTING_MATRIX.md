@@ -624,6 +624,34 @@ Notes:
 | GFX-4 | Deploy merges | Deploy on an install with runtimes | Golden keys applied, user keys/comments preserved, backup taken | |
 | GFX-5 | Golden verified in-game | Deploy, launch | xBRZ/ReShade look active; `ja2_remastered.ini` preset loaded | 🎮 |
 
+## PRE — INI presets
+
+| ID | Test | Steps | Expected | 🎮 |
+|----|------|-------|---------|----|
+| PRE-1 | Builtins listed | INI Editor → Presets | easier_combat, harder_combat, quality_of_life listed with change counts + timing notes | |
+| PRE-2 | Preview shows current→new | Preview a preset | Table per file; current values populated; no-op rows greyed "no change" | |
+| PRE-3 | Apply writes override | Apply easier_combat | `Ja2_Options.Override` contains exactly its keys; canon untouched; backup taken | |
+| PRE-4 | Stacking legible | Apply harder, then preview easier | Preview's current column shows harder's values | |
+| PRE-5 | Save as preset | Override mode with overrides → Save as preset | Dialog checklist; saved to `MercForgePresets.json`; appears under "This install" | |
+| PRE-6 | Save disabled in Edit INI | Switch to Edit INI mode | "Save as preset" greyed with reason | |
+| PRE-7 | Builtin delete refused | DELETE a builtin via API/UI | 403; install presets deletable | |
+| PRE-8 | Corrupt file non-fatal | Hand-corrupt MercForgePresets.json | Warning shown; builtins still listed | |
+| PRE-9 | Preset values engine-accepted | Apply harder_combat, launch, new game | No iniErrorReport range errors for its keys | 🎮 |
+
+## SET — Setup flow
+
+| ID | Test | Steps | Expected | 🎮 |
+|----|------|-------|---------|----|
+| SET-1 | First-run offer | Register a fresh install → Hub | "New install registered" banner, last in banner block; Dismiss persists across restarts | |
+| SET-2 | Rail is non-linear | Click steps in any order | Each step reachable; no forced Next-chain | |
+| SET-3 | Keep-current defaults | Open every step | First radio = "Keep current (<value>)", pre-selected | |
+| SET-4 | Nothing written until Review | Stage choices, Close before Review | No files modified | |
+| SET-5 | ddraw-aware display | Install with ddraw.dll+ddraw.ini | Step says writes to ddraw.ini; applies windowed/inject_resolution there; Ja2.ini untouched | |
+| SET-6 | Engine display fallback | Install without cnc-ddraw | Step writes SCREEN_RESOLUTION/SCREEN_MODE_WINDOWED to Ja2.ini | |
+| SET-7 | One batch + honest backups | Apply staged changes | One backup for INI batch; graphics deploy (if chosen) reports its own; completion lists both | |
+| SET-8 | Graphics never dead-ends | Fresh install, runtimes missing | Graphics step shows "set up later" note; flow continues to Review | |
+| SET-9 | Setup respected in-game | Apply windowed + difficulty, launch | Window mode honored; new game reflects difficulty | 🎮 |
+
 ## GS — Game status
 
 | ID | Test | Steps | Expected | 🎮 |

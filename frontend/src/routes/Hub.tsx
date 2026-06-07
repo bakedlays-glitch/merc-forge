@@ -8,8 +8,10 @@ import {
   getGameStatus,
   getHealth,
   getIniDiagnostic,
+  getSetupState,
   launchGame,
   listInstalls,
+  markSetupOffered,
   setActiveInstall,
 } from "../lib/api";
 import type { InstallInfo } from "../lib/schema";
@@ -372,10 +374,13 @@ export default function Hub() {
 
       {/* Install-level diagnostics. Each banner renders nothing when
           its check passes; they only surface real install-level
-          issues. Pulled out of per-merc displays per bug #1 / bug #9. */}
+          issues. Pulled out of per-merc displays per bug #1 / bug #9.
+          SetupOfferBanner is LAST — it's the lowest-severity item
+          (optional convenience vs. real misconfigurations above). */}
       <div className="mb-6 space-y-3">
         <VfsMismatchBanner />
         <FaceGearOrphanBanner />
+        {active && <SetupOfferBanner />}
       </div>
 
       <h2 className="text-xl text-wasteland-100 mb-4">What would you like to do?</h2>
@@ -429,6 +434,41 @@ export default function Hub() {
           {formatApiError(launch.error)}
         </div>
       )}
+    </div>
+  );
+}
+
+// First-run setup offer — shown once per install (persisted server-side),
+// last in the banner block (lowest severity). Dismiss and Run both mark
+// the install offered; the flow itself also marks on open.
+function SetupOfferBanner() {
+  const qc = useQueryClient();
+  const setupState = useQuery({ queryKey: ["setup-state"], queryFn: getSetupState });
+  const dismiss = useMutation({
+    mutationFn: markSetupOffered,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["setup-state"] }),
+  });
+
+  if (!setupState.data || setupState.data.offered) return null;
+
+  return (
+    <div className="flex items-center justify-between gap-4 rounded border border-wasteland-700 bg-wasteland-900 px-4 py-3">
+      <div className="text-sm text-wasteland-300">
+        <span className="font-medium text-wasteland-100">New install registered.</span>{" "}
+        Optional setup can set display, difficulty, and graphics in one pass.
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        <Link to="/setup" className="btn-primary text-xs">
+          Run setup
+        </Link>
+        <button
+          className="btn-ghost text-xs"
+          onClick={() => dismiss.mutate()}
+          disabled={dismiss.isPending}
+        >
+          Dismiss
+        </button>
+      </div>
     </div>
   );
 }

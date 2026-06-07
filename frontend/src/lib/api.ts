@@ -2021,3 +2021,61 @@ export async function getGraphicsStatus(): Promise<GraphicsStatusResponse> {
 export async function deployGraphics(): Promise<GraphicsDeployResult> {
   return request<GraphicsDeployResult>("/graphics/deploy", { method: "POST" });
 }
+
+// ---- INI presets + setup flow (MercForge UI Phase 3) ----
+
+import type {
+  IniPresetsResponse,
+  PresetApplyResult,
+  SetupApplyResult,
+  SetupState,
+} from "./schema";
+
+export async function getIniPresets(): Promise<IniPresetsResponse> {
+  return request<IniPresetsResponse>("/ini/presets");
+}
+
+export async function applyIniPreset(id: string, dryRun = false): Promise<PresetApplyResult> {
+  return request<PresetApplyResult>("/ini/presets/apply", {
+    method: "POST",
+    body: JSON.stringify({ id, dry_run: dryRun }),
+  });
+}
+
+export async function createIniPreset(payload: {
+  name: string;
+  description?: string;
+  default_target?: "override" | "canon";
+  changes: Array<{ ini_file: string; section: string; key: string; value: string }>;
+}): Promise<unknown> {
+  return request<unknown>("/ini/presets", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteIniPreset(wireId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/ini/presets/${encodeURIComponent(wireId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getSetupState(): Promise<SetupState> {
+  return request<SetupState>("/setup/state");
+}
+
+export async function setupApply(payload: {
+  display?: { windowed?: boolean; resolution?: string };
+  intro?: { play_intro?: boolean; tooltip_scale?: number };
+  preset_ids?: string[];
+  dry_run?: boolean;
+}): Promise<SetupApplyResult> {
+  return request<SetupApplyResult>("/setup/apply", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function markSetupOffered(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/setup/offered", { method: "POST" });
+}

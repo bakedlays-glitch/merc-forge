@@ -23,6 +23,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   applyIniChanges,
+  createIniPreset,
   formatApiError,
   getAppSettings,
   getGameStatus,
@@ -33,6 +34,7 @@ import {
   getIniSummary,
   openProfileFolder,
 } from "../lib/api";
+import IniPresetsPanel from "../components/IniPresetsPanel";
 import type {
   IniChangeItem,
   IniEffectiveEntry,
@@ -104,6 +106,8 @@ export default function IniEditor() {
   const [search, setSearch] = useState("");
   const [thisFileOnly, setThisFileOnly] = useState(false);
   const [myChangesOnly, setMyChangesOnly] = useState(false);
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const [savePresetOpen, setSavePresetOpen] = useState(false);
   const [editIniGateOpen, setEditIniGateOpen] = useState(false);
   const [pendingEditIniWrite, setPendingEditIniWrite] = useState<(() => void) | null>(null);
 
@@ -354,6 +358,36 @@ export default function IniEditor() {
           </button>
 
           <button
+            className={
+              "text-sm px-3 py-1.5 rounded border " +
+              (presetsOpen
+                ? "border-rust-500 text-rust-300 bg-rust-500/10"
+                : "border-wasteland-700 text-wasteland-400 hover:text-wasteland-200")
+            }
+            onClick={() => {
+              setPresetsOpen((v) => !v);
+              setSearch("");
+            }}
+          >
+            Presets
+          </button>
+
+          <button
+            className="text-xs text-wasteland-400 hover:text-rust-400 underline underline-offset-2 disabled:opacity-40 disabled:no-underline"
+            disabled={mode !== "override" || !(overridesQ.data?.overrides.length)}
+            title={
+              mode !== "override"
+                ? "Presets are saved from Override mode (Edit INI changes are diffs against your reference install, not portable values)"
+                : !overridesQ.data?.overrides.length
+                  ? "No overrides to save"
+                  : "Save the current overrides as an install preset"
+            }
+            onClick={() => setSavePresetOpen(true)}
+          >
+            Save as preset
+          </button>
+
+          <button
             className="text-xs text-wasteland-400 hover:text-rust-400 underline underline-offset-2"
             onClick={() => void openProfileFolder().catch(() => undefined)}
             title="Open the active campaign's profile folder in Explorer"
@@ -446,7 +480,9 @@ export default function IniEditor() {
         </div>
 
         {/* ── Body ── */}
-        {searchResults ? (
+        {presetsOpen ? (
+          <IniPresetsPanel />
+        ) : searchResults ? (
           <SearchResults
             results={searchResults}
             currentFile={file}
@@ -536,6 +572,18 @@ export default function IniEditor() {
               )}
             </div>
           </div>
+        )}
+
+        {savePresetOpen && overridesQ.data && (
+          <SavePresetDialog
+            overrides={overridesQ.data.overrides}
+            onClose={() => setSavePresetOpen(false)}
+            onSaved={() => {
+              setSavePresetOpen(false);
+              qc.invalidateQueries({ queryKey: ["ini-presets"] });
+              setPresetsOpen(true);
+            }}
+          />
         )}
 
         {/* Edit-INI first-write-of-session gate */}
@@ -1003,5 +1051,119 @@ function ValueEditor({
       onKeyDown={keys}
       onBlur={onCommit}
     />
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────
+//  Save-as-preset dialog (Override mode only — see button title)
+// ───────────────────────────────────────────────────────────────────────
+
+function SavePresetDialog({
+  overrides,
+  onClose,
+  onSaved,
+}: {
+  overrides: Array<{ ini_file: string; section: string; key: string; value: string }>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [checked, setChecked] = useState<Set<number>>(
+    () => new Set(overrides.map((_, i) => i)),
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = (i: number) =>
+    setChecked((s) => {
+      const n = new Set(s);
+      if (n.has(i)) n.delete(i);
+      else n.add(i);
+      return n;
+    });
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await createIniPreset({
+        name: name.trim(),
+        description: description.trim(),
+        changes: overrides
+          .filter((_, i) => checked.has(i))
+          .map((o) => ({
+            ini_file: o.ini_file, section: o.section, key: o.key, value: o.value,
+          })),
+      });
+      onSaved();
+    } catch (e) {
+      setError(formatApiError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="w-[36rem] max-w-[92vw] max-h-[85vh] overflow-y-auto rounded-lg border border-wasteland-700 bg-wasteland-900 p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
+        <h3 className="text-base font-semibold mb-3">Save overrides as preset</h3>
+        <div className="space-y-2 mb-3">
+          <input
+            className="input w-full"
+            placeholder="Preset name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
+          <input
+            className="input w-full"
+            placeholder="Description (optional)"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </div>
+        <p className="text-xs text-wasteland-500 mb-1">
+          {checked.size} of {overrides.length} overrides included. Saved to{" "}
+          <code className="font-mono">MercForgePresets.json</code> in the install.
+        </p>
+        <div className="max-h-60 overflow-y-auto border border-wasteland-800 rounded mb-3">
+          {overrides.map((o, i) => (
+            <label
+              key={`${o.ini_file}/${o.section}/${o.key}`}
+              className="flex items-center gap-2 px-2 py-1 text-xs border-b border-wasteland-800 last:border-0 cursor-pointer hover:bg-wasteland-800"
+            >
+              <input type="checkbox" checked={checked.has(i)} onChange={() => toggle(i)} />
+              <span className="text-wasteland-500">{o.ini_file}</span>
+              <span className="font-mono text-wasteland-200 flex-1 truncate">
+                {o.section} · {o.key}
+              </span>
+              <span className="font-mono text-wasteland-300">{o.value}</span>
+            </label>
+          ))}
+        </div>
+        {error && <div className="text-xs text-red-300 mb-2">{error}</div>}
+        <div className="flex justify-end gap-2">
+          <button className="btn-ghost text-sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="btn-primary text-sm"
+            disabled={busy || !name.trim() || checked.size === 0}
+            onClick={() => void save()}
+          >
+            {busy ? "Saving…" : "Save preset"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

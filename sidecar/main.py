@@ -183,6 +183,7 @@ from routes import (
     graphics,
     health,
     ini_editor,
+    ini_presets,
     installs,
     mapforge,
     mapforge_library,
@@ -190,6 +191,7 @@ from routes import (
     portrait,
     roster,
     saves,
+    setup,
     slot_picker,
     slots,
     tools,
@@ -282,6 +284,8 @@ def create_app() -> FastAPI:
     app.include_router(ini_editor.router, prefix=api_prefix, tags=["ini"])
     app.include_router(app_settings.router, prefix=api_prefix, tags=["settings"])
     app.include_router(graphics.router, prefix=api_prefix, tags=["graphics"])
+    app.include_router(ini_presets.router, prefix=api_prefix, tags=["ini"])
+    app.include_router(setup.router, prefix=api_prefix, tags=["setup"])
     app.include_router(game.router, prefix=api_prefix, tags=["game"])
     app.include_router(saves.router, prefix=api_prefix, tags=["saves"])
     app.include_router(slots.router, prefix=api_prefix, tags=["slots"])

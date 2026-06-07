@@ -687,15 +687,33 @@ class IniEditor:
             plans.append((canon, path, file_changes))
 
         if dry_run:
-            return {
-                "applied": 0, "dry_run": True,
-                "files": [{
+            # Per-change `current` = the effective value the engine sees
+            # today, so previews can render current -> new without client
+            # fan-out (adversarial-review finding: the preview table was
+            # unbuildable from the old shape).
+            files = []
+            for canon, path, fc in plans:
+                try:
+                    eff = self.effective(canon)["sections"]
+                except IniEditorError:
+                    eff = {}
+
+                def _cur(section: str, key: str) -> Optional[str]:
+                    for sname, keys in eff.items():
+                        if sname.lower() == section.lower():
+                            for k, v in keys.items():
+                                if k.lower() == key.lower():
+                                    return v.get("value")
+                    return None
+
+                files.append({
                     "ini_file": canon, "path": str(path),
                     "changes": [
-                        {"section": c.section, "key": c.key, "value": c.value}
+                        {"section": c.section, "key": c.key, "value": c.value,
+                         "current": _cur(c.section, c.key)}
                         for c in fc],
-                } for canon, path, fc in plans],
-            }
+                })
+            return {"applied": 0, "dry_run": True, "files": files}
 
         results = []
         header = (

@@ -1,0 +1,14 @@
+{
+ "id": "easier_combat",
+ "name": "Easier combat",
+ "description": "Lowers enemy accuracy, equipment quality, and damage resistance. Takes effect on the next new game.",
+ "default_target": "override",
+ "changes": [
+  {"ini_file": "Ja2_Options.ini", "section": "Tactical Difficulty Settings", "key": "ADMIN_CTH_BONUS_PERCENT", "value": "-15"},
+  {"ini_file": "Ja2_Options.ini", "section": "Tactical Difficulty Settings", "key": "REGULAR_CTH_BONUS_PERCENT", "value": "-10"},
+  {"ini_file": "Ja2_Options.ini", "section": "Tactical Difficulty Settings", "key": "ELITE_CTH_BONUS_PERCENT", "value": "0"},
+  {"ini_file": "Ja2_Options.ini", "section": "Tactical Difficulty Settings", "key": "ADMIN_EQUIPMENT_QUALITY_MODIFIER", "value": "-1"},
+  {"ini_file": "Ja2_Options.ini", "section": "Tactical Difficulty Settings", "key": "REGULAR_EQUIPMENT_QUALITY_MODIFIER", "value": "-1"},
+  {"ini_file": "Ja2_Options.ini", "section": "Tactical Difficulty Settings", "key": "ELITE_DAMAGE_RESISTANCE", "value": "0"}
+ ]
+}

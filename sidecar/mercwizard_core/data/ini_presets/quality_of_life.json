@@ -1,0 +1,10 @@
+{
+ "id": "quality_of_life",
+ "name": "Quality of life",
+ "description": "Skips the intro video and enlarges tooltips. Written to Ja2.ini; applies to all campaigns on this install.",
+ "default_target": "override",
+ "changes": [
+  {"ini_file": "Ja2.ini", "section": "Ja2 Settings", "key": "PLAY_INTRO", "value": "0"},
+  {"ini_file": "Ja2.ini", "section": "Ja2 Settings", "key": "TOOLTIP_SCALE_FACTOR", "value": "150"}
+ ]
+}

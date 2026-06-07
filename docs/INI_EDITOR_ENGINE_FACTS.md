@@ -200,3 +200,13 @@ Verified samples (GameSettings.cpp:955-967):
    every API response; `compute_vfs_mismatch` check before writes.
 5. Ja2.ini edits are install-global (affect all campaigns) — UI labels
    them as such.
+6. **Presets** (docs/INI_PRESETS_SPEC.md) inherit all of the above via
+   per-change targets: Ja2.ini changes are coerced to direct writes at
+   load time; AI.ini-under-override disables apply at load; every preset
+   carries `effect_timing` derived from §5's re-read table (most =
+   next new game; Item/Mod_Settings + Ja2.ini = relaunch) and a
+   `savegame_risk` flag from §5's System-Limit rule. **Display settings
+   are renderer-owned**: under cnc-ddraw, `ddraw.ini` controls the
+   window (`inject_resolution`, `windowed`) and Ja2.ini's
+   SCREEN_RESOLUTION only sizes the internal buffer — the setup flow
+   detects this and writes the file that actually owns the window.
