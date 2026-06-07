@@ -173,12 +173,14 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from routes import (
+    app_settings,
     backgrounds,
     backup,
     bundle,
     facegear,
     game,
     gear,
+    graphics,
     health,
     ini_editor,
     installs,
@@ -278,6 +280,8 @@ def create_app() -> FastAPI:
     app.include_router(bundle.router, prefix=api_prefix, tags=["bundle"])
     app.include_router(backup.router, prefix=api_prefix, tags=["backup"])
     app.include_router(ini_editor.router, prefix=api_prefix, tags=["ini"])
+    app.include_router(app_settings.router, prefix=api_prefix, tags=["settings"])
+    app.include_router(graphics.router, prefix=api_prefix, tags=["graphics"])
     app.include_router(game.router, prefix=api_prefix, tags=["game"])
     app.include_router(saves.router, prefix=api_prefix, tags=["saves"])
     app.include_router(slots.router, prefix=api_prefix, tags=["slots"])

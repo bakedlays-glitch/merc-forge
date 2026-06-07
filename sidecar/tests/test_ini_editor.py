@@ -529,3 +529,105 @@ def test_route_changes_ai_ini_play_refused(client: TestClient, registered: dict)
     })
     assert r.status_code == 422
     assert r.json()["detail"]["error"] == "PLAY_MODE_UNSUPPORTED"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  UI Phase: diagnostics, summary, settings, game status
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _write_engine_logs(profile: Path) -> None:
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "vfs.log").write_text(
+        " *** Sat Jun  6 21:26:19 2026 *** \n"
+        "[0.476243] :   Reading profile : SLF Libs\n"
+        '[0.476248] :     library : "Data\Ambient.slf"\n'
+        "[0.600463] :   Reading profile : v1.13\n"
+        '[0.600464] :     directory : "Data-1.13"\n')
+    (profile / "iniErrorReport.log").write_text(
+        " *** Sat Jun  6 21:26:19 2026 *** \n"
+        "[ FAKE1-CDKEY-99999 ]\n"
+        '[3.28e-05] : The value [System Limit Settings][MAX_NUMBER_PLAYER_MERCS] = "9999" '
+        "in file [Ja2_Options.ini] is outside the valid range [1 , 254].  254 will be used.\n"
+        'The value [System Limit Settings][MAX_NUMBER_PLAYER_MERCS] = "9999" '
+        "in file [Ja2_Options.ini] is outside the valid range [1 , 254].  254 will be used.\n"
+        'The value [JA2 Game Settings][TOPTION_X] = "" is neither TRUE nor FALSE. FALSE used.\n')
+
+
+def test_diagnostic_parses_dedupes_and_strips_cdkey(vfs_install: Path):
+    from mercwizard_core.ini_editor import diagnostic_report
+    _write_engine_logs(vfs_install / "Profiles" / "UserProfile_JA2113")
+    rep = diagnostic_report(parse_vfs_config(vfs_install))
+    assert rep["writable_profile"] == "UserProf"
+    assert len(rep["vfs_layers"]) == 2
+    assert rep["vfs_layers"][1] == {"name": "v1.13", "kind": "directory", "path": "Data-1.13"}
+    # duplicate out_of_range rows deduped to one; empty_toption classified noise
+    kinds = [e["kind"] for e in rep["errors"]]
+    assert kinds.count("out_of_range") == 1
+    assert kinds.count("empty_toption") == 1
+    assert rep["first_boot_noise_count"] == 1
+    # CD-key never echoed
+    assert "FAKE1" not in str(rep)
+    assert rep["last_launch_raw"].startswith("Sat Jun")
+
+
+def test_diagnostic_empty_when_no_logs(editor: IniEditor):
+    from mercwizard_core.ini_editor import diagnostic_report
+    rep = diagnostic_report(editor.layout)
+    assert rep["errors"] == [] and rep["vfs_layers"] == []
+
+
+def test_summary_counts_play_and_author(tmp_path: Path):
+    from mercwizard_core.ini_editor import summary
+    install = make_vfs_install(tmp_path / "install")
+    baseline = make_vfs_install(tmp_path / "ref")
+    (baseline / "Data-1.13" / "Ja2_Options.ini").write_bytes(
+        b"[System Limit Settings]\r\nMAX_NUMBER_PLAYER_MERCS = 24\r\n"
+        b"MAX_NUMBER_ENEMIES_IN_TACTICAL = 64\r\n")
+    editor = IniEditor(parse_vfs_config(install), baseline_root=baseline)
+    editor.apply_changes(
+        [IniChange("Generic Traits Settings", "MAX_NUMBER_OF_TRAITS", "12",
+                   ini_file="Skills_Settings.INI")], target="override")
+    rows = {r["ini_file"]: r for r in summary(editor)}
+    assert rows["Skills_Settings.INI"]["override_changed"] == 1
+    assert rows["Skills_Settings.INI"]["play_sections"] == {"Generic Traits Settings": 1}
+    # Author diff: install ships MERCS=40 vs reference 24 → 1 changed;
+    # ENEMIES matches (64 = 64) → not counted.
+    assert rows["Ja2_Options.ini"]["author_changed"] == 1
+    assert rows["Ja2_Options.ini"]["author_sections"] == {"System Limit Settings": 1}
+
+
+def test_route_diagnostic_and_summary(client: TestClient, registered: dict):
+    _write_engine_logs(Path(registered["root"]) / "Profiles" / "UserProfile_JA2113")
+    r = client.get("/api/v1/ini/diagnostic")
+    assert r.status_code == 200, r.text
+    assert r.json()["first_boot_noise_count"] == 1
+    r2 = client.get("/api/v1/ini/summary")
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert any(f["ini_file"] == "Ja2_Options.ini" for f in body["files"])
+    assert body["baseline"] is None  # none configured
+
+
+def test_route_settings_roundtrip(client: TestClient, registered: dict, tmp_path: Path):
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200 and r.json() == {}
+    ref = tmp_path / "refdir"; ref.mkdir()
+    r2 = client.put("/api/v1/settings", json={"baseline_install_path": str(ref)})
+    assert r2.status_code == 200 and r2.json()["baseline_install_path"] == str(ref)
+    # bad path rejected
+    r3 = client.put("/api/v1/settings", json={"baseline_install_path": "C:/nope/nope"})
+    assert r3.status_code == 400
+    assert r3.json()["detail"]["error"] == "BASELINE_NOT_FOUND"
+    # clear with empty string
+    r4 = client.put("/api/v1/settings", json={"baseline_install_path": ""})
+    assert r4.status_code == 200 and "baseline_install_path" not in r4.json()
+
+
+def test_route_game_status(client: TestClient, registered: dict, monkeypatch):
+    import routes.game as game_routes
+    monkeypatch.setattr(game_routes, "game_running", lambda exe: True)
+    r = client.get("/api/v1/game/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["running"] is True and body["by"] == "image_name"

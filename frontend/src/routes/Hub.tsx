@@ -2,7 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
-import { applyVfsConfig, formatApiError, getHealth, launchGame, listInstalls, setActiveInstall } from "../lib/api";
+import {
+  applyVfsConfig,
+  formatApiError,
+  getGameStatus,
+  getHealth,
+  getIniDiagnostic,
+  launchGame,
+  listInstalls,
+  setActiveInstall,
+} from "../lib/api";
 import type { InstallInfo } from "../lib/schema";
 import FaceGearOrphanBanner from "../components/FaceGearOrphanBanner";
 import VfsMismatchBanner from "../components/VfsMismatchBanner";
@@ -45,6 +54,13 @@ const primary = [
 ];
 
 const secondary = [
+  {
+    id: "ini-editor",
+    label: "INI Editor",
+    href: "/ini-editor",
+    icon: "🎛️",
+    description: "Edit engine settings across 15 INI files: combat, economy, skills, AI. Override mode writes per-campaign override files; Edit INI mode modifies the files directly.",
+  },
   {
     id: "backgrounds",
     label: "Backgrounds",
@@ -125,7 +141,27 @@ export default function Hub() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["installs"] });
       qc.invalidateQueries({ queryKey: ["health"] });
+      // Apply-VFS changes the engine's active campaign → the INI editor's
+      // profile root / override file / effective values are all stale now.
+      // (2026-06-07 review finding: this path doesn't go through the
+      // install-switch resetQueries(), so invalidate explicitly.)
+      qc.invalidateQueries({ queryKey: ["ini-effective"] });
+      qc.invalidateQueries({ queryKey: ["ini-overrides"] });
+      qc.invalidateQueries({ queryKey: ["ini-summary"] });
+      qc.invalidateQueries({ queryKey: ["ini-schemas"] });
     },
+  });
+  const gameStatus = useQuery({
+    queryKey: ["game-status"],
+    queryFn: getGameStatus,
+    refetchInterval: 5000,
+    enabled: Boolean(health.data?.active_install_id),
+  });
+  const diagnostic = useQuery({
+    queryKey: ["ini-diagnostic"],
+    queryFn: getIniDiagnostic,
+    staleTime: 30_000,
+    enabled: Boolean(health.data?.active_install_id),
   });
 
   const active = installs.data?.find((i) => i.id === health.data?.active_install_id);
@@ -296,9 +332,41 @@ export default function Hub() {
               card here was deleted 2026-05-25. */}
         </div>
         {active && (
-          <button className="btn-primary ml-4" onClick={() => launch.mutate()} disabled={launch.isPending}>
-            {launch.isPending ? "Launching..." : "Launch JA2"}
-          </button>
+          <div className="ml-4 flex flex-col items-end gap-1">
+            <button
+              className="btn-primary"
+              onClick={() => launch.mutate()}
+              disabled={launch.isPending || Boolean(gameStatus.data?.running)}
+              title={gameStatus.data?.running ? "ja2.exe is already running" : undefined}
+            >
+              {gameStatus.data?.running
+                ? "JA2 is running"
+                : launch.isPending
+                  ? "Launching..."
+                  : "Launch JA2"}
+            </button>
+            {/* Last-launch health chip — deep-links to the INI editor where
+                the offending keys can actually be fixed. */}
+            {diagnostic.data?.last_launch_raw && (
+              <Link
+                to="/ini-editor"
+                className={
+                  "text-xs underline underline-offset-2 " +
+                  (diagnostic.data.errors.filter((e) => !e.is_first_boot_noise).length > 0
+                    ? "text-amber-400 hover:text-amber-200"
+                    : "text-wasteland-500 hover:text-wasteland-300")
+                }
+                title={`Last launch: ${diagnostic.data.last_launch_raw}`}
+              >
+                {(() => {
+                  const real = diagnostic.data.errors.filter((e) => !e.is_first_boot_noise).length;
+                  return real > 0
+                    ? `${real} INI error${real === 1 ? "" : "s"} last launch`
+                    : "Last launch: no INI errors";
+                })()}
+              </Link>
+            )}
+          </div>
         )}
       </div>
 

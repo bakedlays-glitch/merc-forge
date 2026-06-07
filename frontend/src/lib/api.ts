@@ -58,6 +58,21 @@ const ERROR_MESSAGES: Record<string, string> = {
   NO_VFS_CONFIG: "This install has no specific vfs_config bound — nothing to apply. Pick a mod profile in the FirstRun wizard first.",
   EXE_NOT_FOUND: "Couldn't find ja2.exe under the active install. Check the install path in Settings.",
 
+  // ── INI editor ───────────────────────────────────────────────────────
+  GAME_RUNNING: "JA2 is running — the engine rewrites its config files on save/exit, so INI edits are blocked until you close the game.",
+  PLAY_MODE_UNSUPPORTED: "This file has no per-campaign override mechanism in the engine. Switch to Author mode to edit it (changes the shipped file).",
+  VFS_CONFIG_BROKEN: "This install's VFS config couldn't be parsed — fix Ja2.ini's VFS_CONFIG_INI line (or the vfs_config file) before editing.",
+  BASELINE_NOT_FOUND: "The reference-install path doesn't exist. Update it in Settings.",
+  INI_FILE_UNKNOWN: "That isn't one of the editable INI files.",
+  SCHEMA_NOT_FOUND: "No schema is bundled for that INI file.",
+  JA2_INI_NOT_FOUND: "No Ja2.ini found at the install root.",
+  BAD_VALUE: "That value can't be written (newlines aren't allowed).",
+  BAD_SECTION: "Invalid section name.",
+  BAD_KEY: "Invalid key name.",
+  BAD_TARGET: "Internal: unknown write target.",
+  WRITE_SELFCHECK_FAILED: "The write didn't verify cleanly and was rolled back — the file is unchanged. Check the file isn't locked, then retry.",
+  NO_PROFILE_FOLDER: "This campaign has no profile folder yet — launch the game once to create it.",
+
   // ── Auth ─────────────────────────────────────────────────────────────
   UNAUTHORIZED: "The sidecar rejected the auth token. Restart Merc Forge so the shell and sidecar share a fresh token.",
 
@@ -1922,4 +1937,87 @@ export function getSavesRefs(slot: number, install_id?: string) {
   params.set("slot", String(slot));
   if (install_id) params.set("install_id", install_id);
   return request<SavesRefsTargeted>(`/saves/refs?${params.toString()}`);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+//  INI editor + game status + app settings (MercForge UI Phase 2)
+// ───────────────────────────────────────────────────────────────────────
+
+import type {
+  AppSettings,
+  GameStatus,
+  IniApplyResult,
+  IniChangeItem,
+  IniDiagnostic,
+  IniEffectiveResponse,
+  IniOverridesResponse,
+  IniSchemaDoc,
+  IniSchemasResponse,
+  IniSummaryResponse,
+} from "./schema";
+
+export async function getIniSchemas(): Promise<IniSchemasResponse> {
+  return request<IniSchemasResponse>("/ini/schemas");
+}
+
+export async function getIniSchema(file: string): Promise<IniSchemaDoc> {
+  return request<IniSchemaDoc>(`/ini/schema/${encodeURIComponent(file)}`);
+}
+
+export async function getIniEffective(file: string): Promise<IniEffectiveResponse> {
+  return request<IniEffectiveResponse>(`/ini/effective/${encodeURIComponent(file)}`);
+}
+
+export async function getIniOverrides(): Promise<IniOverridesResponse> {
+  return request<IniOverridesResponse>("/ini/overrides");
+}
+
+export async function getIniSummary(): Promise<IniSummaryResponse> {
+  return request<IniSummaryResponse>("/ini/summary");
+}
+
+export async function getIniDiagnostic(): Promise<IniDiagnostic> {
+  return request<IniDiagnostic>("/ini/diagnostic");
+}
+
+export async function applyIniChanges(payload: {
+  target: "canon" | "override";
+  changes: IniChangeItem[];
+  dry_run?: boolean;
+}): Promise<IniApplyResult> {
+  return request<IniApplyResult>("/ini/changes", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function openProfileFolder(): Promise<{ ok: boolean; opened: string }> {
+  return request<{ ok: boolean; opened: string }>("/ini/open-profile-folder", {
+    method: "POST",
+  });
+}
+
+export async function getGameStatus(): Promise<GameStatus> {
+  return request<GameStatus>("/game/status");
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  return request<AppSettings>("/settings");
+}
+
+export async function updateAppSettings(patch: AppSettings): Promise<AppSettings> {
+  return request<AppSettings>("/settings", {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
+import type { GraphicsDeployResult, GraphicsStatusResponse } from "./schema";
+
+export async function getGraphicsStatus(): Promise<GraphicsStatusResponse> {
+  return request<GraphicsStatusResponse>("/graphics/status");
+}
+
+export async function deployGraphics(): Promise<GraphicsDeployResult> {
+  return request<GraphicsDeployResult>("/graphics/deploy", { method: "POST" });
 }

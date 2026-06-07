@@ -5,11 +5,17 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   addInstall,
   ApiError,
+  deployGraphics,
+  formatApiError,
+  getAppSettings,
+  getGraphicsStatus,
   getHealth,
   listInstalls,
   refreshInstalls,
   setActiveInstall,
+  updateAppSettings,
 } from "../lib/api";
+import ConfirmModal from "../components/ConfirmModal";
 import { isRunningInTauri, pickDirectory } from "../lib/tauri";
 
 /** True when a path lives under Windows' UAC-protected program dirs.
@@ -245,6 +251,30 @@ export default function Settings() {
       </section>
 
       <section className="card">
+        <h2 className="text-lg font-semibold mb-2">INI Editor — reference install</h2>
+        <p className="text-sm text-wasteland-300 mb-3">
+          The INI Editor's <strong>Edit INI</strong> mode can diff your mod's settings
+          against a <strong>reference install</strong> (e.g. the frozen base copy) and
+          offer "Reset to reference value". Note: this is a reference <em>you</em> pick
+          — not necessarily stock 1.13. Engine-true defaults are always shown per key
+          regardless.
+        </p>
+        <ReferenceInstallField />
+      </section>
+
+      <section className="card">
+        <h2 className="text-lg font-semibold mb-2">Graphics stack</h2>
+        <p className="text-sm text-wasteland-300 mb-3">
+          The "golden" JA2 look: cnc-ddraw (OpenGL + xBRZ upscale) + ReShade with
+          the 7-shader <code className="font-mono">ja2_remastered</code> preset.
+          Merc Forge can verify the active install's config against the golden
+          keys and re-apply them — the runtimes themselves (ddraw.dll, ReShade)
+          are external installs it checks for but doesn't ship.
+        </p>
+        <GraphicsStation />
+      </section>
+
+      <section className="card">
         <h2 className="text-lg font-semibold mb-2">Backups</h2>
         <p className="text-sm text-wasteland-300 mb-3">
           Every edit and save creates a snapshot of the affected files
@@ -369,6 +399,193 @@ function LogsLocation() {
         to open. The main files are <code>sidecar.log</code> (Python /
         FastAPI) and <code>shell_rCURRENT.log</code> (Tauri / Rust).
       </p>
+    </div>
+  );
+}
+
+function ReferenceInstallField() {
+  const qc = useQueryClient();
+  const settings = useQuery({ queryKey: ["app-settings"], queryFn: getAppSettings });
+  const [draft, setDraft] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: (path: string) => updateAppSettings({ baseline_install_path: path }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["app-settings"] });
+      qc.invalidateQueries({ queryKey: ["ini-effective"] });
+      qc.invalidateQueries({ queryKey: ["ini-summary"] });
+      setDraft(null);
+    },
+  });
+
+  const committed = settings.data?.baseline_install_path ?? "";
+  const value = draft ?? committed;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <input
+          className="input flex-1 font-mono text-sm"
+          placeholder="C:\Jagged Alliance 2\...  (folder containing JA2.exe + Data-1.13)"
+          value={value}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        {isRunningInTauri() && (
+          <button
+            className="btn-ghost text-sm"
+            onClick={async () => {
+              const picked = await pickDirectory("Pick the reference install folder");
+              if (picked) setDraft(picked);
+            }}
+          >
+            Browse…
+          </button>
+        )}
+        <button
+          className="btn-primary text-sm"
+          disabled={draft == null || draft === committed || save.isPending}
+          onClick={() => save.mutate(value)}
+        >
+          Save
+        </button>
+        {committed && (
+          <button
+            className="btn-ghost text-sm"
+            disabled={save.isPending}
+            onClick={() => save.mutate("")}
+            title="Clear the reference install"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      {save.isError && (
+        <div className="text-xs text-red-300">{formatApiError(save.error)}</div>
+      )}
+      {save.isSuccess && draft == null && (
+        <div className="text-xs text-emerald-300">✓ Saved.</div>
+      )}
+    </div>
+  );
+}
+
+function GraphicsStation() {
+  const qc = useQueryClient();
+  const status = useQuery({ queryKey: ["graphics-status"], queryFn: getGraphicsStatus });
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const deploy = useMutation({
+    mutationFn: deployGraphics,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["graphics-status"] });
+      setConfirmOpen(false);
+    },
+  });
+
+  const comps = status.data?.components ?? [];
+  const runtimesMissing = comps.filter((c) => c.kind === "runtime" && !c.present);
+  const customized = comps.filter(
+    (c) => c.kind !== "runtime" && c.present && !c.matches,
+  );
+  const allGreen = comps.length > 0 && comps.every((c) => c.matches);
+
+  const stateLabel = (c: (typeof comps)[number]) => {
+    if (c.kind === "runtime") {
+      return c.present ? (
+        <span className="text-emerald-400">✓ installed</span>
+      ) : (
+        <span className="text-wasteland-400">
+          ⛔ not installed
+          {c.download_url && (
+            <>
+              {" — "}
+              <a className="underline" href={c.download_url} target="_blank" rel="noreferrer">
+                download
+              </a>
+            </>
+          )}
+        </span>
+      );
+    }
+    if (!c.present) return <span className="text-amber-400">✗ missing (deploy will create)</span>;
+    if (c.matches) return <span className="text-emerald-400">✓ matches golden</span>;
+    return (
+      <span className="text-amber-300" title={(c.mismatched_keys ?? []).join(", ")}>
+        ⚠ differs — yours is customized
+        {c.mismatched_keys?.length ? ` (${c.mismatched_keys.length} key${c.mismatched_keys.length === 1 ? "" : "s"})` : ""}
+      </span>
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      {status.isError && (
+        <div className="text-xs text-red-300">{formatApiError(status.error)}</div>
+      )}
+      <table className="w-full text-sm">
+        <tbody>
+          {comps.map((c) => (
+            <tr key={c.component} className="border-b border-wasteland-800 last:border-0">
+              <td className="py-1.5 font-mono text-wasteland-200">{c.component}</td>
+              <td className="py-1.5 text-xs text-wasteland-500">{c.note}</td>
+              <td className="py-1.5 text-right text-xs">{stateLabel(c)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="flex items-center gap-3">
+        <button
+          className="btn-primary text-sm"
+          disabled={runtimesMissing.length > 0 || deploy.isPending || allGreen}
+          title={
+            runtimesMissing.length > 0
+              ? `Install the missing runtime${runtimesMissing.length === 1 ? "" : "s"} first: ${runtimesMissing.map((c) => c.component).join(", ")}`
+              : allGreen
+                ? "Everything already matches the golden config"
+                : undefined
+          }
+          onClick={() => setConfirmOpen(true)}
+        >
+          {deploy.isPending ? "Deploying…" : allGreen ? "✓ Golden config active" : "Deploy golden config"}
+        </button>
+        {deploy.isError && (
+          <span className="text-xs text-red-300">{formatApiError(deploy.error)}</span>
+        )}
+        {deploy.isSuccess && (
+          <span className="text-xs text-emerald-300">
+            ✓ {deploy.data.actions.join("; ")} (backup {deploy.data.backup_id})
+          </span>
+        )}
+      </div>
+
+      <ConfirmModal
+        open={confirmOpen}
+        title="Deploy golden graphics config?"
+        destructive={customized.length > 0}
+        body={
+          <div className="space-y-2 text-sm">
+            <p>
+              This merges the golden keys into <code className="font-mono">ddraw.ini</code> +{" "}
+              <code className="font-mono">ReShade.ini</code> (your other keys are preserved) and
+              copies the <code className="font-mono">ja2_remastered.ini</code> preset.
+            </p>
+            {customized.length > 0 && (
+              <div className="rounded border border-amber-700/60 bg-amber-900/20 p-2 text-xs text-amber-200">
+                ⚠ These files differ from golden — your customizations to the listed keys will be
+                overwritten:{" "}
+                {customized
+                  .map((c) => `${c.component} (${(c.mismatched_keys ?? []).join(", ") || "content"})`)
+                  .join("; ")}
+              </div>
+            )}
+            <p className="text-xs text-wasteland-400">
+              A backup snapshot of all three files is taken first (restorable from Backups).
+            </p>
+          </div>
+        }
+        confirmLabel="Deploy"
+        busy={deploy.isPending}
+        onConfirm={() => deploy.mutate()}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 # MercForge — Testing Matrix
 
-Last updated: 2026-05-31.
+Last updated: 2026-06-07 (added INI / GFX / GS sections — INI Editor, graphics station, game status).
 
 A release-checklist deliverable: every major MercForge feature mapped
 to:
@@ -593,6 +593,43 @@ Notes:
 ```
 
 ---
+
+## INI — INI Editor (Author/Play config editing)
+
+| ID | Test | Steps | Expected | 🎮 |
+|----|------|-------|---------|----|
+| INI-1 | Route loads | Hub → INI Editor tile | Editor opens on Ja2_Options.ini, Play mode, sections sidebar populated | |
+| INI-2 | Mode is session-scoped | Switch to Author, restart the app | Editor reopens in **Play** mode (Author never persists) | |
+| INI-3 | Play banner names exact file | Play mode, any file | Banner shows `Profiles\UserProfile_<Mod>\<stem>.Override` path | |
+| INI-4 | Cross-file search | Type `suppression` with "this file only" OFF | Results from multiple files, grouped, name-matches highlighted | |
+| INI-5 | Play override round-trip | Edit a non-risk key, Apply | Row flashes green, dot turns rust, `<stem>.Override` exists in the profile dir with ONLY that key | |
+| INI-6 | Remove override | Expanded row → Remove override | Value returns to canon, dot clears, override key gone from file | |
+| INI-7 | Savegame-risk gating | Try editing MAX_NUMBER_PLAYER_MERCS collapsed | Editor shows "expand to edit"; expanded → destructive confirm modal | |
+| INI-8 | Author first-write gate | Author mode, first apply of session | "Edit shipped canon?" confirm; second write doesn't re-ask | |
+| INI-9 | Author writes canon | Author mode, edit a key | Change lands in `Data-1.13\<file>` in place, comments preserved | |
+| INI-10 | AI.ini Play refusal | Select AI.ini in Play mode | Banner explains no override mechanism; editors disabled | |
+| INI-11 | Game-running guard | Launch JA2, try an edit | Red banner; write rejected with GAME_RUNNING (409) | 🎮 |
+| INI-12 | Engine reads the override | Set MAX_NUMBER_PLAYER_MERCS=9999 (Play), launch to menu | `iniErrorReport.log` logs the clamp line naming the key (the canary) | 🎮 |
+| INI-13 | Out-of-range advisory | Type a value above engine max | Inline amber "engine will clamp to N" warning; write still allowed | |
+| INI-14 | Reference diff | Set reference install in Settings, Author mode | "My changes" lists keys ≠ reference; "Reset to reference value" works | |
+| INI-15 | Health chip | After a launch with INI errors | Hub shows "⚠ N INI errors last launch"; click → INI editor | 🎮 |
+
+## GFX — Graphics stack station
+
+| ID | Test | Steps | Expected | 🎮 |
+|----|------|-------|---------|----|
+| GFX-1 | Status honest states | Settings → Graphics stack on a fresh install | Runtimes show "not installed — download"; configs "missing" | |
+| GFX-2 | Deploy guarded | Fresh install (no ddraw.dll) → Deploy | Button disabled with runtime-missing tooltip | |
+| GFX-3 | Customized warning | Hand-edit a golden key in ddraw.ini | Status "⚠ differs — yours is customized (N keys)"; deploy confirm lists them | |
+| GFX-4 | Deploy merges | Deploy on an install with runtimes | Golden keys applied, user keys/comments preserved, backup taken | |
+| GFX-5 | Golden verified in-game | Deploy, launch | xBRZ/ReShade look active; `ja2_remastered.ini` preset loaded | 🎮 |
+
+## GS — Game status
+
+| ID | Test | Steps | Expected | 🎮 |
+|----|------|-------|---------|----|
+| GS-1 | Running detection | Launch JA2 from Hub | Button flips to "🟢 JA2 is running" within ~5s, disabled | 🎮 |
+| GS-2 | Recovery | Close JA2 | Button returns to "Launch JA2" within ~5s | 🎮 |
 
 # Maintenance
 

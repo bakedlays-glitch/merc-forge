@@ -23,8 +23,10 @@ from mercwizard_core.ini_editor import (
     IniEditor,
     IniEditorError,
     canonical_ini_name,
+    diagnostic_report,
     list_schemas,
     load_schema,
+    summary as ini_summary,
     validate_against_schema,
 )
 from mercwizard_core.vfs import (
@@ -135,6 +137,9 @@ def get_effective(
 ) -> dict:
     info = _resolve_install(install_id)
     editor = _editor_for(info)
+    if not baseline:
+        # Fall back to the configured reference install (Settings page).
+        baseline = get_state().get_settings().get("baseline_install_path")
     if baseline:
         bp = Path(baseline)
         if not bp.is_dir():
@@ -161,6 +166,53 @@ def get_overrides(install_id: str | None = Query(default=None)) -> dict:
         "profile_root": str(ewp.profile_root) if ewp and ewp.profile_root else None,
         "overrides": editor.overrides(),
     }
+
+
+@router.get("/ini/diagnostic")
+def get_diagnostic(install_id: str | None = Query(default=None)) -> dict:
+    """Last-launch health: vfs layer list + classified iniErrorReport
+    rows from the active campaign's profile. CD-key line stripped,
+    duplicate rows deduped, log mtime included so the UI can flag
+    reports from a previous launch."""
+    info = _resolve_install(install_id)
+    editor = _editor_for(info)
+    return diagnostic_report(editor.layout)
+
+
+@router.get("/ini/summary")
+def get_summary(
+    install_id: str | None = Query(default=None),
+    baseline: str | None = Query(default=None),
+) -> dict:
+    """Per-file changed counts for the file selector. Play counts come
+    from one profile scan; Author counts only when a baseline (reference
+    install) path is supplied or configured in settings."""
+    info = _resolve_install(install_id)
+    editor = _editor_for(info)
+    base = baseline or get_state().get_settings().get("baseline_install_path")
+    if base:
+        bp = Path(base)
+        if bp.is_dir():
+            editor.baseline_root = bp
+    return {"files": ini_summary(editor),
+            "baseline": str(editor.baseline_root) if editor.baseline_root else None}
+
+
+@router.post("/ini/open-profile-folder")
+def open_profile_folder(install_id: str | None = Query(default=None)) -> dict:
+    """Open the active campaign's profile dir in Explorer (power-user
+    access to the raw logs + override files). Guarded to exactly the
+    resolved profile root."""
+    import subprocess
+    info = _resolve_install(install_id)
+    editor = _editor_for(info)
+    ewp = editor.layout.engine_write_profile()
+    if ewp is None or ewp.profile_root is None or not ewp.profile_root.is_dir():
+        raise HTTPException(status_code=404, detail={
+            "error": "NO_PROFILE_FOLDER",
+            "message": "This install has no engine write profile folder yet."})
+    subprocess.Popen(["explorer.exe", str(ewp.profile_root)])
+    return {"ok": True, "opened": str(ewp.profile_root)}
 
 
 # ───────────────────────────── writes ───────────────────────────────────────

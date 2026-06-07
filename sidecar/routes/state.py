@@ -74,6 +74,11 @@ class SidecarState:
         # Active install id from last session — applied after the
         # next refresh validates a matching install.
         self._pending_active_install_id: Optional[str] = None
+        # App-level settings (INI-editor reference install for the
+        # Author-mode diff, backup mode, ...). Persisted in state.json's
+        # `settings` block. Unknown keys are preserved round-trip so
+        # newer builds' settings survive an older build's save.
+        self._settings: dict = {}
         # Load persisted state at startup so a watchdog respawn doesn't
         # wipe the user's registered installs + active selection. Cheap —
         # just deserializes paths, no validation.
@@ -132,6 +137,9 @@ class SidecarState:
         active = data.get("active_install_id")
         if isinstance(active, str) and active:
             self._pending_active_install_id = active
+        settings = data.get("settings")
+        if isinstance(settings, dict):
+            self._settings = settings
 
     def _save_to_disk_impl(self) -> None:
         """Write the current install paths + active id to state.json.
@@ -173,6 +181,7 @@ class SidecarState:
             "version": 2,
             "installs": installs,
             "active_install_id": self._active_install_id,
+            "settings": self._settings,
         }
         try:
             state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -425,6 +434,24 @@ class SidecarState:
             if self._active_install_id is None:
                 return None
             return self._installs.get(self._active_install_id)
+
+    # ── App settings ────────────────────────────────────────────────────
+
+    def get_settings(self) -> dict:
+        with self._lock:
+            return dict(self._settings)
+
+    def update_settings(self, patch: dict) -> dict:
+        """Merge `patch` into the settings block (None values delete the
+        key) and persist. Returns the updated settings."""
+        with self._lock:
+            for k, v in patch.items():
+                if v is None:
+                    self._settings.pop(k, None)
+                else:
+                    self._settings[k] = v
+            self._save_to_disk()
+            return dict(self._settings)
 
 
 # Singleton accessor

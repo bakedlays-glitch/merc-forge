@@ -288,6 +288,7 @@ def surgical_upsert(path: Path, changes: list[IniChange],
     replacements: dict[int, str] = {}
     insertions: dict[int, list[str]] = {}   # insert AFTER line idx
     appended_sections: dict[str, list[str]] = {}
+    appended_lower: dict[str, str] = {}     # lower → original spelling
     known_secs = {s.lower() for s, _ in sec_order}
 
     for c in changes:
@@ -302,13 +303,18 @@ def surgical_upsert(path: Path, changes: list[IniChange],
             m = _KV_RE.match(lines[i])
             orig_key = m.group("key").strip() if m else c.key
             replacements[i] = f"{orig_key} = {c.value}{eol}"
+        elif sec_l in appended_lower:
+            # second/later key for a section this batch is CREATING —
+            # append to that pending section, not to the original text.
+            appended_sections[appended_lower[sec_l]].append(
+                f"{c.key} = {c.value}{eol}")
         elif sec_l in known_secs:
             anchor = last_content_in_sec[sec_l]
             insertions.setdefault(anchor, []).append(f"{c.key} = {c.value}{eol}")
         else:
             appended_sections.setdefault(c.section, []).append(
                 f"{c.key} = {c.value}{eol}")
-            known_secs.add(sec_l)  # multiple new keys, one new section
+            appended_lower[sec_l] = c.section
 
     out: list[str] = []
     for i, line in enumerate(lines):
@@ -376,11 +382,17 @@ def game_running(exe_name: str = "ja2.exe") -> bool:
     """True if a process with this image name is running (Windows).
 
     The engine rewrites its profile-dir INIs on options-apply/save/exit
-    (engine-facts §4) — writing while it runs risks mutual clobber."""
+    (engine-facts §4) — writing while it runs risks mutual clobber.
+
+    CREATE_NO_WINDOW is essential: this runs on a 5s poll from the UI,
+    and without it every tasklist spawn flashes a console window when
+    the sidecar is the windowed PyInstaller exe (user-visible strobe,
+    found in Phase-2 Gate 3)."""
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
             capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
         return False  # can't tell — don't hard-block on guard failure
@@ -699,6 +711,162 @@ class IniEditor:
             res["ini_file"] = canon
             results.append(res)
         return {"applied": sum(len(fc) for _, _, fc in plans), "files": results}
+
+
+# ─────────────────────── diagnostics (engine logs) ──────────────────────────
+
+def parse_vfs_log(path: Path) -> list[dict]:
+    """Parse the engine's vfs.log into mounted layers.
+
+    Lines look like:
+      [0.476243] :   Reading profile : SLF Libs
+      [0.476248] :     library : "Data\\Ambient.slf"
+      [0.600463] :     directory : "Data"
+    """
+    if not path.is_file():
+        return []
+    layers: list[dict] = []
+    current: Optional[str] = None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for raw in text.splitlines():
+        if "] :" not in raw:
+            continue
+        payload = raw.split("] :", 1)[1].strip()
+        if payload.startswith("Reading profile :"):
+            current = payload.split(":", 1)[1].strip()
+        elif payload.startswith("library :") and current:
+            layers.append({"name": current, "kind": "library",
+                           "path": payload.split(":", 1)[1].strip().strip('"')})
+        elif payload.startswith("directory :") and current:
+            layers.append({"name": current, "kind": "directory",
+                           "path": payload.split(":", 1)[1].strip().strip('"')})
+    return layers
+
+
+def parse_ini_error_report(path: Path) -> tuple[list[dict], int]:
+    """Parse iniErrorReport.log → (errors, first_boot_noise_count).
+
+    Faithful port of the frozen launcher's classifier with two fixes:
+    identical (section,key,message) rows are DEDUPED (the engine logs a
+    re-read pass twice per launch), and bracket-prefixed lines (incl.
+    the CD-key line) are never emitted. `empty_toption` classification
+    is advisory — no real log has exercised it on this engine yet.
+    """
+    if not path.is_file():
+        return [], 0
+    errors: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    noise = 0
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("***") or line.startswith("["):
+            # timestamp banner / CD-key line / decorative — but NOTE the
+            # engine prefixes real rows with "[3.28e-05] : " too, so only
+            # skip if no payload follows a "] :" marker.
+            if "] :" in line:
+                line = line.split("] :", 1)[1].strip()
+            else:
+                continue
+        if "The value [" not in line:
+            continue
+        rest = line.split("The value [", 1)[1]
+        if "][" not in rest:
+            continue
+        section, after = rest.split("][", 1)
+        if "]" not in after:
+            continue
+        key = after.split("]", 1)[0]
+        dedupe_key = (section, key, line)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        if "outside the valid range" in line:
+            kind, is_noise = "out_of_range", False
+        elif "neither TRUE nor FALSE" in line and '= ""' in line:
+            kind, is_noise = "empty_toption", True
+            noise += 1
+        elif "Error when opening file" in line:
+            kind, is_noise = "file_not_found", False
+        else:
+            kind, is_noise = "other", False
+        errors.append({
+            "section": section, "key": key, "message": line,
+            "kind": kind, "is_first_boot_noise": is_noise,
+        })
+    return errors, noise
+
+
+def read_log_timestamp(path: Path) -> Optional[str]:
+    """First '***'-banner line of a log, raw (NOT ISO — it's a ctime-ish
+    locale string like ' *** Sat Jun  6 21:26:19 2026 *** ')."""
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for line in text.splitlines():
+        if "***" in line:
+            return line.strip().strip("*").strip()
+    return None
+
+
+def diagnostic_report(layout: VfsLayout) -> dict:
+    """Last-launch health for the active campaign's profile."""
+    ewp = layout.engine_write_profile()
+    if ewp is None or ewp.profile_root is None:
+        return {"profile_root": None, "vfs_layers": [], "errors": [],
+                "first_boot_noise_count": 0, "last_launch_raw": None,
+                "log_mtime": None}
+    root = ewp.profile_root
+    err_log = root / "iniErrorReport.log"
+    errors, noise = parse_ini_error_report(err_log)
+    return {
+        "profile_root": str(root),
+        "writable_profile": ewp.name,
+        "vfs_layers": parse_vfs_log(root / "vfs.log"),
+        "errors": errors,
+        "first_boot_noise_count": noise,
+        "last_launch_raw": read_log_timestamp(root / "vfs.log"),
+        "log_mtime": err_log.stat().st_mtime if err_log.is_file() else None,
+    }
+
+
+def summary(editor: "IniEditor") -> list[dict]:
+    """Per-file changed counts for the file selector: Play overrides
+    (cheap: one profile scan) + Author vs-reference diffs (only when a
+    baseline is configured), with per-section breakdowns."""
+    ov = editor.overrides()
+    play_by_file: dict[str, dict[str, int]] = {}
+    for o in ov:
+        play_by_file.setdefault(o["ini_file"], {}).setdefault(o["section"], 0)
+        play_by_file[o["ini_file"]][o["section"]] += 1
+
+    out: list[dict] = []
+    for canon in sorted(EDITABLE_INIS.values()):
+        play_sections = play_by_file.get(canon, {})
+        entry: dict = {
+            "ini_file": canon,
+            "override_changed": sum(play_sections.values()),
+            "play_sections": play_sections,
+            "author_changed": None,
+            "author_sections": None,
+        }
+        if editor.baseline_root is not None:
+            try:
+                eff = editor.effective(canon)
+                a_sections: dict[str, int] = {}
+                for sname, keys in eff["sections"].items():
+                    for entry_k in keys.values():
+                        sv = entry_k.get("stock_value")
+                        if (sv is not None and entry_k.get("value") is not None
+                                and entry_k.get("source") not in ("default", "unset", "override")
+                                and entry_k["value"] != sv):
+                            a_sections[sname] = a_sections.get(sname, 0) + 1
+                entry["author_changed"] = sum(a_sections.values())
+                entry["author_sections"] = a_sections
+            except IniEditorError:
+                pass
+        out.append(entry)
+    return out
 
 
 def validate_against_schema(schema: dict, change: IniChange) -> Optional[str]:

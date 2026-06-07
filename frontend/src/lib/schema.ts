@@ -284,3 +284,175 @@ export interface BackupEntry {
   files: string[];
   total_size_bytes: number;
 }
+
+// ───────────────────────────────────────────────────────────────────────
+//  INI editor (MercForge UI Phase 2 — backend: routes/ini_editor.py)
+// ───────────────────────────────────────────────────────────────────────
+
+export interface IniSchemaIndexEntry {
+  ini_file: string;
+  json: string;
+  sections: number;
+  properties: number;
+}
+
+export interface IniSchemasResponse {
+  schemas: IniSchemaIndexEntry[];
+  editable: string[];
+  writable_profile: string | null;
+  profile_root: string | null;
+  vfs_mismatch: boolean;
+}
+
+export type IniConfidence = "official" | "engine" | "scraped" | "curated";
+
+export interface IniProperty {
+  name: string;
+  datatype: string; // "numeric" | "boolean" | "string" | "list" | "array" | ""
+  default: string | null;
+  min: string | null;
+  max: string | null;
+  interval?: string | null;
+  vanilla?: string | null;
+  description: string;
+  list_values: string[];
+  confidence: IniConfidence;
+  shipped?: string | null; // value in the INI at schema-generation time
+  engine?: { loader?: string; default?: string; min?: string; max?: string };
+  curated_note?: string;
+}
+
+export interface IniSchemaSection {
+  name: string;
+  description: string;
+  properties: IniProperty[];
+}
+
+export interface IniSchemaDoc {
+  ini_file: string;
+  provenance: string;
+  sections: IniSchemaSection[];
+}
+
+export interface IniEffectiveEntry {
+  value: string | null;
+  // profile name ("v113", "Vanilla", ...) | "override" | "ja2_ini" | "default" | "unset"
+  source: string;
+  override_active: boolean;
+  stock_value?: string | null; // present when a reference install is configured
+}
+
+export interface IniEffectiveResponse {
+  ini_file: string;
+  merge_registered: boolean;
+  override_file: string | null;
+  override_present: boolean;
+  writable_profile: string | null;
+  profile_root: string | null;
+  vfs_mismatch: boolean;
+  sections: Record<string, Record<string, IniEffectiveEntry>>;
+}
+
+export interface IniOverrideEntry {
+  ini_file: string;
+  section: string;
+  key: string;
+  value: string;
+  file: string;
+}
+
+export interface IniOverridesResponse {
+  writable_profile: string | null;
+  profile_root: string | null;
+  overrides: IniOverrideEntry[];
+}
+
+export interface IniChangeItem {
+  ini_file: string;
+  section: string;
+  key: string;
+  value?: string | null;
+  delete?: boolean;
+}
+
+export interface IniChangeResult {
+  ini_file: string;
+  section: string;
+  key: string;
+  status: "applied" | "planned";
+  warning: string | null;
+}
+
+export interface IniApplyResult {
+  ok: boolean;
+  dry_run: boolean;
+  target: "canon" | "override";
+  applied: number;
+  backup_id: string | null;
+  files: Array<Record<string, unknown>>;
+  results: IniChangeResult[];
+}
+
+export interface GameStatus {
+  running: boolean;
+  exe_name: string;
+  by: "image_name";
+}
+
+export interface IniDiagnosticError {
+  section: string;
+  key: string;
+  message: string;
+  kind: "out_of_range" | "empty_toption" | "file_not_found" | "other";
+  is_first_boot_noise: boolean;
+}
+
+export interface IniDiagnostic {
+  profile_root: string | null;
+  writable_profile?: string;
+  vfs_layers: Array<{ name: string; kind: string; path: string }>;
+  errors: IniDiagnosticError[];
+  first_boot_noise_count: number;
+  last_launch_raw: string | null;
+  log_mtime: number | null;
+}
+
+export interface IniSummaryFile {
+  ini_file: string;
+  override_changed: number;
+  play_sections: Record<string, number>;
+  author_changed: number | null;
+  author_sections: Record<string, number> | null;
+}
+
+export interface IniSummaryResponse {
+  files: IniSummaryFile[];
+  baseline: string | null;
+}
+
+export interface AppSettings {
+  baseline_install_path?: string;
+  backup_mode?: string;
+}
+
+export interface GraphicsComponent {
+  component: string;
+  kind: "runtime" | "managed_file" | "config_overlay";
+  check_kind: "presence" | "strict_hash" | "key_subset";
+  present: boolean;
+  matches: boolean;
+  note?: string;
+  download_url?: string | null;
+  source_available?: boolean;
+  mismatched_keys?: string[];
+}
+
+export interface GraphicsStatusResponse {
+  components: GraphicsComponent[];
+}
+
+export interface GraphicsDeployResult {
+  ok: boolean;
+  actions: string[];
+  backup_id: string;
+}
