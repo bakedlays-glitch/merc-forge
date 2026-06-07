@@ -1,0 +1,95 @@
+{
+ "provenance": "build_ini_schemas.py 2026-06-07 | data=C:\\Jagged Alliance 2\\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy\\Data-1.13 | engine=C:\\AI Projects\\The Wasteland\\Visual Studio Root",
+ "schemas": [
+  {
+   "ini_file": "Ja2.ini",
+   "json": "Ja2.json",
+   "sections": 1,
+   "properties": 12
+  },
+  {
+   "ini_file": "Ja2_Options.ini",
+   "json": "Ja2_Options.json",
+   "sections": 53,
+   "properties": 813
+  },
+  {
+   "ini_file": "APBPConstants.ini",
+   "json": "APBPConstants.json",
+   "sections": 2,
+   "properties": 203
+  },
+  {
+   "ini_file": "AI.ini",
+   "json": "AI.json",
+   "sections": 1,
+   "properties": 12
+  },
+  {
+   "ini_file": "CTHConstants.ini",
+   "json": "CTHConstants.json",
+   "sections": 4,
+   "properties": 113
+  },
+  {
+   "ini_file": "Creatures_Settings.INI",
+   "json": "Creatures_Settings.json",
+   "sections": 1,
+   "properties": 3
+  },
+  {
+   "ini_file": "Helicopter_Settings.INI",
+   "json": "Helicopter_Settings.json",
+   "sections": 4,
+   "properties": 23
+  },
+  {
+   "ini_file": "IntroVideos.ini",
+   "json": "IntroVideos.json",
+   "sections": 4,
+   "properties": 12
+  },
+  {
+   "ini_file": "Item_Settings.ini",
+   "json": "Item_Settings.json",
+   "sections": 5,
+   "properties": 159
+  },
+  {
+   "ini_file": "Mod_Settings.ini",
+   "json": "Mod_Settings.json",
+   "sections": 22,
+   "properties": 183
+  },
+  {
+   "ini_file": "Morale_Settings.INI",
+   "json": "Morale_Settings.json",
+   "sections": 5,
+   "properties": 120
+  },
+  {
+   "ini_file": "RebelCommand_Settings.ini",
+   "json": "RebelCommand_Settings.json",
+   "sections": 1,
+   "properties": 171
+  },
+  {
+   "ini_file": "Reputation_Settings.INI",
+   "json": "Reputation_Settings.json",
+   "sections": 1,
+   "properties": 18
+  },
+  {
+   "ini_file": "Skills_Settings.INI",
+   "json": "Skills_Settings.json",
+   "sections": 24,
+   "properties": 257
+  },
+  {
+   "ini_file": "Taunts_Settings.INI",
+   "json": "Taunts_Settings.json",
+   "sections": 1,
+   "properties": 42
+  }
+ ]
+}

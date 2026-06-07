@@ -16,6 +16,7 @@ This file tracks **currently open issues** — bugs the team has acknowledged bu
 
 ## Open — Medium
 
+- **`ja2-launcher/` Settings/Presets/Wizard tabs are known-broken (frozen tree, do not fix in place)** — the standalone launcher's INI editor writes every override to `Data-User/`, a directory the engine **never mounts** (zero references in engine source; no vfs_config defines such a layer). Its edits are silent no-ops in-game. Verified in the 2026-06-07 adversarial review; the tree is deliberately frozen as reference. Do **not** copy its write model anywhere. Superseded by the MercForge INI editor (`mercwizard_core/ini_editor.py` + `routes/ini_editor.py`, engine semantics in `docs/INI_EDITOR_ENGINE_FACTS.md`). The launcher's Campaigns picker / Play / Diagnostic tabs are unaffected and correct.
 
 ## Open — Low
 

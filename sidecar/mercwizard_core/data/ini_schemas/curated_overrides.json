@@ -1,0 +1,14 @@
+{
+  "_doc": {
+    "purpose": "Hand-verified schema corrections. Highest-confidence source: entries here beat engine-mined and scraped metadata at generation time. Re-run tools/build_ini_schemas.py after editing.",
+    "format": "{ '<ini_file>': { '<Section>/<KEY>': { 'min'|'max'|'default'|'datatype'|'description': '...', 'note': 'why / evidence' } } }",
+    "example": {
+      "Skills_Settings.INI": {
+        "Generic Traits Settings/MAX_NUMBER_OF_TRAITS": {
+          "max": "30",
+          "note": "engine GameSettings.cpp:2599 ReadInteger(...,5,2,30) — already engine-mined automatically; entry shown here only as a format example"
+        }
+      }
+    }
+  }
+}

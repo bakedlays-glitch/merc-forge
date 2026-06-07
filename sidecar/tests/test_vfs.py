@@ -521,3 +521,114 @@ def test_vfs_mismatch_false_case_insensitive_path(tmp_path: Path) -> None:
         "[Ja2 Settings]\nVFS_CONFIG_INI = vfs_config.aimnas.ini\n"
     )
     assert compute_vfs_mismatch(install, cfg) is False
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  PROFILE_ROOT + engine write profile (INI-editor Phase 1, Step 0)
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _write_stock_113_vfs_config(install: Path) -> None:
+    """A faithful miniature of the stock 1.13 vfs_config.JA2113.ini shape:
+    the engine's write profile mounts an empty-PATH location whose real
+    directory comes from PROFILE_ROOT (the UserProf pattern)."""
+    (install / "Data").mkdir(parents=True, exist_ok=True)
+    (install / "Data-1.13").mkdir(parents=True, exist_ok=True)
+    (install / "vfs_config.JA2113.ini").write_text(
+        "[vfs_config]\n"
+        "PROFILES = Vanilla, v113, UserProf\n"
+        "\n"
+        "[PROFILE_Vanilla]\n"
+        "NAME = Vanilla Dirs\n"
+        "LOCATIONS = data_dir\n"
+        "PROFILE_ROOT = \n"
+        "\n"
+        "[PROFILE_v113]\n"
+        "NAME = v1.13\n"
+        "LOCATIONS = datav113_dir\n"
+        "PROFILE_ROOT = \n"
+        "\n"
+        "[PROFILE_UserProf]\n"
+        "NAME = Player Profile\n"
+        "LOCATIONS = uprof_root\n"
+        "PROFILE_ROOT = Profiles\\UserProfile_JA2113\n"
+        "WRITE = true\n"
+        "\n"
+        "[LOC_data_dir]\n"
+        "TYPE = DIRECTORY\n"
+        "PATH = Data\n"
+        "\n"
+        "[LOC_datav113_dir]\n"
+        "TYPE = DIRECTORY\n"
+        "PATH = Data-1.13\n"
+        "\n"
+        "[LOC_uprof_root]\n"
+        "TYPE = DIRECTORY\n"
+        "PATH = \n"
+    )
+    _write_ja2_ini(install, "vfs_config.JA2113.ini")
+
+
+def test_profile_root_gives_write_profile_a_location(tmp_path: Path) -> None:
+    """The stock UserProf pattern (empty PATH + PROFILE_ROOT) must yield a
+    profile with a real mounted location — previously the empty PATH made
+    the location vanish entirely."""
+    install = tmp_path / "stock113"
+    _write_stock_113_vfs_config(install)
+    layout = parse_vfs_config(install)
+    uprof = next(p for p in layout.profiles if p.name == "UserProf")
+    assert uprof.write_allowed is True
+    assert uprof.profile_root == (install / "Profiles" / "UserProfile_JA2113").resolve()
+    assert len(uprof.locations) == 1
+    assert uprof.locations[0].path == uprof.profile_root
+
+
+def test_engine_write_profile_picks_write_true_profile(tmp_path: Path) -> None:
+    install = tmp_path / "stock113"
+    _write_stock_113_vfs_config(install)
+    layout = parse_vfs_config(install)
+    ewp = layout.engine_write_profile()
+    assert ewp is not None
+    assert ewp.name == "UserProf"
+
+
+def test_resolve_override_write_targets_profile_root(tmp_path: Path) -> None:
+    """The INI-override write path must land under the engine write
+    profile's PROFILE_ROOT — even when the same file already exists in a
+    lower layer (no in-place fallback, unlike resolve_write)."""
+    install = tmp_path / "stock113"
+    _write_stock_113_vfs_config(install)
+    # Base copy exists in Data-1.13 — must NOT attract the override write.
+    (install / "Data-1.13" / "Ja2_Options.ini").write_text("[x]\nA = 1\n")
+    layout = parse_vfs_config(install)
+    target = layout.resolve_override_write("Ja2_Options.ini")
+    assert target == (install / "Profiles" / "UserProfile_JA2113" / "Ja2_Options.ini").resolve()
+
+
+def test_resolve_override_write_refuses_on_legacy_layout(tmp_path: Path) -> None:
+    """Legacy installs have no engine write profile — overrides must be
+    refused, not guessed."""
+    from mercwizard_core.vfs import VfsConfigError
+
+    install = tmp_path / "legacy"
+    install.mkdir()
+    (install / "Data-1.13").mkdir()
+    _write_ja2_ini(install)  # no VFS_CONFIG_INI line
+    layout = parse_vfs_config(install)
+    assert layout.engine_write_profile() is None
+    with pytest.raises(VfsConfigError):
+        layout.resolve_override_write("Ja2_Options.ini")
+
+
+def test_profile_root_does_not_disturb_mod_content_selection(tmp_path: Path) -> None:
+    """UserProf is a system profile — gaining a location must not make it
+    the mod-content pick, and resolve_write for mod files stays in-place."""
+    install = tmp_path / "stock113"
+    _write_stock_113_vfs_config(install)
+    (install / "Data-1.13" / "TableData").mkdir(parents=True)
+    (install / "Data-1.13" / "TableData" / "MercProfiles.xml").write_text("<x/>")
+    layout = parse_vfs_config(install)
+    assert layout.mod_content_profile == "v113"
+    assert layout.resolve_write("TableData/MercProfiles.xml") == (
+        install / "Data-1.13" / "TableData" / "MercProfiles.xml"
+    ).resolve()

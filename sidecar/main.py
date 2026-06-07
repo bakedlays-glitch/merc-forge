@@ -180,6 +180,7 @@ from routes import (
     game,
     gear,
     health,
+    ini_editor,
     installs,
     mapforge,
     mapforge_library,
@@ -276,6 +277,7 @@ def create_app() -> FastAPI:
     app.include_router(gear.router, prefix=api_prefix, tags=["gear"])
     app.include_router(bundle.router, prefix=api_prefix, tags=["bundle"])
     app.include_router(backup.router, prefix=api_prefix, tags=["backup"])
+    app.include_router(ini_editor.router, prefix=api_prefix, tags=["ini"])
     app.include_router(game.router, prefix=api_prefix, tags=["game"])
     app.include_router(saves.router, prefix=api_prefix, tags=["saves"])
     app.include_router(slots.router, prefix=api_prefix, tags=["slots"])

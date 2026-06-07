@@ -101,6 +101,12 @@ class VfsProfile:
     name: str
     locations: list[VfsLocation] = field(default_factory=list)
     write_allowed: bool = False
+    # Absolute base dir from the profile's `PROFILE_ROOT = ...` line, or
+    # None when the config leaves it empty. The engine prefixes every
+    # location PATH in the profile with this root; stock 1.13 configs use
+    # it for the user-state profile (PROFILE_ROOT = Profiles\UserProfile_X
+    # with an empty-PATH location mounting the root itself).
+    profile_root: Optional[Path] = None
 
     @property
     def is_system(self) -> bool:
@@ -204,6 +210,57 @@ class VfsLayout:
             if first_loc:
                 return first_loc.path / rel_path.replace("\\", "/")
         return self.install_root / rel_path.replace("\\", "/")
+
+    def engine_write_profile(self) -> Optional[VfsProfile]:
+        """The profile the ENGINE writes into (`WRITE = true` in vfs_config).
+
+        Distinct from `writable_profile()` (the wizard's mod-content layer,
+        picked by content heuristics): this is the engine's own top-of-stack
+        user-state layer — `Profiles\\UserProfile_<Mod>` in stock 1.13
+        configs. It's where merged-INI overrides must live to be read back
+        by the engine (CIniReader + MERGE_INI_FILES), and where the engine
+        itself writes Ja2_Settings.INI / Ja2_sp.ini / logs.
+
+        Returns the highest-priority WRITE=true profile, or None (legacy
+        layouts have no engine write target).
+        """
+        for profile in reversed(self.profiles):
+            if profile.write_allowed:
+                return profile
+        return None
+
+    def resolve_override_write(self, rel_path: str) -> Path:
+        """Where a per-key INI override must be written so the engine's
+        merged-INI reader picks it up as the top layer: the engine write
+        profile's root.
+
+        NEVER falls back to `resolve_read()`'s in-place hit — the point of
+        an override is to create/maintain a separate top-layer file rather
+        than mutate the mod's base copy (contrast `resolve_write`, which
+        intentionally edits in place for mod-content files).
+
+        Raises VfsConfigError when the layout has no engine write profile
+        (legacy/pre-VFS installs) — callers should surface this as a
+        read-only install rather than guess a location.
+        """
+        profile = self.engine_write_profile()
+        if profile is None:
+            raise VfsConfigError(
+                f"Refusing to write override {rel_path!r}: this install's "
+                "VFS layout has no WRITE=true profile (legacy/pre-VFS "
+                "layout). Per-key INI overrides require a vfs_config with "
+                "an engine write profile."
+            )
+        rel = rel_path.replace("\\", "/")
+        if profile.profile_root is not None:
+            return profile.profile_root / rel
+        first_dir = next((l for l in profile.locations if l.is_directory), None)
+        if first_dir is not None:
+            return first_dir.path / rel
+        raise VfsConfigError(
+            f"Engine write profile '{profile.name}' has no usable root "
+            f"directory to write {rel_path!r} into."
+        )
 
     def resolve_in_mod_content(self, rel_path: str) -> Optional[Path]:
         """Resolve `rel_path` looking ONLY in the mod content profile.
@@ -670,18 +727,21 @@ def _parse_vfs_config_file(install_root: Path, vfs_config_path: Path) -> VfsLayo
     if not profile_names:
         return _legacy_layout(install_root)
 
-    # Build location table first (LOC_* sections), keyed by lowercased name
-    locations: dict[str, VfsLocation] = {}
+    # Build the raw location table first (LOC_* sections), keyed by
+    # lowercased name. Paths stay RELATIVE here — they're resolved per
+    # profile below, because a profile's `PROFILE_ROOT` prefixes the PATH
+    # of every location it mounts. An empty PATH is legal when the
+    # mounting profile has a PROFILE_ROOT: the location then mounts the
+    # root itself (the stock UserProf pattern — `LOC_uprof_root` with
+    # `PATH =` empty + `PROFILE_ROOT = Profiles\UserProfile_X`).
+    raw_locations: dict[str, tuple[str, str, str]] = {}
     for section in cp.sections():
         if not section.lower().startswith("loc_"):
             continue
         name = section[4:]  # strip "LOC_" / "loc_" / "Loc_"
         loc_type = cp.get(section, "TYPE", fallback="DIRECTORY").strip()
         loc_path = cp.get(section, "PATH", fallback="").strip()
-        if not loc_path:
-            continue
-        abs_path = (install_root / loc_path.replace("\\", "/")).resolve()
-        locations[name.lower()] = VfsLocation(name=name, type=loc_type, path=abs_path)
+        raw_locations[name.lower()] = (name, loc_type, loc_path)
 
     # Build profiles — match section names case-insensitively
     profiles: list[VfsProfile] = []
@@ -689,17 +749,40 @@ def _parse_vfs_config_file(install_root: Path, vfs_config_path: Path) -> VfsLayo
         section = _find_section_ci(cp, f"PROFILE_{pname}")
         if section is None:
             continue
+        profile_root_raw = cp.get(section, "PROFILE_ROOT", fallback="").strip()
         location_csv = cp.get(section, "LOCATIONS", fallback="")
-        location_names = _parse_csv(location_csv)
-        prof_locations = [
-            locations[n.lower()] for n in location_names if n.lower() in locations
-        ]
+        prof_locations: list[VfsLocation] = []
+        for loc_name in _parse_csv(location_csv):
+            entry = raw_locations.get(loc_name.lower())
+            if entry is None:
+                continue
+            name, loc_type, raw_path = entry
+            if not raw_path and not profile_root_raw:
+                # Nothing to mount (pre-existing behavior for empty PATH
+                # in profiles without a root).
+                continue
+            rel = "/".join(
+                part for part in (
+                    profile_root_raw.replace("\\", "/"),
+                    raw_path.replace("\\", "/"),
+                )
+                if part
+            )
+            abs_path = (install_root / rel).resolve()
+            prof_locations.append(
+                VfsLocation(name=name, type=loc_type, path=abs_path)
+            )
         write_str = cp.get(section, "WRITE", fallback="false").strip().lower()
         write_allowed = write_str in ("true", "1", "yes")
+        profile_root = (
+            (install_root / profile_root_raw.replace("\\", "/")).resolve()
+            if profile_root_raw else None
+        )
         profiles.append(VfsProfile(
             name=pname,
             locations=prof_locations,
             write_allowed=write_allowed,
+            profile_root=profile_root,
         ))
 
     mod_content = _pick_mod_content_profile(profiles)
