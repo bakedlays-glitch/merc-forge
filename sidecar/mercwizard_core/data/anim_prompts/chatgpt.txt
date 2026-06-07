@@ -1,0 +1,29 @@
+You are an image editor. Given this 1024×1024 portrait of a person, produce
+five modified versions of the same image, each saved separately. They will
+be used as eye/mouth animation frames for a Jagged Alliance 2-style
+character portrait.
+
+1. **anim_eye_1.png** — Modify ONLY the eyes. Close the eyelids to cover
+   approximately 50% of each iris (half-blink). Everything else (skin,
+   hair, mouth, clothing, background, lighting) must remain bit-for-bit
+   identical to the input. Eyebrows must NOT move. Preserve the 1024×1024
+   dimensions.
+
+2. **anim_eye_2.png** — Modify ONLY the eyes. Close the eyelids fully (eyes
+   completely shut, eyelids touching). Same identity rules as #1.
+
+3. **anim_mouth_1.png** — Modify ONLY the mouth. Open it slightly (1-2mm
+   gap between lips), as if beginning to speak. Visible darkness between
+   lips. Everything else identical. NO change to eyes, eyebrows, cheeks.
+
+4. **anim_mouth_2.png** — Modify ONLY the mouth. Open it widely, partially
+   open speaking loudly, visible teeth, mid-speech. Identity rules apply.
+
+5. **anim_mouth_3.png** — Modify ONLY the mouth. Open it to a medium
+   position: clearly open, neutral talking, slight tooth row visible.
+
+CRITICAL: do not change skin tone, hair, eyebrows, facial structure, the
+background, lighting direction, or composition. Only the explicitly named
+region changes in each output.
+
+Output: five separate 1024×1024 PNG files.

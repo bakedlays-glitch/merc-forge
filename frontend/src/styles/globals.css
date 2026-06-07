@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    @apply h-full;
+  }
+  body {
+    @apply bg-wasteland-900 text-wasteland-50 font-sans antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+  *:focus-visible {
+    @apply outline-none ring-2 ring-rust-400 ring-offset-2 ring-offset-wasteland-900;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md
+           px-4 py-2 font-medium transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-rust-500 text-wasteland-50 hover:bg-rust-400;
+  }
+  .btn-secondary {
+    @apply btn bg-wasteland-700 text-wasteland-50 hover:bg-wasteland-600;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-wasteland-100 hover:bg-wasteland-800;
+  }
+  .card {
+    @apply rounded-lg border border-wasteland-700 bg-wasteland-800 p-4 shadow-sm;
+  }
+  .input {
+    @apply w-full rounded-md border border-wasteland-700 bg-wasteland-900 px-3 py-2
+           text-wasteland-50 placeholder-wasteland-400
+           focus:border-rust-500 focus:outline-none focus:ring-1 focus:ring-rust-500;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  }
+  .badge-aim {
+    @apply badge bg-rust-500/20 text-rust-400;
+  }
+  .badge-merc {
+    @apply badge bg-blue-500/20 text-blue-300;
+  }
+  .badge-npc {
+    @apply badge bg-wasteland-700 text-wasteland-200;
+  }
+}

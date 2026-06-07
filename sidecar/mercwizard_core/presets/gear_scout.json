@@ -1,0 +1,21 @@
+{
+  "id": "scout",
+  "name": "Scout",
+  "description": "Stealth-oriented loadout: silenced sidearm, light armor, night vision optics.",
+  "gear": {
+    "mGearKitName": "Standard",
+    "mHelmet": 0,
+    "mVest": 160,
+    "mLeg": 0,
+    "mWeapon": 17,
+    "mBig0": 1, "mBig0Status": 100, "mBig0Quantity": 4,
+    "mBig1": 0, "mBig1Status": 0, "mBig1Quantity": 0,
+    "mBig2": 0, "mBig2Status": 0, "mBig2Quantity": 0,
+    "mBig3": 0, "mBig3Status": 0, "mBig3Quantity": 0,
+    "mSmall0": 53, "mSmall1": 16, "mSmall2": 0, "mSmall3": 0,
+    "mSmall4": 0, "mSmall5": 0, "mSmall6": 0, "mSmall7": 0,
+    "mPriceMod": 0,
+    "mAbsolutePrice": -1
+  },
+  "notes": "Helmet=0 leaves the head slot free for FaceGear (NVGs, sunglasses)."
+}

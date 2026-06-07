@@ -1,0 +1,33 @@
+Stable Diffusion img2img + ControlNet workflow for animation frames.
+
+Settings (recommended baseline; tune per portrait):
+- Denoising strength: 0.35-0.50 (lower preserves identity better)
+- CFG scale: 7
+- Sampler: DPM++ 2M Karras
+- Steps: 30
+- ControlNet: OpenPose or Reference-Only at 0.7-0.9 weight to lock face
+- Use a face-region mask in the inpaint tab for surgical changes
+
+Per-frame prompt suffix (append to your subject description):
+
+ANIM_EYE_1: half-closed eyes, eyelids 50% lowered covering iris,
+sleepy half-blink expression, identical lighting and skin
+
+ANIM_EYE_2: fully closed eyes, eyelids touching, peaceful eyes shut,
+identical lighting and skin, no change to mouth or face structure
+
+ANIM_MOUTH_1: lips slightly parted, 1-2mm gap between lips, beginning
+to speak, identical eyes and forehead
+
+ANIM_MOUTH_2: mouth wide open speaking loudly, visible teeth, mid-speech,
+identical eyes and hair
+
+ANIM_MOUTH_3: mouth medium open, neutral talking, slight tooth row,
+identical eyes and skin
+
+Negative prompt suggestions:
+closed eyes (for mouth frames), open eyes (for blink frames), different
+face, different person, different hairstyle, smiling, smirk, makeup change
+
+After generation, ensure all 5 outputs are 1024×1024 PNG. Resize if needed
+(LANCZOS for quality). Drag back into Merc Wizard.

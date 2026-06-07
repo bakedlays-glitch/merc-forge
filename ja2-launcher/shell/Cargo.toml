@@ -1,0 +1,32 @@
+[package]
+name = "ja2launcher"
+version = "1.0.0"
+description = "Campaign-picker launcher for JA2 1.13 modpacks (Arulco Stories and future packs)"
+authors = ["bakedlays-glitch"]
+edition = "2021"
+rust-version = "1.75"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+tauri-plugin-shell = "2.0"
+tauri-plugin-dialog = "2.0"
+tauri-plugin-single-instance = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Schema XML parsing — INIEditor*.xml ship as UTF-16 LE with BOM.
+# Manual decode in schema.rs, then parse with roxmltree (small, simple, no deps).
+roxmltree = "0.20"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

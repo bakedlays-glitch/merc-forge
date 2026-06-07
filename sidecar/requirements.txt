@@ -1,0 +1,22 @@
+pydantic>=2.5,<3.0
+lxml>=5.0,<6.0
+Pillow>=10.0,<12.0
+fastapi>=0.110,<0.120
+uvicorn[standard]>=0.27,<0.40
+python-multipart>=0.0.9
+# Phase 2.7: cross-process file lock for mutating routes. Without it, two
+# MercWizard instances against the same install can race on shared EDT
+# files and hand out duplicate BioIDs.
+portalocker>=2.8,<4.0
+# MapForge module (sidecar/routes/mapforge.py): pulls in
+# Headless_Compiler/iso_renderer.py which uses ja2-open-toolset's SlfFS
+# (PyFilesystem-based) to read Tilesets.slf archives. `fs` requires
+# pkg_resources from setuptools<81, which was removed in newer setuptools.
+fs>=2.4,<3.0
+setuptools<81  # pkg_resources, needed transitively by `fs`
+pytest>=8.0,<9.0
+pytest-cov>=4.1,<7.0
+# Build tool: build_sidecar.ps1 / launch_current.ps1 invoke PyInstaller to
+# produce the sidecar exe (docs/BUILD_SIDECAR.md). Pinned so an outside clone's
+# `pip install -r requirements.txt` provisions a working build.
+pyinstaller>=6.0,<7.0

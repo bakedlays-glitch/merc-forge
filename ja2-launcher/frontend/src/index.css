@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+  }
+  body {
+    font-family: theme("fontFamily.sans");
+    user-select: none;       /* launcher feels more "app-like" without text selection */
+    -webkit-user-select: none;
+  }
+}
+
+@layer components {
+  .ja2-btn {
+    @apply px-4 py-2 rounded border border-ja2-border bg-ja2-panel text-ja2-text
+           hover:border-ja2-accent hover:text-ja2-accent transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .ja2-btn-primary {
+    @apply ja2-btn bg-ja2-accent text-ja2-bg border-ja2-accent
+           hover:bg-ja2-accentDark hover:border-ja2-accentDark hover:text-ja2-text;
+  }
+  .ja2-panel {
+    @apply bg-ja2-panel border border-ja2-border rounded p-4;
+  }
+}

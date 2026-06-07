@@ -1,0 +1,26 @@
+Claude doesn't currently generate images directly. Use Claude to refine the
+prompt you'll feed to a separate image generator (ChatGPT image generation,
+Gemini, Stable Diffusion, Midjourney, etc.).
+
+Paste your portrait into Claude with this instruction:
+
+---
+
+"This is a portrait I need to animate for a Jagged Alliance 2 character.
+Write me a detailed prompt for [PROVIDER NAME] that will generate five
+modified versions:
+1. half-blink (eyes 50% closed)
+2. full-blink (eyes fully closed)
+3. mouth slight open (talking beginning)
+4. mouth wide open (talking loudly with teeth)
+5. mouth medium open (neutral talking)
+
+Each must be 1024×1024 PNG. The face must remain bit-identical EXCEPT for
+the explicitly named region. Describe the subject's distinctive features so
+the image generator preserves identity precisely."
+
+---
+
+Claude will return a tuned prompt. Copy it, paste into your image generator
+along with the portrait, and download the five resulting PNGs. Drag them
+back into Merc Wizard's Animation step.

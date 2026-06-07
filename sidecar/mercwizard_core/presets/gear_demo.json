@@ -1,0 +1,20 @@
+{
+  "id": "demo",
+  "name": "Demolitions",
+  "description": "Demolitions expert: SMG + multiple grenades + explosives. Don't stand near.",
+  "gear": {
+    "mGearKitName": "Standard",
+    "mHelmet": 176,
+    "mVest": 161,
+    "mLeg": 0,
+    "mWeapon": 7,
+    "mBig0": 1, "mBig0Status": 100, "mBig0Quantity": 3,
+    "mBig1": 0, "mBig1Status": 0, "mBig1Quantity": 0,
+    "mBig2": 0, "mBig2Status": 0, "mBig2Quantity": 0,
+    "mBig3": 0, "mBig3Status": 0, "mBig3Quantity": 0,
+    "mSmall0": 103, "mSmall1": 103, "mSmall2": 103, "mSmall3": 51,
+    "mSmall4": 51, "mSmall5": 0, "mSmall6": 0, "mSmall7": 0,
+    "mPriceMod": 0,
+    "mAbsolutePrice": -1
+  }
+}

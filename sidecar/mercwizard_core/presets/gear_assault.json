@@ -1,0 +1,21 @@
+{
+  "id": "assault",
+  "name": "Assault",
+  "description": "Balanced rifle + armor + grenades. Solid all-rounder loadout for entry-level mercs.",
+  "gear": {
+    "mGearKitName": "Standard",
+    "mHelmet": 176,
+    "mVest": 161,
+    "mLeg": 0,
+    "mWeapon": 2,
+    "mBig0": 71, "mBig0Status": 100, "mBig0Quantity": 3,
+    "mBig1": 0, "mBig1Status": 0, "mBig1Quantity": 0,
+    "mBig2": 0, "mBig2Status": 0, "mBig2Quantity": 0,
+    "mBig3": 0, "mBig3Status": 0, "mBig3Quantity": 0,
+    "mSmall0": 53, "mSmall1": 103, "mSmall2": 0, "mSmall3": 0,
+    "mSmall4": 0, "mSmall5": 0, "mSmall6": 0, "mSmall7": 0,
+    "mPriceMod": 0,
+    "mAbsolutePrice": -1
+  },
+  "notes": "Defaults to vanilla 1.13 item IDs. If your install lacks these items, the wizard falls back to first-matching-class on import."
+}

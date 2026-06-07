@@ -1,0 +1,385 @@
+{
+ "combined": {
+  "arctic": {
+   "has_buildings": false,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 0,
+   "n_maps": 20
+  },
+  "cave": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 9,
+   "n_maps": 65
+  },
+  "cliff": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 7,
+   "n_maps": 45
+  },
+  "desert": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 6,
+   "n_maps": 23
+  },
+  "farm": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 14,
+   "n_maps": 41
+  },
+  "swamp": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 4,
+   "n_maps": 35
+  },
+  "temperate": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 21,
+   "n_maps": 139
+  },
+  "tropical": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 2,
+   "n_maps": 32
+  },
+  "urban": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 200,
+   "n_maps": 109
+  },
+  "wasteland": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 8,
+   "n_maps": 3
+  }
+ },
+ "redux": {
+  "arctic": {
+   "has_buildings": false,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 0,
+   "n_maps": 20
+  },
+  "cave": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 9,
+   "n_maps": 64
+  },
+  "cliff": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 7,
+   "n_maps": 45
+  },
+  "desert": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 6,
+   "n_maps": 23
+  },
+  "farm": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 14,
+   "n_maps": 41
+  },
+  "swamp": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 4,
+   "n_maps": 35
+  },
+  "temperate": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 21,
+   "n_maps": 139
+  },
+  "tropical": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 2,
+   "n_maps": 32
+  },
+  "urban": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 190,
+   "n_maps": 104
+  },
+  "wasteland": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 8,
+   "n_maps": 3
+  }
+ },
+ "stock": {
+  "arctic": {
+   "has_buildings": false,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 0,
+   "n_maps": 5
+  },
+  "cave": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 3,
+   "n_maps": 50
+  },
+  "cliff": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 5,
+   "n_maps": 28
+  },
+  "desert": {
+   "has_buildings": false,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 0,
+   "n_maps": 14
+  },
+  "farm": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 3,
+   "n_maps": 23
+  },
+  "swamp": {
+   "has_buildings": false,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 0,
+   "n_maps": 21
+  },
+  "temperate": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 11,
+   "n_maps": 78
+  },
+  "tropical": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 1,
+   "n_maps": 17
+  },
+  "urban": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "onroofs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 129,
+   "n_maps": 63
+  },
+  "wasteland": {
+   "has_buildings": true,
+   "layers": [
+    "land",
+    "objs",
+    "roofs",
+    "shadows",
+    "structs"
+   ],
+   "n_buildings": 3,
+   "n_maps": 1
+  }
+ }
+}

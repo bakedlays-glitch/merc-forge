@@ -1,0 +1,25 @@
+Midjourney workflow for animation frames.
+
+Use /describe on your base portrait first to get a precise description.
+Then issue five separate variation prompts, each preserving the description
+and adding only the per-frame modifier.
+
+Template:
+
+  /imagine [Midjourney description from /describe], [PER-FRAME MODIFIER],
+  same character, same lighting, same hair, same clothing, --ar 1:1 --stop 80
+
+Per-frame modifiers (substitute one per generation):
+
+  ANIM_EYE_1: eyelids half-closed covering 50% of iris, drowsy half-blink
+  ANIM_EYE_2: eyes fully closed, eyelids touching
+  ANIM_MOUTH_1: lips slightly parted 1mm gap, beginning to speak
+  ANIM_MOUTH_2: mouth wide open mid-speech with visible teeth
+  ANIM_MOUTH_3: mouth medium open in neutral talking position
+
+Use --seed [VALUE] (same seed for all 5) to maximize identity consistency
+across frames. Use --no smile, --no smirk on mouth frames to prevent
+accidental expression changes.
+
+Crop / pad to exactly 1024×1024 before importing into Merc Wizard. The
+wizard validates dimensions; misshapen inputs are rejected.

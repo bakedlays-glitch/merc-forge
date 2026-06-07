@@ -1,0 +1,61 @@
+Merc Forge — Third-Party and Game-Content Attribution
+=====================================================
+
+Merc Forge is an unofficial, fan-made utility for the Jagged Alliance 2
+v1.13 community. Merc Forge's own source code is licensed under the MIT
+License (see LICENSE). This NOTICE documents third-party software and
+game-derived content redistributed with this project.
+
+------------------------------------------------------------------------
+Not affiliated with the rights holders
+------------------------------------------------------------------------
+"Jagged Alliance 2" and related marks are the property of their respective
+owners. Merc Forge is not affiliated with, endorsed by, or sponsored by
+Strategy First, THQ Nordic, the original developer Sir-Tech, or the
+Jagged Alliance 2 v1.13 development team. Merc Forge ships no copyrighted
+game executable and requires you to supply your own legally obtained copy
+of Jagged Alliance 2 and the v1.13 mod.
+
+------------------------------------------------------------------------
+1. ja2py  (sidecar/ja2py/)
+------------------------------------------------------------------------
+Vendored from the JA2 Open Toolset / ja2-stracciatella project.
+  Copyright (C) Gennady Trafimenkov and contributors.
+  Licensed under the GNU Lesser General Public License v3.0 (LGPL-3.0).
+  Full license text: sidecar/ja2py/COPYING.LESSER and sidecar/ja2py/LGPL.txt
+  Upstream: https://github.com/ja2-stracciatella/ja2-open-toolset
+
+This component remains under the LGPL-3.0. Its corresponding source is
+included in this repository under sidecar/ja2py/ and may be replaced with
+a modified version.
+
+------------------------------------------------------------------------
+2. Jagged Alliance 2 v1.13 INI Editor schemas
+   (ja2-launcher/shell/embedded_schemas/)
+------------------------------------------------------------------------
+INIEditorJA2.xml, INIEditorJA2Options.xml, and INIEditorAPBPConstants.xml
+are reproduced from the configuration-editor schema data distributed with
+the Jagged Alliance 2 v1.13 mod, authored by the JA2 1.13 community. The
+remaining INIEditor*.xml files are generated from the descriptive comments
+inside JA2 1.13 INI files. That descriptive text originates with the JA2
+1.13 community and is the property of its original authors; it is included
+so the launcher can present human-readable setting descriptions.
+
+------------------------------------------------------------------------
+3. Jagged Alliance 2 tile art and structure data
+   (Palette/default/structs/*.STI, *.sti, *.jsd)
+------------------------------------------------------------------------
+The JUNK1 / junkyard1 / junkyard1b STI tile graphics, their shadow (T/)
+variants, and the accompanying .jsd structure-definition files are art and
+data assets from Jagged Alliance 2 / its v1.13 community tilesets, included
+only as sample working content. Copyright belongs to the respective game
+and mod rights holders; these are not original works of Merc Forge.
+
+------------------------------------------------------------------------
+4. Derived map-statistics corpus
+   (sidecar/mercwizard_core/mapforge/corpus/*.json)
+------------------------------------------------------------------------
+These files contain aggregate statistics (tile-index frequencies and
+per-biome layer coverage) computed from Jagged Alliance 2 v1.13 community
+map files. They contain no game art or executable content — only derived
+numeric metadata — and drive Merc Forge's map generators.

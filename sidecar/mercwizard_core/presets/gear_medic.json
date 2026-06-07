@@ -1,0 +1,21 @@
+{
+  "id": "medic",
+  "name": "Medic",
+  "description": "Field medic loadout: sidearm + medkit + first aid + bandages.",
+  "gear": {
+    "mGearKitName": "Standard",
+    "mHelmet": 176,
+    "mVest": 161,
+    "mLeg": 0,
+    "mWeapon": 17,
+    "mBig0": 1, "mBig0Status": 100, "mBig0Quantity": 3,
+    "mBig1": 0, "mBig1Status": 0, "mBig1Quantity": 0,
+    "mBig2": 0, "mBig2Status": 0, "mBig2Quantity": 0,
+    "mBig3": 0, "mBig3Status": 0, "mBig3Quantity": 0,
+    "mSmall0": 70, "mSmall1": 89, "mSmall2": 89, "mSmall3": 89,
+    "mSmall4": 0, "mSmall5": 0, "mSmall6": 0, "mSmall7": 0,
+    "mPriceMod": 0,
+    "mAbsolutePrice": -1
+  },
+  "notes": "Item 70 is typically the medkit; 89 is first aid. Adjust to your install's Items.xml if different."
+}

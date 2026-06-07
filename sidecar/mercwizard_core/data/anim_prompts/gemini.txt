@@ -1,0 +1,20 @@
+Using this portrait as the base, generate five image edits. Each must be
+saved as a separate 1024×1024 PNG. Preserve every pixel that isn't in the
+named region.
+
+anim_eye_1.png: eyelids partially closed, ~50% covering iris (half-blink).
+  Eyebrows static. Everything outside eye region pixel-identical to input.
+
+anim_eye_2.png: eyelids fully closed, touching. Same rules.
+
+anim_mouth_1.png: mouth slightly parted, 1-2mm gap, beginning to speak.
+  Eyes, eyebrows, cheeks unchanged.
+
+anim_mouth_2.png: mouth wide open speaking loudly, visible teeth.
+  Same identity rules.
+
+anim_mouth_3.png: mouth medium open, neutral talking position.
+
+Do not change: skin tone, hair, eyebrows, jawline, background, lighting,
+shoulders, clothing. Only the explicitly named region changes in each
+output.

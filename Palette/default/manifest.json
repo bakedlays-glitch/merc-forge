@@ -1,0 +1,100 @@
+{
+  "sessions": [
+    {
+      "ts": "2026-05-23T23:33:41",
+      "project": "default",
+      "n_subframes_selected": 0,
+      "n_families_selected": 1,
+      "n_stis_copied": 1,
+      "n_jsd_copied": 1,
+      "n_shadow_copied": 1,
+      "n_skipped": 0,
+      "entries": [
+        {
+          "asset_sha": "da409520bec140d27d7b4db03e8e4aff284a182eb645984b30da427f51445275",
+          "layer": "structs",
+          "struct_type": "ostruct",
+          "src_install": "<source install>",
+          "src_rel": "Data-Bigmaps\\tilesets\\43\\JUNK1.STI",
+          "src_slf_member": null,
+          "dst": "structs\\JUNK1.STI",
+          "jsd_copied": true,
+          "shadow_copied": true,
+          "shadow_dst": "structs\\T\\JUNK1.STI"
+        }
+      ]
+    },
+    {
+      "ts": "2026-05-23T23:40:29",
+      "project": "default",
+      "n_subframes_selected": 10,
+      "n_families_selected": 0,
+      "n_stis_copied": 1,
+      "n_jsd_copied": 1,
+      "n_shadow_copied": 1,
+      "n_skipped": 0,
+      "entries": [
+        {
+          "asset_sha": "da409520bec140d27d7b4db03e8e4aff284a182eb645984b30da427f51445275",
+          "layer": "structs",
+          "struct_type": "ostruct",
+          "src_install": "<source install>",
+          "src_rel": "Data-Bigmaps\\tilesets\\43\\JUNK1.STI",
+          "src_slf_member": null,
+          "dst": "structs\\JUNK1.STI",
+          "jsd_copied": true,
+          "shadow_copied": true,
+          "shadow_dst": "structs\\T\\JUNK1.STI"
+        }
+      ]
+    },
+    {
+      "ts": "2026-05-23T23:40:53",
+      "project": "default",
+      "n_subframes_selected": 4,
+      "n_families_selected": 0,
+      "n_stis_copied": 1,
+      "n_jsd_copied": 1,
+      "n_shadow_copied": 1,
+      "n_skipped": 0,
+      "entries": [
+        {
+          "asset_sha": "59cac28a94663775c8d062b4610aabf026014ddef682847d1d258e5a7918608d",
+          "layer": "structs",
+          "struct_type": "ostruct",
+          "src_install": "<source install>",
+          "src_rel": "Data-Bigmaps\\tilesets\\43\\junkyard1.sti",
+          "src_slf_member": null,
+          "dst": "structs\\junkyard1.sti",
+          "jsd_copied": true,
+          "shadow_copied": true,
+          "shadow_dst": "structs\\T\\junkyard1.sti"
+        }
+      ]
+    },
+    {
+      "ts": "2026-05-23T23:43:28",
+      "project": "default",
+      "n_subframes_selected": 5,
+      "n_families_selected": 0,
+      "n_stis_copied": 1,
+      "n_jsd_copied": 1,
+      "n_shadow_copied": 1,
+      "n_skipped": 0,
+      "entries": [
+        {
+          "asset_sha": "b963962e53a948ad4cf2a61adb1de6deb776fcaefc0798e5c9ebe593917d65b1",
+          "layer": "structs",
+          "struct_type": "ostruct",
+          "src_install": "<source install>",
+          "src_rel": "Data-Bigmaps\\tilesets\\43\\junkyard1b.sti",
+          "src_slf_member": null,
+          "dst": "structs\\junkyard1b.sti",
+          "jsd_copied": true,
+          "shadow_copied": true,
+          "shadow_dst": "structs\\T\\junkyard1b.sti"
+        }
+      ]
+    }
+  ]
+}
