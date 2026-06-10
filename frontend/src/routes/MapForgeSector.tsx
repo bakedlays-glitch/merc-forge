@@ -366,6 +366,12 @@ function MapForgeSectorInner() {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [showValidate, setShowValidate] = useState(false);
   const [radarBusy, setRadarBusy] = useState(false);
+  // Last generated radar minimap — shown as a thumbnail in the View
+  // panel so there's visible proof the STI was written (the engine
+  // gives no feedback until a game load). Cleared via its ✕.
+  const [radarPreview, setRadarPreview] = useState<{
+    png: string; name: string; path: string;
+  } | null>(null);
   const [params, setParams] = useSearchParams();
   const datPath = params.get("dat") ?? "";
   const xmlPath = params.get("xml") ?? "";
@@ -3426,6 +3432,11 @@ function MapForgeSectorInner() {
             try {
               const r = await generateRadar(datPath, xmlPath, tileset);
               const fn = r.output_path.split(/[\\/]/).pop();
+              setRadarPreview({
+                png: r.preview_png_b64,
+                name: fn ?? "radar.sti",
+                path: r.output_path,
+              });
               log?.append({
                 severity: "success",
                 message: `Radar map written: ${fn}`
@@ -3447,6 +3458,33 @@ function MapForgeSectorInner() {
         >
           {radarBusy ? "Radar…" : "🛰 Radar"}
         </button>
+      )}
+      {radarPreview && (
+        <span
+          className="inline-flex items-center gap-1.5 rounded border border-sky-700 bg-sky-950/60 px-1.5 py-0.5"
+          title={`Written to ${radarPreview.path}`}
+        >
+          <img
+            src={`data:image/png;base64,${radarPreview.png}`}
+            alt={`Radar minimap ${radarPreview.name}`}
+            width={132}
+            height={66}
+            style={{ imageRendering: "pixelated" }}
+            className="rounded-sm ring-1 ring-sky-800"
+          />
+          <span className="flex flex-col text-[9px] leading-tight text-sky-200">
+            <span>{radarPreview.name}</span>
+            <span className="text-sky-400/70">✓ in profile RADARMAPS</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setRadarPreview(null)}
+            className="ml-0.5 text-[10px] text-sky-300 hover:text-white"
+            title="Dismiss preview"
+          >
+            ✕
+          </button>
+        </span>
       )}
       <SectorControls
         info={info.data}
