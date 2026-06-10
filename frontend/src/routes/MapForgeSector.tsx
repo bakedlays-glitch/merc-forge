@@ -78,7 +78,7 @@ import {
 import { MapForgeSettingsModal } from "./MapForgeSettingsModal";
 import MapForgeConsole, { type CommandSpec } from "./MapForgeConsole";
 import MapForgeGeneratorWizard from "./MapForgeGeneratorWizard";
-import { MapForgeValidatePanel } from "./MapForgeValidatePanel";
+import { MapForgeValidateBody, MapForgeValidatePanel } from "./MapForgeValidatePanel";
 import ConfirmModal from "../components/ConfirmModal";
 import { FloatingPanel } from "../components/FloatingPanel";
 import { MapForgeDock } from "./MapForgeDock";
@@ -598,6 +598,29 @@ function MapForgeSectorInner() {
   // can invoke the current dock-aware version.
   const toggleBrowseAssetsRef = useRef(toggleBrowseAssets);
   toggleBrowseAssetsRef.current = toggleBrowseAssets;
+  // "Validate" opener: in dock mode, focus (re-adding if the user closed
+  // its tab) the docked Validation panel; legacy layout keeps the
+  // floating panel. Same pattern as onBrowseAssets.
+  const openValidatePanel = useCallback(() => {
+    const api = dockApiRef.current;
+    if (dockMode && api) {
+      const existing = api.getPanel("validate");
+      if (existing) {
+        existing.api.setActive();
+      } else {
+        api.addPanel({
+          id: "validate",
+          component: "default",
+          title: "Validation",
+          position: api.getPanel("inspector")
+            ? { referencePanel: "inspector", direction: "within" }
+            : undefined,
+        });
+      }
+      return;
+    }
+    setShowValidate(true);
+  }, [dockMode]);
   // Full-screen / focus mode — overlay the editor over the whole window
   // and hide the page header chrome. Transient (not persisted), so a
   // reload always starts un-focused.
@@ -2157,21 +2180,37 @@ function MapForgeSectorInner() {
           + (droppedTiles > 0 ? ` (${droppedTiles} clipped at the map edge)` : "")
           + ".",
       });
-      // Auto-validate the post-paste state; surface findings (a paste can
-      // introduce e.g. a high object count or a JSD frame mismatch).
+      // Auto-validate the post-paste state — but only surface findings
+      // the PASTE introduced. Findings the file already carried when it
+      // was opened come back tagged `preexisting` (session baseline);
+      // popping the panel for those blamed the paste for e.g. C6.DAT's
+      // 40 native room-ID gaps and couldn't be cleared by undo.
       try {
         const report = await validateSession(session.session_id);
-        if (report.errors > 0 || report.warnings > 0) {
-          const top = report.findings[0];
+        const fresh = report.findings.filter((f) => !f.preexisting);
+        const freshErrors = fresh.filter((f) => f.severity === "error").length;
+        const freshWarnings = fresh.filter((f) => f.severity === "warn").length;
+        const preexisting = report.findings.filter(
+          (f) => f.preexisting && f.severity !== "info",
+        ).length;
+        if (freshErrors > 0 || freshWarnings > 0) {
+          const top = fresh.find((f) => f.severity !== "info");
           log?.append({
-            severity: report.errors > 0 ? "error" : "warn",
-            message: `Paste validation: ${report.errors} error(s), `
-              + `${report.warnings} warning(s). Opening the Validate panel.`,
+            severity: freshErrors > 0 ? "error" : "warn",
+            message: `Paste introduced ${freshErrors} error(s), `
+              + `${freshWarnings} warning(s). Opening the Validation panel.`,
             detail: top ? `${top.code}: ${top.message}` : undefined,
           });
-          setShowValidate(true);
+          openValidatePanel();
         } else {
-          log?.append({ severity: "info", message: "Paste validated clean." });
+          log?.append({
+            severity: "info",
+            message: "Paste validated clean."
+              + (preexisting > 0
+                ? ` (${preexisting} pre-existing map finding(s) unchanged — `
+                  + "see ✓ Validate for details.)"
+                : ""),
+          });
         }
       } catch (e) {
         log?.append({
@@ -3371,7 +3410,7 @@ function MapForgeSectorInner() {
       {datPath && (
         <button
           type="button"
-          onClick={() => setShowValidate(true)}
+          onClick={openValidatePanel}
           title="Pre-flight validate this sector (crash traps, playability, JSD frame match)"
           className="text-xs px-3 py-1.5 rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 font-medium"
         >
@@ -3452,6 +3491,14 @@ function MapForgeSectorInner() {
     layers: renderLayersPanel,
     view: renderViewPanel,
     log: renderLogPanel,
+    validate: () => (datPath ? (
+      <MapForgeValidateBody
+        datPath={datPath}
+        xmlPath={xmlPath}
+        tileset={tileset}
+        sessionId={session?.session_id ?? null}
+      />
+    ) : null),
   };
 
   return (
@@ -4141,7 +4188,7 @@ function MapForgeSectorInner() {
           from the param schema with sliders + descriptions. Submits
           to the same streaming endpoint, so the canvas paints live
           and undo works identically. Task #117. */}
-      {showValidate && datPath && (
+      {showValidate && datPath && !dockMode && (
         <MapForgeValidatePanel
           datPath={datPath}
           xmlPath={xmlPath}

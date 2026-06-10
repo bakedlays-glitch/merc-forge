@@ -1924,6 +1924,7 @@ class MapForgeSession:
         "dirty", "edit_count",
         "created_at", "last_used_at",
         "read_only", "source_uri",
+        "baseline_findings",
         "_lock",
     )
 
@@ -1944,6 +1945,19 @@ class MapForgeSession:
         # Surfaced in /sessions/{sid} so the UI can show "loaded from
         # SLF" without re-parsing the URL.
         self.source_uri = source_uri or str(dat_path)
+        # Validation baseline: {code: count} of findings present in the
+        # AS-OPENED file, so /validate can tag findings the user's edits
+        # did NOT introduce as `preexisting` (e.g. C6.DAT ships with 40
+        # room-ID gaps — a paste should not be blamed for them). A
+        # finding counts as new again if its affected-count GREW past
+        # the baseline. Pure + cheap (validate_parsed is pure).
+        try:
+            self.baseline_findings = {
+                f.code: (f.count if f.count is not None else len(f.tiles))
+                for f in validate_parsed(self.parsed)
+            }
+        except Exception:  # noqa: BLE001 — baseline is best-effort
+            self.baseline_findings = {}
         # Each session has its own lock so concurrent edits from a
         # batch-paint don't trample n_per_tile counts.
         self._lock = threading.Lock()
@@ -2087,6 +2101,10 @@ class ValidationFinding(BaseModel):
     tiles: list[int] = []    # affected gridnos (sampled, capped at 50)
     count: Optional[int] = None
     slot: Optional[int] = None
+    # True when the open session's BASELINE (the as-opened file) already
+    # carried this finding at the same-or-larger count — i.e. the user's
+    # edits did not introduce it. Always False for no-session validation.
+    preexisting: bool = False
 
 
 class ValidationReport(BaseModel):
@@ -2197,7 +2215,12 @@ def session_validate(
     check_jsd: bool = Query(True, description="Run the (heavier) JSD frame-match check"),
 ):
     """Validate the session's in-memory (uncommitted) state — run this
-    before saving to catch problems while they're still cheap to fix."""
+    before saving to catch problems while they're still cheap to fix.
+
+    Findings already present in the as-opened file (the session's
+    baseline) are tagged `preexisting` so the UI can distinguish "your
+    edit introduced this" from "this map came that way" — many shipped
+    maps carry warn-grade findings natively (C6.DAT: 40 room-ID gaps)."""
     _require_renderer()
     sess = _session_store.get(session_id)
     findings = list(validate_parsed(sess.parsed))
@@ -2205,7 +2228,18 @@ def session_validate(
     if check_jsd:
         findings.extend(_validate_tileset_jsds(sess.xml_path, sess.tileset))
         jsd_checked = True
-    return _to_validation_report(str(sess.dat_path), sess.parsed, findings, jsd_checked)
+    report = _to_validation_report(
+        str(sess.dat_path), sess.parsed, findings, jsd_checked)
+    baseline = getattr(sess, "baseline_findings", None) or {}
+    for f in report.findings:
+        if f.code in ("JSD_FRAME_MISMATCH", "JSD_CHECK_SKIPPED"):
+            # Tileset-level: independent of map edits, so always
+            # pre-existing relative to this session.
+            f.preexisting = True
+        elif f.code in baseline:
+            cur = f.count if f.count is not None else len(f.tiles)
+            f.preexisting = cur <= baseline[f.code]
+    return report
 
 
 # ─── Radar / minimap STI generation (A3) ───────────────────────────────

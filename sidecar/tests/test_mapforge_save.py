@@ -138,3 +138,53 @@ def test_height_edit_roundtrips_byte_exactly():
     assert out[_HEADER_LEN + 2 * gridno] == 80
     # Unedited writer output is byte-identical to the source.
     assert write_dat_bytes(parse_dat_full(data, "x.dat"), data) == data
+
+
+def test_session_baseline_captures_as_opened_findings(tmp_path):
+    """MapForgeSession.__init__ snapshots validate_parsed of the opened
+    file; the minimal dat has no exit grids / edgepoints, so those codes
+    must be in the baseline."""
+    sess = _real_session(tmp_path, "test-baseline-init")
+    try:
+        # _real_session builds via __new__, so compute like __init__ does.
+        real = MapForgeSession.__new__(MapForgeSession)
+        # Use the actual constructor for this one — it reads the file.
+        real = MapForgeSession(sess.dat_path, sess.xml_path, 7)
+        assert "NO_EXIT_GRIDS" in real.baseline_findings
+        assert "NO_EDGEPOINTS" in real.baseline_findings
+    finally:
+        _cleanup(sess)
+
+
+def test_session_validate_tags_preexisting_vs_new(tmp_path):
+    """A finding in the baseline at the same count is tagged preexisting;
+    a finding the edits introduced (or grew) is not."""
+    from routes.mapforge import session_validate
+
+    sess = _real_session(tmp_path, "test-baseline-tags")
+    try:
+        # Baseline: the map "came with" a room gap (rooms 1 and 3 exist,
+        # 2 missing) and the usual NO_EXIT_GRIDS warn.
+        sess.parsed["rooms"] = [1, 0, 3, 0] + [0] * (len(sess.parsed["rooms"]) - 4)
+        sess.baseline_findings = {"ROOM_ID_GAP": 1, "NO_EXIT_GRIDS": 0,
+                                  "NO_EDGEPOINTS": 0}
+        report = session_validate(sess.id, check_jsd=False)
+        by_code = {f.code: f for f in report.findings}
+        assert by_code["ROOM_ID_GAP"].preexisting is True
+        assert by_code["NO_EXIT_GRIDS"].preexisting is True
+
+        # Now the "edit" introduces a SECOND gap — count grows past the
+        # baseline -> no longer tagged preexisting.
+        sess.parsed["rooms"][3] = 5      # rooms now 1,3,5 -> gaps 2 and 4
+        report2 = session_validate(sess.id, check_jsd=False)
+        gap2 = next(f for f in report2.findings if f.code == "ROOM_ID_GAP")
+        assert gap2.preexisting is False
+
+        # And a brand-new finding code is never preexisting: force a
+        # height the baseline didn't have.
+        sess.parsed["heights"][0] = 3
+        report3 = session_validate(sess.id, check_jsd=False)
+        nh = next(f for f in report3.findings if f.code == "NONSTANDARD_HEIGHT")
+        assert nh.preexisting is False
+    finally:
+        _cleanup(sess)

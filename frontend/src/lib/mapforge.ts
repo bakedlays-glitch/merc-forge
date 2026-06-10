@@ -262,6 +262,9 @@ export interface ValidationFinding {
   count: number | null;
   /** Tileset slot index for JSD findings (else null). */
   slot: number | null;
+  /** True when the as-opened file already carried this finding — the
+   * user's edits did not introduce it. Always false without a session. */
+  preexisting?: boolean;
 }
 
 export interface ValidationReport {

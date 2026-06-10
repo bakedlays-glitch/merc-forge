@@ -59,9 +59,10 @@ const PANEL_TITLE: Record<DockPanelId, string> = {
   layers: "Layers",
   view: "View",
   log: "Log",
+  validate: "Validation",
 };
 const PANEL_ORDER: DockPanelId[] = [
-  "canvas", "palette", "assets", "tilesetViewer", "inspector", "tool", "variants", "layers", "view", "log",
+  "canvas", "palette", "assets", "tilesetViewer", "inspector", "tool", "variants", "layers", "view", "log", "validate",
 ];
 
 /** Lay out (or re-lay-out) the default arrangement, mirroring the legacy
@@ -151,7 +152,7 @@ const LAYOUT_STORAGE_KEY = "mapforge.dockLayout";
 // Bump when the panel id set changes. v2 adds the "assets" (Browse
 // Assets) panel — a v1 saved layout has no such panel, so discard it and
 // rebuild the default rather than restoring a layout missing the browser.
-const LAYOUT_VERSION = 5;  // v5: restored MapForgePalette brush-picker as "Browse Assets"; added read-only "Tileset Viewer" panel
+const LAYOUT_VERSION = 6;  // v6: "Validation" becomes a dockable panel (was floating-only)
 
 function saveLayout(api: DockviewApi): void {
   try {

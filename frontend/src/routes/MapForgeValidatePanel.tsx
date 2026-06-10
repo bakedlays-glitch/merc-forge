@@ -1,15 +1,25 @@
 /**
  * MapForge pre-flight validation panel (A4).
  *
- * A floating, on-demand report of crash traps + playability + tileset
- * JSD frame-match issues for the open sector — the cheap feedback loop
+ * An on-demand report of crash traps + playability + tileset JSD
+ * frame-match issues for the open sector — the cheap feedback loop
  * that catches "will this crash / is it playable?" BEFORE the expensive
  * in-game launch.
  *
+ * Two presentations of the same body:
+ *   - `MapForgeValidateBody` — bare content, rendered inside the dock's
+ *     "Validation" panel (dock layout).
+ *   - `MapForgeValidatePanel` — the legacy FloatingPanel wrapper (used
+ *     by the non-dock layout).
+ *
  * Self-contained: given the open sector's paths it fetches its own
  * report (preferring the live session's uncommitted state when a
- * session is open, so you can validate edits before saving). The parent
- * only owns open/closed state.
+ * session is open, so you can validate edits before saving).
+ *
+ * Findings the as-opened file already carried are tagged `preexisting`
+ * by the backend (session baseline) and rendered dimmer with a
+ * "pre-existing" badge — so a paste isn't blamed for e.g. C6.DAT's 40
+ * native room-ID gaps.
  */
 import { useCallback, useEffect, useState } from "react";
 import { FloatingPanel } from "../components/FloatingPanel";
@@ -20,13 +30,12 @@ import {
   type ValidationSeverity,
 } from "../lib/mapforge";
 
-interface Props {
+interface BodyProps {
   datPath: string;
   xmlPath: string;
   tileset: number;
   /** Prefer the session's uncommitted state when a session is open. */
   sessionId: string | null;
-  onClose: () => void;
 }
 
 const SEV_TINT: Record<ValidationSeverity, { bg: string; fg: string; ring: string; icon: string }> = {
@@ -48,9 +57,9 @@ function fmtTiles(tiles: number[], total: number | null, cols: number): string {
   return `${shown}${more}`;
 }
 
-export function MapForgeValidatePanel({
-  datPath, xmlPath, tileset, sessionId, onClose,
-}: Props) {
+export function MapForgeValidateBody({
+  datPath, xmlPath, tileset, sessionId,
+}: BodyProps) {
   const [report, setReport] = useState<ValidationReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -77,29 +86,20 @@ export function MapForgeValidatePanel({
   }, [run]);
 
   const cols = report?.cols ?? 160;
+  // "New" = introduced by this session's edits (not in the as-opened
+  // file). Without a session nothing is tagged, so everything counts.
+  const fresh = report?.findings.filter((f) => !f.preexisting) ?? [];
+  const freshErrors = fresh.filter((f) => f.severity === "error").length;
+  const freshWarnings = fresh.filter((f) => f.severity === "warn").length;
+  const preexistingCount =
+    (report?.findings.length ?? 0) - fresh.length;
   const clean =
     report != null && report.errors === 0 && report.warnings === 0;
+  const cleanOfNew =
+    report != null && !clean && freshErrors === 0 && freshWarnings === 0;
 
   return (
-    <FloatingPanel
-      id="validate"
-      title="Validation"
-      defaultRect={{ x: Math.max(8, window.innerWidth - 430), y: 90, w: 410, h: 470 }}
-      minW={300}
-      minH={220}
-      onClose={onClose}
-      headerRight={
-        <button
-          type="button"
-          onClick={() => void run()}
-          disabled={loading}
-          title="Re-run validation"
-          className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[10px] text-gray-300 hover:border-gray-500 hover:text-gray-100 disabled:opacity-50"
-        >
-          {loading ? "Checking…" : "↻ Re-run"}
-        </button>
-      }
-    >
+    <div className="p-2 text-xs">
       {/* Summary + options */}
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 text-[11px]">
@@ -113,15 +113,26 @@ export function MapForgeValidatePanel({
             {report?.infos ?? 0} info
           </span>
         </div>
-        <label className="flex items-center gap-1 text-[10px] text-gray-400" title="Also check tileset JSD frame counts (slower)">
-          <input
-            type="checkbox"
-            checked={checkJsd}
-            onChange={(e) => setCheckJsd(e.target.checked)}
-            className="h-3 w-3"
-          />
-          JSD check
-        </label>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1 text-[10px] text-gray-400" title="Also check tileset JSD frame counts (slower)">
+            <input
+              type="checkbox"
+              checked={checkJsd}
+              onChange={(e) => setCheckJsd(e.target.checked)}
+              className="h-3 w-3"
+            />
+            JSD check
+          </label>
+          <button
+            type="button"
+            onClick={() => void run()}
+            disabled={loading}
+            title="Re-run validation"
+            className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[10px] text-gray-300 hover:border-gray-500 hover:text-gray-100 disabled:opacity-50"
+          >
+            {loading ? "Checking…" : "↻ Re-run"}
+          </button>
+        </div>
       </div>
 
       {sessionId == null && (
@@ -147,24 +158,41 @@ export function MapForgeValidatePanel({
         </div>
       )}
 
+      {cleanOfNew && (
+        <div className="mb-1 rounded border border-emerald-800 bg-emerald-950 px-2 py-1.5 text-[11px] text-emerald-200">
+          ✓ Your edits introduced no new problems. The findings below were
+          already in the file when it was opened.
+        </div>
+      )}
+
       {report && report.findings.length > 0 && (
         <ul className="space-y-1">
           {SEV_ORDER.flatMap((sev) =>
             report.findings
               .filter((f) => f.severity === sev)
+              // New findings sort above pre-existing ones within a severity.
+              .sort((a, b) => Number(a.preexisting ?? false) - Number(b.preexisting ?? false))
               .map((f, i) => {
                 const tint = SEV_TINT[f.severity];
                 const tiles = fmtTiles(f.tiles, f.count, cols);
                 return (
                   <li
                     key={`${f.code}-${i}`}
-                    className={`rounded px-2 py-1 text-[11px] ${tint.bg} ${tint.fg} ring-1 ring-inset ${tint.ring}`}
+                    className={`rounded px-2 py-1 text-[11px] ${tint.bg} ${tint.fg} ring-1 ring-inset ${tint.ring} ${f.preexisting ? "opacity-60" : ""}`}
                   >
                     <div className="flex items-baseline gap-1.5">
                       <span>{tint.icon}</span>
                       <span className="font-mono text-[9px] opacity-60">{f.code}</span>
                       {f.slot != null && (
                         <span className="font-mono text-[9px] opacity-60">slot {f.slot}</span>
+                      )}
+                      {f.preexisting && (
+                        <span
+                          className="ml-auto rounded bg-gray-800 px-1 py-px text-[8px] uppercase tracking-wide text-gray-400 ring-1 ring-inset ring-gray-600"
+                          title="This finding was already present when the file was opened — your edits did not introduce it."
+                        >
+                          pre-existing
+                        </span>
                       )}
                     </div>
                     <div className="mt-0.5">{f.message}</div>
@@ -180,11 +208,41 @@ export function MapForgeValidatePanel({
         </ul>
       )}
 
+      {preexistingCount > 0 && !cleanOfNew && !clean && (
+        <p className="mt-2 text-[9px] italic text-gray-600">
+          {preexistingCount} finding(s) marked pre-existing were already in
+          the file when it was opened.
+        </p>
+      )}
+
       {report && !report.jsd_checked && checkJsd && (
         <p className="mt-2 text-[9px] italic text-gray-600">
           JSD check skipped (needs the tileset XML + index).
         </p>
       )}
+    </div>
+  );
+}
+
+/** Legacy floating presentation (non-dock layout). */
+export function MapForgeValidatePanel({
+  datPath, xmlPath, tileset, sessionId, onClose,
+}: BodyProps & { onClose: () => void }) {
+  return (
+    <FloatingPanel
+      id="validate"
+      title="Validation"
+      defaultRect={{ x: Math.max(8, window.innerWidth - 430), y: 90, w: 410, h: 470 }}
+      minW={300}
+      minH={220}
+      onClose={onClose}
+    >
+      <MapForgeValidateBody
+        datPath={datPath}
+        xmlPath={xmlPath}
+        tileset={tileset}
+        sessionId={sessionId}
+      />
     </FloatingPanel>
   );
 }
