@@ -387,58 +387,64 @@ def test_bank_registered():
     assert isinstance(REGISTRY["bank"], BankGenerator)
 
 
-def test_bank_sheer_sets_whole_region_to_target():
-    """edge=0 → every tile in the rect set to the target height."""
+def test_bank_uniform_plateau_in_80_steps():
+    """levels × 80 (the engine's WORLD_CLIFF_HEIGHT) on every tile —
+    vanilla cliff semantics; no terrace bands (those just made
+    concentric impassable rings)."""
     ctx = _bank_ctx(20, 20)
     events = list(BankGenerator().iter_ops(ctx, {
-        "x1": 2, "y1": 2, "x2": 6, "y2": 6, "height": 5, "edge": 0,
+        "x1": 2, "y1": 2, "x2": 6, "y2": 6, "levels": 2,
     }))
     ops = [e for e in events if "op" in e]
     assert len(ops) == 25
     for o in ops:
         assert o["op"] == "set_height"
-        assert o["height"] == 5
+        assert o["height"] == 160
     assert {(o["x"], o["y"]) for o in ops} == {
         (x, y) for x in range(2, 7) for y in range(2, 7)
     }
 
 
+def test_bank_default_is_one_cliff_level():
+    ctx = _bank_ctx(10, 10)
+    ops = [e for e in BankGenerator().iter_ops(ctx, {
+        "x1": 0, "y1": 0, "x2": 1, "y2": 1,
+    }) if "op" in e]
+    assert all(o["height"] == 80 for o in ops)
+
+
+def test_bank_levels_zero_flattens():
+    ctx = _bank_ctx(10, 10)
+    ops = [e for e in BankGenerator().iter_ops(ctx, {
+        "x1": 0, "y1": 0, "x2": 1, "y2": 1, "levels": 0,
+    }) if "op" in e]
+    assert all(o["height"] == 0 for o in ops)
+
+
 def test_bank_normalizes_corners():
     ctx = _bank_ctx(30, 30)
     a = {(e["x"], e["y"]) for e in BankGenerator().iter_ops(ctx, {
-        "x1": 10, "y1": 10, "x2": 4, "y2": 4, "height": 3, "edge": 0}) if "op" in e}
+        "x1": 10, "y1": 10, "x2": 4, "y2": 4, "levels": 1}) if "op" in e}
     b = {(e["x"], e["y"]) for e in BankGenerator().iter_ops(ctx, {
-        "x1": 4, "y1": 4, "x2": 10, "y2": 10, "height": 3, "edge": 0}) if "op" in e}
+        "x1": 4, "y1": 4, "x2": 10, "y2": 10, "levels": 1}) if "op" in e}
     assert a == b
 
 
-def test_bank_edge_band_steps_evenly_to_plateau():
-    """edge>0 → the rim steps up to the interior target. A 7-wide row
-    through a 7×7 region with edge=2, height=9 is a symmetric 3/6/9 ramp."""
-    ctx = _bank_ctx(40, 40)
-    events = list(BankGenerator().iter_ops(ctx, {
-        "x1": 10, "y1": 10, "x2": 16, "y2": 16, "height": 9, "edge": 2,
-    }))
-    h = {(e["x"], e["y"]): e["height"] for e in events if "op" in e}
-    assert [h[(x, 13)] for x in range(10, 17)] == [3, 6, 9, 9, 9, 6, 3]
-    # No height ever exceeds the target.
-    assert all(v <= 9 for v in h.values())
-
-
-def test_bank_clamps_oob_region_and_height():
+def test_bank_clamps_oob_region_and_levels():
     ctx = _bank_ctx(10, 10)
     ops = [e for e in BankGenerator().iter_ops(ctx, {
-        "x1": 0, "y1": 0, "x2": 999, "y2": 999, "height": 999, "edge": 0,
+        "x1": 0, "y1": 0, "x2": 999, "y2": 999, "levels": 999,
     }) if "op" in e]
     assert len(ops) == 100               # region clamped to the 10×10 grid
-    assert all(o["height"] == 255 for o in ops)  # height clamped to 255
+    # levels clamp to the engine max of 3 raises → 240, never 255-ish junk.
+    assert all(o["height"] == 240 for o in ops)
 
 
 def test_bank_phase_start_has_total():
     ctx = _bank_ctx(20, 20)
     start = next(
         e for e in BankGenerator().iter_ops(ctx, {
-            "x1": 1, "y1": 1, "x2": 5, "y2": 8, "height": 4, "edge": 1})
+            "x1": 1, "y1": 1, "x2": 5, "y2": 8, "levels": 1})
         if e.get("status") == "start"
     )
     assert start["total"] == 5 * 8  # width 5 × height 8

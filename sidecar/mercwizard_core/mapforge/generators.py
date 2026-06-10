@@ -1566,49 +1566,70 @@ class BuildingStampGenerator(Generator):
                "label": f"Built {W}×{H}: {walls} walls, {roofs} roofs, {door_note}."}
 
 
-class BankGenerator(Generator):
-    """Raise a rectangular region into a stepped earth BANK / escarpment by
-    editing per-tile HEIGHTS (not sprites). The interior reaches a target
-    height; an optional edge band steps down toward the surroundings, so the
-    result is a terrace/plateau rather than a sheer wall.
+# The engine's one terrain-raise unit (worlddef.h:53). Engine-authored
+# heights are exclusively multiples of this, max 3 raises (0/80/160/240).
+WORLD_CLIFF_HEIGHT = 80
 
-    This is the heights half of "auto-cliff" (A7): it sculpts the elevation
-    the engine uses in-game, and the bank is ORTHOGONAL by construction (a
-    rectangle has no diagonal edges → no diagonal cliffs). The matching
-    cliff-FACE *sprites* are deliberately NOT placed here — correct
-    directional face/corner selection needs the tile-connection ("Smart
-    Method") autotiler, a separate roadmap item; stamping a fixed cliff sub
-    here would produce exactly the wrong-facing artifact that work exists to
-    fix. Author elevation with this + the height overlay/brush, then hand-
-    place faces (or wait for the autotiler).
+
+class BankGenerator(Generator):
+    """Raise a rectangular region into a uniform CLIFF PLATEAU by editing
+    per-tile HEIGHTS (not sprites), in the engine's native 80-unit raise
+    steps — i.e. exactly what vanilla maps do with terrain height.
+
+    Engine reality (verified against the 1.13 C++ source, 2026-06-10):
+    - ANY height difference between adjacent tiles is hard-impassable.
+      Pathing blocks it at three sites (CompileTileMovementCosts
+      worlddef.cpp:880, WantToTraverse PATHAI.cpp:2011, legacy
+      FindBestPath PATHAI.cpp:2815), and 1.13 additionally compiles
+      raised tiles as OFF-MAP (GridNoOnWalkableWorldTile, Isometric
+      Utils.cpp:1221). No climb mechanism crosses a terrain-height
+      delta — raised terrain is decorative / route-blocking scenery,
+      exactly like vanilla cliffs. (Real cliff climbing = STATUS.md
+      Phase 3e: resurrecting the engine's dead CLIMB_CLIFF animation.)
+    - Heights that aren't multiples of 80 load, but mis-stack render
+      layers (IGNORE_WORLD_HEIGHT quantizes to 80s, renderworld.cpp:1454).
+    - The in-game Map Editor recomputes ALL heights from cliff-face
+      sprites on save (RaiseWorldLand zeroes sHeight) — resaving there
+      wipes any height not backed by cliff art.
+
+    This replaces the v1 "stepped terrace" design, whose edge band just
+    produced concentric impassable rings around an unreachable plateau —
+    the engine has no climbable slope for the steps to soften.
+
+    The plateau is ORTHOGONAL by construction (a rectangle has no
+    diagonal edges → no diagonal cliffs). The matching cliff-FACE
+    *sprites* are deliberately NOT placed here — correct directional
+    face/corner selection needs the tile-connection ("Smart Method")
+    autotiler, a separate roadmap item; stamping a fixed cliff sub here
+    would produce exactly the wrong-facing artifact that work exists to
+    fix.
 
     No object-count guard is needed: set_height touches the fixed header
     region, never the object layer.
     """
     name = "bank"
-    label = "Bank / escarpment (heights)"
+    label = "Cliff plateau / bank (heights)"
     description = (
-        "Raise a rectangle into a stepped terrain bank by editing tile "
-        "heights. The interior reaches `height`; an `edge`-wide band steps "
-        "down to the surroundings. Orthogonal — no diagonal cliffs. Sculpts "
-        "elevation only; cliff-face sprites come later via the autotiler."
+        "Raise a rectangle into a uniform cliff plateau in the engine's "
+        "native 80-unit steps (levels × 80; 0 flattens back to ground). "
+        "Mercs cannot cross ANY height difference — this is route-blocking "
+        "scenery, like vanilla cliffs. Heights only; cliff-face sprites "
+        "come later via the autotiler."
     )
     params = [
         Param(name="x1", type="int", default=0, description="One corner X", min=0, max=255),
         Param(name="y1", type="int", default=0, description="One corner Y", min=0, max=255),
         Param(name="x2", type="int", default=0, description="Other corner X", min=0, max=255),
         Param(name="y2", type="int", default=0, description="Other corner Y", min=0, max=255),
-        Param(name="height", type="int", default=3,
-              description="Plateau height for the interior (0–255).", min=0, max=255),
-        Param(name="edge", type="int", default=1,
-              description="Width (tiles) of the stepped slope band inside the "
-                          "rim. 0 = sheer (whole region at `height`).",
-              min=0, max=64),
+        Param(name="levels", type="int", default=1,
+              description="Cliff raises (×80 height units each, the engine's "
+                          "native step). 0 = flatten back to ground level.",
+              min=0, max=3),
     ] + [_PLAYABLE_PARAM_OFF]
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
-        target = max(0, min(255, int(params.get("height", 3))))
-        edge = max(0, int(params.get("edge", 1)))
+        levels = max(0, min(3, int(params.get("levels", 1))))
+        target = levels * WORLD_CLIFF_HEIGHT
         playable = _make_playable_predicate(
             ctx, bool(params.get("clip_to_playable", False)))
 
@@ -1621,40 +1642,36 @@ class BankGenerator(Generator):
         if y1 > y2:
             y1, y2 = y2, y1
 
-        width = x2 - x1 + 1
-        rheight = y2 - y1 + 1
-        total = width * rheight
+        # Honest progress total: count the tiles that will actually emit
+        # (clip_to_playable can skip part of the rect).
+        coords = [
+            (x, y)
+            for y in range(y1, y2 + 1)
+            for x in range(x1, x2 + 1)
+            if playable is None or playable(x, y)
+        ]
+        total = len(coords)
 
         yield {
             "phase": "bank",
             "status": "start",
             "label": (
-                f"Banking ({x1},{y1})→({x2},{y2}) to height {target} "
-                f"(edge {edge}) — {total} tiles…"
+                f"Raising ({x1},{y1})→({x2},{y2}) to height {target} "
+                f"({levels} cliff level{'s' if levels != 1 else ''}) — "
+                f"{total} tiles…"
             ),
             "total": total,
         }
 
-        for y in range(y1, y2 + 1):
-            for x in range(x1, x2 + 1):
-                if playable is not None and not playable(x, y):
-                    continue
-                if edge <= 0:
-                    level = target
-                else:
-                    # Tiles inward from the nearest rim (0 = outer ring).
-                    inset = min(x - x1, x2 - x, y - y1, y2 - y)
-                    if inset >= edge:
-                        level = target
-                    else:
-                        # Even stepped ramp: outer ring is one step up, the
-                        # plateau is reached `edge` tiles in.
-                        level = int(round(target * (inset + 1) / (edge + 1)))
-                        level = max(0, min(target, level))
-                yield {"x": x, "y": y, "op": "set_height", "height": level}
+        for x, y in coords:
+            yield {"x": x, "y": y, "op": "set_height", "height": target}
 
         yield {"phase": "bank", "status": "done",
-               "label": f"Bank done — {total} tiles sculpted."}
+               "label": (
+                   f"Plateau done — {total} tiles at height {target}. "
+                   "Raised terrain is impassable scenery (no engine climb); "
+                   "cliff-face sprites ride the autotiler."
+               )}
 
 
 REGISTRY: dict[str, Generator] = {

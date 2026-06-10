@@ -172,3 +172,31 @@ def test_findings_ordered_error_then_warn_then_info():
     order = {SEVERITY_ERROR: 0, SEVERITY_WARN: 1, SEVERITY_INFO: 2}
     ranks = [order[s] for s in sevs]
     assert ranks == sorted(ranks)
+
+
+def test_nonstandard_height_warns():
+    d = _mk(playable=True)
+    d["heights"] = [0, 3, 80, 0]      # 3 = not a multiple of 80
+    findings = validate_parsed(d)
+    f = _by_code(findings, "NONSTANDARD_HEIGHT")
+    assert f.severity == SEVERITY_WARN
+    assert f.tiles == [1]
+    assert f.count == 1
+
+
+def test_raised_terrain_is_info_when_80_aligned():
+    d = _mk(playable=True)
+    d["heights"] = [0, 80, 160, 240]  # vanilla cliff vocabulary
+    findings = validate_parsed(d)
+    assert "NONSTANDARD_HEIGHT" not in _codes(findings)
+    f = _by_code(findings, "RAISED_TERRAIN")
+    assert f.severity == SEVERITY_INFO
+    assert f.count == 3
+
+
+def test_flat_map_has_no_height_findings():
+    d = _mk(playable=True)
+    d["heights"] = [0, 0, 0, 0]
+    codes = _codes(validate_parsed(d))
+    assert "NONSTANDARD_HEIGHT" not in codes
+    assert "RAISED_TERRAIN" not in codes

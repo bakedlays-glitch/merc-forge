@@ -211,6 +211,39 @@ def validate_parsed(parsed: Dict[str, Any]) -> List[Finding]:
             tiles=hot[:_TILE_SAMPLE_CAP], count=len(hot),
         ))
 
+    # ── 5b. Terrain heights (WARN + INFO) ─────────────────────────────
+    # Engine facts (1.13 source, verified 2026-06-10): engine-authored
+    # heights are exclusively multiples of WORLD_CLIFF_HEIGHT=80
+    # (worlddef.h:53; edit_sys.cpp raises) — other values load but
+    # mis-stack render layers (IGNORE_WORLD_HEIGHT quantizes to 80s,
+    # renderworld.cpp:1454). And NO height delta is crossable: pathing
+    # hard-blocks any adjacent-tile difference (worlddef.cpp:880,
+    # PATHAI.cpp:2011/2815) and 1.13 compiles raised tiles as off-map
+    # (GridNoOnWalkableWorldTile). Raised terrain = blocking scenery.
+    heights = parsed.get("heights") or []
+    nonstd = [i for i, h in enumerate(heights) if h % 80 != 0]
+    if nonstd:
+        warns.append(Finding(
+            SEVERITY_WARN, "NONSTANDARD_HEIGHT",
+            f"{len(nonstd)} tile(s) have a terrain height that isn't a "
+            f"multiple of 80 (the engine's one cliff-raise unit). They "
+            f"load, but render layers quantize to 80s and can visibly "
+            f"mis-stack. Use 0/80/160/240.",
+            tiles=nonstd[:_TILE_SAMPLE_CAP], count=len(nonstd),
+        ))
+    raised = [i for i, h in enumerate(heights) if h]
+    if raised:
+        infos.append(Finding(
+            SEVERITY_INFO, "RAISED_TERRAIN",
+            f"{len(raised)} tile(s) have raised terrain. Mercs cannot cross "
+            f"ANY height difference (no climb mechanism exists for terrain "
+            f"— see STATUS.md Phase 3e), so raised areas are route-blocking "
+            f"scenery. Also: resaving this map in the in-game Map Editor "
+            f"recomputes all heights from cliff-face sprites and will WIPE "
+            f"these values unless cliff art backs them.",
+            tiles=raised[:_TILE_SAMPLE_CAP], count=len(raised),
+        ))
+
     # ── 6. Advisory presence checks (INFO) ────────────────────────────
     if not present.get("soldiers"):
         infos.append(Finding(
