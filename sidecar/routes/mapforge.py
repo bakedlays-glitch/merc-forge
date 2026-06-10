@@ -2394,7 +2394,8 @@ def _apply_single_edit(parsed: dict, edit: EditOp, rows: int, cols: int) -> None
     else:
         raise HTTPException(400, {"error": "BAD_OP",
             "message": f"unknown op {edit.op!r}; expected "
-                       f"replace/add/place/set_entries/remove/set_room"})
+                       f"replace/add/place/set_entries/remove/set_room/"
+                       f"set_height"})
 
 
 # ─── SLF → loose extraction (turning a read-only SLF map into an
@@ -2771,15 +2772,28 @@ def apply_edits(session_id: str, body: ApplyEditsBody):
             _rollback()
             raise
         sess.edit_count += applied
-        sess.dirty = applied > 0
+        # `or`: an empty/no-op batch must never reset a dirty session to
+        # clean (the UI would then refuse to save real earlier edits).
+        sess.dirty = sess.dirty or applied > 0
     return ApplyEditsResult(applied=applied, session=_session_info(sess))
+
+
+def _session_backup_dir(dat_path: Path) -> Path:
+    """Per-map backup folder OUTSIDE the install. Keyed on stem + a hash
+    of the full path so `A9.dat` from two different installs can't
+    interleave their backups in one folder."""
+    import hashlib as _hashlib
+    tag = _hashlib.sha1(str(dat_path).encode("utf-8", "replace")).hexdigest()[:8]
+    return _DAT_BACKUP_DIR / f"{dat_path.stem}_{tag}"
 
 
 @router.post("/sessions/{session_id}/save", response_model=SaveResult)
 def save_session(session_id: str):
-    """Flush the session's in-memory state to disk. Creates `<dat>.bak`
-    on the first save per file (idempotent — won't overwrite an
-    existing .bak)."""
+    """Flush the session's in-memory state to disk. Keeps a one-shot
+    pristine backup + rolling pre-save backups, all OUTSIDE the install
+    (never inside `Maps/` — the in-game editor's load dialog enumerates
+    `MAPS/*` with no extension filter, so a `.dat.bak` next to the live
+    map shows up as a loadable map and invites editing a stale copy)."""
     _require_renderer()
     sess = _session_store.get(session_id)
     if sess.read_only:
@@ -2792,12 +2806,14 @@ def save_session(session_id: str):
                                 "the SLF archive. Drop a loose copy of "
                                 "this sector into Data-1.13/Maps/ first.")},
         )
-    # First-save backup. Don't clobber an existing .bak so multiple
-    # save cycles keep the pristine original.
-    backup_path = sess.dat_path.with_suffix(sess.dat_path.suffix + ".bak")
+    backup_dir = _session_backup_dir(sess.dat_path)
+    # First-save pristine backup. Don't clobber an existing one so
+    # multiple save cycles keep the original as first opened.
+    backup_path = backup_dir / "pristine_original.dat"
     backup_str: Optional[str] = None
     if not backup_path.exists():
         try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
             backup_path.write_bytes(sess.original_bytes)
             backup_str = str(backup_path)
         except OSError as e:
@@ -2805,58 +2821,64 @@ def save_session(session_id: str):
                 "message": f"{type(e).__name__}: {e}"})
     else:
         backup_str = str(backup_path)
-    # Pre-write consistency check. If the parsed dict's per-tile layer
-    # counts disagree with the actual entry list lengths, the writer
-    # will produce a file the engine can't load (count nibbles mislead
-    # the file reader, MAPINFO ends up read from the wrong offset, and
-    # the engine asserts "Map is less than minimum supported version").
-    # A user hit this 2026-05-25 on a saved C6 — root cause not yet
-    # localised; this validator surfaces it AT the save point so the
-    # bad data never reaches disk + we get diagnostics for the repro.
-    import logging as _logging
-    _log = _logging.getLogger("mapforge.save")
-    desync = _validate_parsed_consistency(sess.parsed)
-    if desync is not None:
-        _log.error("SAVE REFUSED — internal state inconsistent: %s", desync)
-        raise HTTPException(500, {
-            "error": "PARSED_STATE_CORRUPT",
-            "message": (
-                "MercForge's in-memory map state is inconsistent — saving "
-                "would produce a .dat the game can't load. The bad save is "
-                "BLOCKED. Reopen the sector to discard the corrupt state. "
-                f"Specific desync: {desync}"
-            ),
-        })
     # Rolling pre-save backup: copy the CURRENT on-disk .dat (the version
     # about to be overwritten) to a timestamped file OUTSIDE the install,
-    # so EVERY save is recoverable — not just the pristine original the
-    # one-shot .bak holds. Best-effort; never block the save on it.
+    # so EVERY save is recoverable — not just the pristine original.
+    # Best-effort; never block the save on it.
     if sess.dat_path.exists():
         try:
             import shutil as _shutil
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            roll_dir = _DAT_BACKUP_DIR / sess.dat_path.stem
-            roll_dir.mkdir(parents=True, exist_ok=True)
+            backup_dir.mkdir(parents=True, exist_ok=True)
             # uuid suffix so two saves in the same wall-clock second can't
             # collide and silently overwrite the earlier rolling backup.
-            _shutil.copy2(sess.dat_path, roll_dir / f"{stamp}_{uuid.uuid4().hex[:6]}.dat")
+            _shutil.copy2(sess.dat_path,
+                          backup_dir / f"{stamp}_{uuid.uuid4().hex[:6]}.dat")
         except OSError:
             pass  # disk full / permission — the save itself still proceeds
-    # Write the new .dat ATOMICALLY (tmp + replace) so a crash mid-write
-    # can't truncate the canonical .dat.
-    try:
-        new_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
-        tmp_path = sess.dat_path.with_suffix(sess.dat_path.suffix + ".mwtmp")
-        tmp_path.write_bytes(new_bytes)
-        tmp_path.replace(sess.dat_path)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, {"error": "WRITE_FAILED",
-            "message": f"{type(e).__name__}: {e}"})
-    # After save: the on-disk file IS the new baseline. Update
-    # original_bytes so subsequent saves diff against it (and so the
-    # backup logic doesn't re-back-up the freshly-saved version).
-    sess.original_bytes = new_bytes
-    sess.dirty = False
+    import logging as _logging
+    _log = _logging.getLogger("mapforge.save")
+    # Hold the session lock from the consistency check through the state
+    # update: `apply_edits` and generator runs mutate `parsed` under this
+    # lock (a generator can hold it for seconds), and an unlocked save
+    # racing them could serialize a mid-mutation state to disk — or mark
+    # in-flight edits clean via `dirty = False` and silently drop them.
+    with sess._lock:
+        # Pre-write consistency check. If the parsed dict's per-tile layer
+        # counts disagree with the actual entry list lengths, the writer
+        # will produce a file the engine can't load (count nibbles mislead
+        # the file reader, MAPINFO ends up read from the wrong offset, and
+        # the engine asserts "Map is less than minimum supported version").
+        # A user hit this 2026-05-25 on a saved C6 — root cause not yet
+        # localised; this validator surfaces it AT the save point so the
+        # bad data never reaches disk + we get diagnostics for the repro.
+        desync = _validate_parsed_consistency(sess.parsed)
+        if desync is not None:
+            _log.error("SAVE REFUSED — internal state inconsistent: %s", desync)
+            raise HTTPException(500, {
+                "error": "PARSED_STATE_CORRUPT",
+                "message": (
+                    "MercForge's in-memory map state is inconsistent — saving "
+                    "would produce a .dat the game can't load. The bad save is "
+                    "BLOCKED. Reopen the sector to discard the corrupt state. "
+                    f"Specific desync: {desync}"
+                ),
+            })
+        # Write the new .dat ATOMICALLY (tmp + replace) so a crash mid-write
+        # can't truncate the canonical .dat.
+        try:
+            new_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
+            tmp_path = sess.dat_path.with_suffix(sess.dat_path.suffix + ".mwtmp")
+            tmp_path.write_bytes(new_bytes)
+            tmp_path.replace(sess.dat_path)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, {"error": "WRITE_FAILED",
+                "message": f"{type(e).__name__}: {e}"})
+        # After save: the on-disk file IS the new baseline. Update
+        # original_bytes so subsequent saves diff against it (and so the
+        # backup logic doesn't re-back-up the freshly-saved version).
+        sess.original_bytes = new_bytes
+        sess.dirty = False
     return SaveResult(
         session=_session_info(sess),
         bytes_written=len(new_bytes),

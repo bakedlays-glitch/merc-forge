@@ -3,7 +3,9 @@
 Round-trips a parsed .dat (per parse_dat_full) back to bytes that match
 what the engine writes. The first design goal is byte-exact identity:
 parse(file) → write_back → bytes must equal the original file. That's
-verified by test_dat_round_trip.py against the full corpus.
+verified by tools/roundtrip_audit.py (B0 gate — 15,479/15,479 maps
+byte-perfect across 30 installs, 2026-06-10) and pinned at byte level
+by tests/test_mapforge_save.py.
 
 Hybrid encoding strategy
 ========================
@@ -15,10 +17,11 @@ ourselves on write, so we COPY THE ORIGINAL BYTES through:
   - Heights region: each tile reserves 2 bytes but only the low byte
     is the actual sHeight value (worlddef.h:272 declares UINT8 but
     worlddef.cpp:2976-2980 reads INT16, leaving runtime garbage in the
-    high byte). The parser's `heights` list only carries low bytes —
-    if we wrote zeros in the high bytes we'd diverge from any original
-    that has non-zero garbage there. Solution: pass the original bytes
-    through this region untouched.
+    high byte). The parser carries low bytes in `heights` and the
+    garbage high bytes in `heights_high`; the writer re-interleaves
+    both, so unedited maps stay byte-identical while `set_height`
+    edits to the low byte propagate. (Byte-level pin:
+    tests/test_mapforge_save.py::test_height_edit_roundtrips_byte_exactly.)
 
   - Appendix: the optional WORLDITEMS / LIGHTS / MAPINFO / SOLDIERS /
     EXITGRIDS / DOORTABLE / EDGEPOINTS / NPCSCHEDULES tail is variable-
@@ -34,8 +37,9 @@ parsed["structs"][gridno], parsed["n_per_tile"]["struct"][gridno], or
 parsed["rooms"][gridno] — then call write_dat_bytes. The new layer
 counts and layer passes propagate to the bytes; everything else stays.
 
-For now, edits are LIMITED to tile-layer data + rooms + world_flags.
-Editing heights or anything in the appendix requires writer extensions.
+Editable today: tile-layer data + rooms + heights (low byte) +
+world_flags. Editing anything in the appendix requires writer
+extensions (the B-phase work).
 """
 from __future__ import annotations
 
