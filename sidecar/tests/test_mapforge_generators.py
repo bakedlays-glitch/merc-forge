@@ -9,6 +9,7 @@ from mercwizard_core.mapforge import shadow_pairs
 from mercwizard_core.mapforge.generators import (
     ALL_LAYERS,
     AutoShadowGenerator,
+    BankGenerator,
     ClusterScatterGenerator,
     DensityFalloffGenerator,
     FillLayerGenerator,
@@ -366,8 +367,81 @@ def test_registry_lists_all_phase_d_generators():
     assert names == {
         "wipe", "fill", "rect",
         "scatter", "cluster", "density-falloff",
-        "building",
+        "building", "bank",
     }
+
+
+# ────────────────────────────────────────────────────────────────────────
+#  BankGenerator (A7 — heights escarpment)
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _bank_ctx(rows, cols):
+    # iter_ops never reads ctx.parsed (heights flow out as ops), so a
+    # dims-only context is enough to enumerate the stream.
+    return GeneratorContext(rows=rows, cols=cols, parsed={"rows": rows, "cols": cols})
+
+
+def test_bank_registered():
+    assert "bank" in REGISTRY
+    assert isinstance(REGISTRY["bank"], BankGenerator)
+
+
+def test_bank_sheer_sets_whole_region_to_target():
+    """edge=0 → every tile in the rect set to the target height."""
+    ctx = _bank_ctx(20, 20)
+    events = list(BankGenerator().iter_ops(ctx, {
+        "x1": 2, "y1": 2, "x2": 6, "y2": 6, "height": 5, "edge": 0,
+    }))
+    ops = [e for e in events if "op" in e]
+    assert len(ops) == 25
+    for o in ops:
+        assert o["op"] == "set_height"
+        assert o["height"] == 5
+    assert {(o["x"], o["y"]) for o in ops} == {
+        (x, y) for x in range(2, 7) for y in range(2, 7)
+    }
+
+
+def test_bank_normalizes_corners():
+    ctx = _bank_ctx(30, 30)
+    a = {(e["x"], e["y"]) for e in BankGenerator().iter_ops(ctx, {
+        "x1": 10, "y1": 10, "x2": 4, "y2": 4, "height": 3, "edge": 0}) if "op" in e}
+    b = {(e["x"], e["y"]) for e in BankGenerator().iter_ops(ctx, {
+        "x1": 4, "y1": 4, "x2": 10, "y2": 10, "height": 3, "edge": 0}) if "op" in e}
+    assert a == b
+
+
+def test_bank_edge_band_steps_evenly_to_plateau():
+    """edge>0 → the rim steps up to the interior target. A 7-wide row
+    through a 7×7 region with edge=2, height=9 is a symmetric 3/6/9 ramp."""
+    ctx = _bank_ctx(40, 40)
+    events = list(BankGenerator().iter_ops(ctx, {
+        "x1": 10, "y1": 10, "x2": 16, "y2": 16, "height": 9, "edge": 2,
+    }))
+    h = {(e["x"], e["y"]): e["height"] for e in events if "op" in e}
+    assert [h[(x, 13)] for x in range(10, 17)] == [3, 6, 9, 9, 9, 6, 3]
+    # No height ever exceeds the target.
+    assert all(v <= 9 for v in h.values())
+
+
+def test_bank_clamps_oob_region_and_height():
+    ctx = _bank_ctx(10, 10)
+    ops = [e for e in BankGenerator().iter_ops(ctx, {
+        "x1": 0, "y1": 0, "x2": 999, "y2": 999, "height": 999, "edge": 0,
+    }) if "op" in e]
+    assert len(ops) == 100               # region clamped to the 10×10 grid
+    assert all(o["height"] == 255 for o in ops)  # height clamped to 255
+
+
+def test_bank_phase_start_has_total():
+    ctx = _bank_ctx(20, 20)
+    start = next(
+        e for e in BankGenerator().iter_ops(ctx, {
+            "x1": 1, "y1": 1, "x2": 5, "y2": 8, "height": 4, "edge": 1})
+        if e.get("status") == "start"
+    )
+    assert start["total"] == 5 * 8  # width 5 × height 8
 
 
 # ────────────────────────────────────────────────────────────────────────

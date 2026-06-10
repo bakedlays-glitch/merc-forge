@@ -1566,6 +1566,97 @@ class BuildingStampGenerator(Generator):
                "label": f"Built {W}×{H}: {walls} walls, {roofs} roofs, {door_note}."}
 
 
+class BankGenerator(Generator):
+    """Raise a rectangular region into a stepped earth BANK / escarpment by
+    editing per-tile HEIGHTS (not sprites). The interior reaches a target
+    height; an optional edge band steps down toward the surroundings, so the
+    result is a terrace/plateau rather than a sheer wall.
+
+    This is the heights half of "auto-cliff" (A7): it sculpts the elevation
+    the engine uses in-game, and the bank is ORTHOGONAL by construction (a
+    rectangle has no diagonal edges → no diagonal cliffs). The matching
+    cliff-FACE *sprites* are deliberately NOT placed here — correct
+    directional face/corner selection needs the tile-connection ("Smart
+    Method") autotiler, a separate roadmap item; stamping a fixed cliff sub
+    here would produce exactly the wrong-facing artifact that work exists to
+    fix. Author elevation with this + the height overlay/brush, then hand-
+    place faces (or wait for the autotiler).
+
+    No object-count guard is needed: set_height touches the fixed header
+    region, never the object layer.
+    """
+    name = "bank"
+    label = "Bank / escarpment (heights)"
+    description = (
+        "Raise a rectangle into a stepped terrain bank by editing tile "
+        "heights. The interior reaches `height`; an `edge`-wide band steps "
+        "down to the surroundings. Orthogonal — no diagonal cliffs. Sculpts "
+        "elevation only; cliff-face sprites come later via the autotiler."
+    )
+    params = [
+        Param(name="x1", type="int", default=0, description="One corner X", min=0, max=255),
+        Param(name="y1", type="int", default=0, description="One corner Y", min=0, max=255),
+        Param(name="x2", type="int", default=0, description="Other corner X", min=0, max=255),
+        Param(name="y2", type="int", default=0, description="Other corner Y", min=0, max=255),
+        Param(name="height", type="int", default=3,
+              description="Plateau height for the interior (0–255).", min=0, max=255),
+        Param(name="edge", type="int", default=1,
+              description="Width (tiles) of the stepped slope band inside the "
+                          "rim. 0 = sheer (whole region at `height`).",
+              min=0, max=64),
+    ] + [_PLAYABLE_PARAM_OFF]
+
+    def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
+        target = max(0, min(255, int(params.get("height", 3))))
+        edge = max(0, int(params.get("edge", 1)))
+        playable = _make_playable_predicate(
+            ctx, bool(params.get("clip_to_playable", False)))
+
+        x1 = max(0, min(ctx.cols - 1, int(params.get("x1", 0))))
+        y1 = max(0, min(ctx.rows - 1, int(params.get("y1", 0))))
+        x2 = max(0, min(ctx.cols - 1, int(params.get("x2", 0))))
+        y2 = max(0, min(ctx.rows - 1, int(params.get("y2", 0))))
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+
+        width = x2 - x1 + 1
+        rheight = y2 - y1 + 1
+        total = width * rheight
+
+        yield {
+            "phase": "bank",
+            "status": "start",
+            "label": (
+                f"Banking ({x1},{y1})→({x2},{y2}) to height {target} "
+                f"(edge {edge}) — {total} tiles…"
+            ),
+            "total": total,
+        }
+
+        for y in range(y1, y2 + 1):
+            for x in range(x1, x2 + 1):
+                if playable is not None and not playable(x, y):
+                    continue
+                if edge <= 0:
+                    level = target
+                else:
+                    # Tiles inward from the nearest rim (0 = outer ring).
+                    inset = min(x - x1, x2 - x, y - y1, y2 - y)
+                    if inset >= edge:
+                        level = target
+                    else:
+                        # Even stepped ramp: outer ring is one step up, the
+                        # plateau is reached `edge` tiles in.
+                        level = int(round(target * (inset + 1) / (edge + 1)))
+                        level = max(0, min(target, level))
+                yield {"x": x, "y": y, "op": "set_height", "height": level}
+
+        yield {"phase": "bank", "status": "done",
+               "label": f"Bank done — {total} tiles sculpted."}
+
+
 REGISTRY: dict[str, Generator] = {
     g.name: g for g in [
         WipeGenerator(),
@@ -1579,6 +1670,7 @@ REGISTRY: dict[str, Generator] = {
         # them at load (HAS_SHADOW_BUDDY), so baking them only doubled in-game.
         # Class kept for reference; no longer offered to users.
         BuildingStampGenerator(),
+        BankGenerator(),
     ]
 }
 
