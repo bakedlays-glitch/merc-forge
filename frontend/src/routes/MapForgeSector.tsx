@@ -94,6 +94,7 @@ import {
   type MapForgeSettings,
 } from "../lib/mapforgeSettings";
 import { findShadowSlot, isShadowOnlySlot } from "../lib/jaSlotPairs";
+import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 import {
   shapeTiles,
   type ShapeKind,
@@ -183,6 +184,8 @@ function _mirrorGeneratorOp(renderer: IsoRenderer, op: unknown): void {
   // User-reported: Ctrl+Z does nothing after a generator run.
   if (opName === "set_room") {
     renderer.recordRoomSnapshot(x, y);
+  } else if (opName === "set_height") {
+    renderer.recordHeightSnapshot(x, y);
   } else if (layer) {
     renderer.recordSnapshot(x, y, layer);
   }
@@ -192,13 +195,15 @@ function _mirrorGeneratorOp(renderer: IsoRenderer, op: unknown): void {
   const translated = {
     x,
     y,
-    op: opName as "place" | "add" | "remove" | "replace" | "set_entries" | "set_room",
+    op: opName as "place" | "add" | "remove" | "replace" | "set_entries"
+      | "set_room" | "set_height",
     layer,
     slot: o.slot as number | undefined,
     sub: o.sub as number | undefined,
     entryIndex: o.entry_index as number | undefined,
     entries: o.entries as number[][] | undefined,
     roomId: o.room_id as number | undefined,
+    height: o.height as number | undefined,
   };
   renderer.applyLocalEdit(translated);
 }
@@ -862,14 +867,24 @@ function MapForgeSectorInner() {
   // button label ("Undo: Paint floor (12 tiles)" → "Undo: empty").
   const [undoDepth, setUndoDepth] = useState(0);
   const [redoDepth, setRedoDepth] = useState(0);
-  // Stack depth at the last save. The backend's session.edit_count
-  // counts BOTH paint and undo applyEdits as edits, so a paint+undo
-  // round-trip leaves edit_count positive even though the parsed dict
-  // matches what's on disk. Using stack-depth-vs-savedAt gives an
-  // accurate dirty state: depth == savedAtDepth ⇔ matches saved.
+  // Stack depth at the last save — kept for the Save button's
+  // "N strokes" label only; dirty itself is generation-based (below).
   const [savedAtDepth, setSavedAtDepth] = useState(0);
+  // Edit GENERATION tracking (monotonic renderer counter, bumped on
+  // every committed stroke / undo / redo / rollback discard). Depth
+  // comparison lied: save→undo→new-stroke lands back on the saved
+  // depth ("Saved" while two strokes differ from disk), and the
+  // 100-entry stack cap pins depth forever. Generation can collide
+  // neither way — worst case it reads dirty when undo returned the
+  // content to the exact save point, which errs safe.
+  const [histGen, setHistGen] = useState(0);
+  const [savedAtGen, setSavedAtGen] = useState(0);
   // Frontend-computed dirty flag for the Save button.
-  const localDirty = undoDepth !== savedAtDepth;
+  const localDirty = histGen !== savedAtGen;
+  // Window-close / refresh guard while dirty (in-app nav links already
+  // confirm via their own handlers; this covers the Tauri window X and
+  // F5, which previously discarded unsaved edits silently).
+  useUnsavedGuard(localDirty);
   // Pending tileset switch — set when the user clicks a tileset
   // option while the sector has unsaved changes. Holds the requested
   // value until the confirm modal resolves; null when no prompt
@@ -943,9 +958,12 @@ function MapForgeSectorInner() {
     setFirstPaintDone(false);
     // Fresh session → fresh undo/redo state. savedAtDepth + undoDepth
     // reset to 0 so the Save button starts clean; redo clears too.
+    // Generations reset together (a fresh IsoRenderer starts at 0).
     setUndoDepth(0);
     setRedoDepth(0);
     setSavedAtDepth(0);
+    setHistGen(0);
+    setSavedAtGen(0);
 
     // Helpers that advance phases monotonically. `accFloor` runs in a
     // local accumulator (not React state) so back-to-back phase
@@ -1773,6 +1791,7 @@ function MapForgeSectorInner() {
     const r = renderer.redoDepth();
     setUndoDepth(u);
     setRedoDepth(r);
+    setHistGen(renderer.generation());
   }
 
   /** Re-apply the last undone stroke. Mirror of `undo()` but pulls from the
@@ -2168,7 +2187,10 @@ function MapForgeSectorInner() {
       // already at pre-paste state) and drop the dangling undo stroke so
       // Ctrl+Z can't push a revert the server never needed.
       if (strokeCommitted) {
-        const entry = renderer.popUndo();
+        // discardLastUndo, NOT popUndo: popUndo pushes a redo mirror of
+        // the rejected paste, letting Ctrl+Y replay it locally with no
+        // second rollback — local mirror diverges from the server again.
+        const entry = renderer.discardLastUndo();
         if (entry) {
           for (const s of entry.snapshots) {
             renderer.applyLocalEdit({
@@ -2342,6 +2364,7 @@ function MapForgeSectorInner() {
       const res = await saveSession(session.session_id);
       setSession(res.session);
       setSavedAtDepth(undoDepth);
+      setSavedAtGen(renderer ? renderer.generation() : histGen);
       log?.append({
         severity: "success",
         message: `Saved ${(res.bytes_written / 1024).toFixed(1)} KB to disk`,
@@ -3185,6 +3208,8 @@ function MapForgeSectorInner() {
       onEditApplied={(updatedSession) => {
         setSession(updatedSession);
         setRenderEpoch((e) => e + 1);
+        // Inspector edits commit a stroke — sync undo/redo/dirty UI.
+        bumpHistory();
       }}
     />
   );
@@ -3329,6 +3354,7 @@ function MapForgeSectorInner() {
           onSaved={(updated) => {
             setSession(updated);
             setSavedAtDepth(undoDepth);
+            setSavedAtGen(renderer ? renderer.generation() : histGen);
           }}
         />
       )}
@@ -3598,6 +3624,7 @@ function MapForgeSectorInner() {
                   setSession(updated);
                   // Mark this depth as the new "clean" baseline.
                   setSavedAtDepth(undoDepth);
+                  setSavedAtGen(renderer ? renderer.generation() : histGen);
                 }}
               />
             )}
@@ -4044,6 +4071,8 @@ function MapForgeSectorInner() {
           onEditApplied={(updatedSession) => {
             setSession(updatedSession);
             setRenderEpoch((e) => e + 1);
+            // Inspector edits commit a stroke — sync undo/redo/dirty UI.
+            bumpHistory();
           }}
         />
       </div>
@@ -5845,17 +5874,22 @@ function SaveButton({
   // negative when undone past the save point. Displayed for clarity
   // ("Save (3 strokes ahead)" or "Save (2 strokes behind)").
   const netStrokes = undoDepth - savedAtDepth;
+  // Depth-delta is a LABEL hint only — `localDirty` (generation-based)
+  // is the truth. They can disagree (save→undo→repaint lands back on
+  // the saved depth), so a dirty button never reads "Saved".
   const label = netStrokes > 0
     ? `Save (${netStrokes} stroke${netStrokes === 1 ? "" : "s"})`
     : netStrokes < 0
       ? `Save (rollback ${-netStrokes})`
-      : "Saved";
+      : localDirty
+        ? "Save"
+        : "Saved";
   // No status captions below the button — same toolbar-alignment fix
   // as UndoButton. Save success / failure already lands in the log
-  // panel below (with .bak path + byte count); a second copy here
+  // panel below (with backup path + byte count); a second copy here
   // pushed the toolbar row 12px taller.
   const titleText = localDirty
-    ? `Save ${Math.abs(netStrokes)} stroke(s) to disk (creates .bak on first save)`
+    ? "Save changes to disk (backups land outside the install)"
     : "No unsaved changes";
   return (
     <button
@@ -6024,11 +6058,18 @@ function TileInspectionView({
     if (!session || !renderer) return;
     setEditBusy(true); setEditError(null);
     // Mirror the paintBrush flow: mutate local first for instant
-    // canvas feedback, then send to backend.
+    // canvas feedback, then send to backend. Routed through the stroke
+    // machinery so inspector edits are (a) undoable, (b) invalidate the
+    // redo timeline like every other mutation, and (c) count toward
+    // dirty tracking — previously an inspector-only session showed
+    // "Saved" and refused Ctrl+S, losing the edits on close.
+    renderer.beginStroke(`Edit ${layer}[${entryIdx}] (${t.x},${t.y})`);
+    renderer.recordSnapshot(t.x, t.y, layer);
     renderer.applyLocalEdit({
       x: t.x, y: t.y, op,
       layer, slot, sub, entryIndex: entryIdx,
     });
+    renderer.endStroke();
     try {
       const edit: SessionEdit = {
         x: t.x, y: t.y, op, layer,
@@ -6038,6 +6079,20 @@ function TileInspectionView({
       setEditingKey(null);
       onEdited(res.session);
     } catch (e) {
+      // Backend rejected — the server session is untouched, so revert
+      // the optimistic local mirror and DISCARD the stroke (no redo
+      // mirror: Ctrl+Y must not replay a rejected edit).
+      const entry = renderer.discardLastUndo();
+      if (entry) {
+        for (const s of entry.snapshots) {
+          renderer.applyLocalEdit({
+            x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries,
+          });
+        }
+      }
+      // Same-session callback so the parent repaints + resyncs the
+      // history/dirty UI after the revert.
+      onEdited(session);
       setEditError(e instanceof Error ? e.message : String(e));
     } finally {
       setEditBusy(false);

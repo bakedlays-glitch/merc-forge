@@ -413,6 +413,12 @@ export class IsoRenderer {
    * by `endStroke` — a fresh edit invalidates the redo timeline (standard
    * undo/redo semantics). */
   private redoStack: UndoEntry[] = [];
+  /** Monotonic counter bumped on EVERY content-changing history event
+   * (committed stroke, undo, redo, rollback discard). Dirty tracking
+   * compares this against the value captured at save time — unlike
+   * stack DEPTH, it can't collide after save→undo→new-stroke (the
+   * classic false-"Saved" stack-position bug) or pin at the 100-cap. */
+  private editGeneration = 0;
 
   /** Capture the CURRENT state of every axis named in `entry` into a new
    * UndoEntry — the inverse of applying `entry`. Used to build the redo
@@ -499,6 +505,7 @@ export class IsoRenderer {
     if (s.snapshots.length === 0 && s.roomSnapshots.length === 0
         && s.heightSnapshots.length === 0) return;
     this.undoStack.push(s);
+    this.editGeneration++;
     // A fresh committed edit invalidates the redo timeline.
     this.redoStack = [];
     // Cap at 100 strokes. Each snapshot is small (a few ints) so this
@@ -519,6 +526,19 @@ export class IsoRenderer {
     // redo entry BEFORE the caller applies the pre-edit snapshots.
     this.redoStack.push(this.captureMirror(entry));
     while (this.redoStack.length > 100) this.redoStack.shift();
+    this.editGeneration++;
+    return entry;
+  }
+
+  /** Pop the top undo entry WITHOUT pushing a redo mirror. For rollback
+   * paths only (e.g. a paste the backend rejected): the caller is about
+   * to revert the stroke locally, and offering it on the Redo stack
+   * would let Ctrl+Y replay a server-rejected edit — re-diverging the
+   * local mirror from the authoritative session. */
+  discardLastUndo(): UndoEntry | null {
+    const entry = this.undoStack.pop();
+    if (!entry) return null;
+    this.editGeneration++;
     return entry;
   }
 
@@ -530,7 +550,14 @@ export class IsoRenderer {
     if (!entry) return null;
     this.undoStack.push(this.captureMirror(entry));
     while (this.undoStack.length > 100) this.undoStack.shift();
+    this.editGeneration++;
     return entry;
+  }
+
+  /** Monotonic content-change counter (see `editGeneration`). Compare
+   * against the value captured at save time for dirty tracking. */
+  generation(): number {
+    return this.editGeneration;
   }
 
   /** Inspect the top undo label without popping. Used by the UI to
