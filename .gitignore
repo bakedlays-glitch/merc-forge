@@ -103,6 +103,9 @@ desktop.ini
 # ── Local testing scratch ───────────────────────────────────────────
 test_install/
 scratch/
+# Playwright/browser-MCP run artifacts (screenshots, traces) dropped at
+# repo root during MapForge GUI smoke tests. Regenerable; not source.
+.playwright-mcp/
 # Root-level scratch PNGs from MapForge debug captures (e.g.
 # scratch_build21_sub21.png, scratch_painter_*.png). The `scratch/`
 # rule above only matches a `scratch/` directory; these are loose
