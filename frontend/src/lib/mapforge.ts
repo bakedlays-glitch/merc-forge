@@ -247,6 +247,85 @@ export function inspectTile(
   );
 }
 
+// ─── Pre-flight validation (A4) ─────────────────────────────────────────
+// Mirrors ValidationFinding / ValidationReport in sidecar/routes/mapforge.py.
+export type ValidationSeverity = "error" | "warn" | "info";
+
+export interface ValidationFinding {
+  severity: ValidationSeverity;
+  code: string;
+  message: string;
+  /** Affected gridnos (sampled, capped at 50 server-side). Convert to
+   * (x, y) with x = g % cols, y = Math.floor(g / cols). */
+  tiles: number[];
+  /** Total affected when it exceeds the sampled `tiles` list. */
+  count: number | null;
+  /** Tileset slot index for JSD findings (else null). */
+  slot: number | null;
+}
+
+export interface ValidationReport {
+  dat_path: string;
+  rows: number;
+  cols: number;
+  errors: number;
+  warnings: number;
+  infos: number;
+  /** Whether the (heavier) tileset JSD frame-match check ran. */
+  jsd_checked: boolean;
+  findings: ValidationFinding[];
+}
+
+/** Validate a .dat on disk. Pass xml + tileset to also run the JSD
+ * frame-match check (otherwise only structure/playability checks run). */
+export function validateSector(
+  datPath: string,
+  opts?: { xmlPath?: string; tileset?: number; checkJsd?: boolean },
+): Promise<ValidationReport> {
+  const params: Record<string, string | number | undefined> = { dat: datPath };
+  if (opts?.xmlPath) params.xml = opts.xmlPath;
+  if (opts?.tileset !== undefined) params.tileset = opts.tileset;
+  if (opts?.checkJsd !== undefined) params.check_jsd = String(opts.checkJsd);
+  return jsonGet<ValidationReport>(`/mapforge/sector/validate?${qs(params)}`);
+}
+
+/** Validate a session's in-memory (uncommitted) state — run before save. */
+export function validateSession(
+  sessionId: string,
+  opts?: { checkJsd?: boolean },
+): Promise<ValidationReport> {
+  const query = qs(
+    opts?.checkJsd !== undefined ? { check_jsd: String(opts.checkJsd) } : {},
+  );
+  return jsonGet<ValidationReport>(
+    `/mapforge/sessions/${encodeURIComponent(sessionId)}/validate${query ? `?${query}` : ""}`,
+  );
+}
+
+// ─── Radar / minimap generation (A3) ────────────────────────────────────
+export interface RadarResult {
+  output_path: string;
+  bytes_written: number;
+  width: number;
+  height: number;
+  /** True when a same-named radar exists in Radarmaps.slf (we're overriding
+   * the bundled vanilla minimap). Informational. */
+  overrides_bundled: boolean;
+  /** base64 PNG of the generated 88×44 image. */
+  preview_png_b64: string;
+}
+
+/** Generate the sector's 88×44 radar/minimap STI and write it into the
+ * install's writable VFS profile (the layer the engine reads first). */
+export function generateRadar(
+  datPath: string, xmlPath: string, tileset: number,
+): Promise<RadarResult> {
+  return jsonPost<RadarResult>(
+    `/mapforge/sector/radar?${qs({ dat: datPath, xml: xmlPath, tileset })}`,
+    undefined,
+  );
+}
+
 // ─── Edit op (Phase 2) ──────────────────────────────────────────────
 export type EditOp =
   | "replace"
@@ -254,7 +333,8 @@ export type EditOp =
   | "place"
   | "remove"
   | "set_entries"
-  | "set_room";
+  | "set_room"
+  | "set_height";
 export type LayerName =
   "land" | "objs" | "shadows" | "structs" | "roofs" | "onroofs";
 
@@ -620,6 +700,8 @@ export interface SessionEdit {
   slot?: number;
   sub?: number;
   room_id?: number;
+  /** Per-tile terrain height (0–255), for `set_height`. */
+  height?: number;
   /** Used by `set_entries` to restore an undo snapshot: full entry
    * list for (x, y, layer). Each entry is a [slot, sub] pair. */
   entries?: number[][];

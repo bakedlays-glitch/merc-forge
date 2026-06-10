@@ -415,7 +415,7 @@ export class IsoRenderer {
    * pending one first. */
   beginStroke(label: string): void {
     if (this.pendingStroke) this.endStroke();
-    this.pendingStroke = { snapshots: [], roomSnapshots: [], label };
+    this.pendingStroke = { snapshots: [], roomSnapshots: [], heightSnapshots: [], label };
     this.strokeSeenKeys = new Set();
   }
 
@@ -445,6 +445,17 @@ export class IsoRenderer {
     this.pendingStroke.roomSnapshots.push({ x, y, roomId: prev });
   }
 
+  /** Snapshot a tile's height (separate undo axis from layers + rooms). */
+  recordHeightSnapshot(x: number, y: number): void {
+    if (!this.pendingStroke) return;
+    const key = `height:${x},${y}`;
+    if (this.strokeSeenKeys.has(key)) return;
+    this.strokeSeenKeys.add(key);
+    const gn = y * this.parsed.cols + x;
+    const prev = this.parsed.heights[gn] ?? 0;
+    this.pendingStroke.heightSnapshots.push({ x, y, height: prev });
+  }
+
   /** Commit the pending stroke. Empty strokes (no snapshots) are dropped
    * to avoid polluting the undo stack with no-ops. Caps the stack so a
    * runaway batch doesn't eat unbounded memory. */
@@ -453,7 +464,8 @@ export class IsoRenderer {
     this.pendingStroke = null;
     this.strokeSeenKeys = new Set();
     if (!s) return;
-    if (s.snapshots.length === 0 && s.roomSnapshots.length === 0) return;
+    if (s.snapshots.length === 0 && s.roomSnapshots.length === 0
+        && s.heightSnapshots.length === 0) return;
     this.undoStack.push(s);
     // Cap at 100 strokes. Each snapshot is small (a few ints) so this
     // is generous — the cap is really just to avoid stale memory after
@@ -615,6 +627,10 @@ export class IsoRenderer {
     const g = y * this.parsed.cols + x;
     if (op === "set_room") {
       if (edit.roomId !== undefined) this.parsed.rooms[g] = edit.roomId;
+      return;
+    }
+    if (op === "set_height") {
+      if (edit.height !== undefined) this.parsed.heights[g] = edit.height;
       return;
     }
     if (!layer) return;
@@ -916,13 +932,14 @@ export class IsoRenderer {
 export interface LocalEdit {
   x: number;
   y: number;
-  op: "place" | "add" | "remove" | "replace" | "set_entries" | "set_room";
+  op: "place" | "add" | "remove" | "replace" | "set_entries" | "set_room" | "set_height";
   layer?: LayerName;
   slot?: number;
   sub?: number;
   entryIndex?: number;
   entries?: number[][];  // for set_entries — list of [slot, sub] pairs
   roomId?: number;
+  height?: number;       // for set_height (0–255)
 }
 
 /** One undo step. Records the AFFECTED tile's state BEFORE the edit so
@@ -942,6 +959,8 @@ export interface UndoEntry {
   }>;
   /** Per-tile room snapshots (separate axis from layer snapshots). */
   roomSnapshots: Array<{ x: number; y: number; roomId: number }>;
+  /** Per-tile height snapshots (separate axis again). */
+  heightSnapshots: Array<{ x: number; y: number; height: number }>;
   /** Human label for the undo UI ("Paint floor (12 tiles)"). */
   label: string;
 }

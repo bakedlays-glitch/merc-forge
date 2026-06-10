@@ -46,6 +46,7 @@ import {
   prefetchPaletteSheet,
   saveSession,
   streamAtlasBuild,
+  validateSession,
   type LayerName,
   type RecentAddition,
   type RoomSummary,
@@ -77,12 +78,13 @@ import {
 import { MapForgeSettingsModal } from "./MapForgeSettingsModal";
 import MapForgeConsole, { type CommandSpec } from "./MapForgeConsole";
 import MapForgeGeneratorWizard from "./MapForgeGeneratorWizard";
+import { MapForgeValidatePanel } from "./MapForgeValidatePanel";
 import ConfirmModal from "../components/ConfirmModal";
 import { FloatingPanel } from "../components/FloatingPanel";
 import { MapForgeDock } from "./MapForgeDock";
 import { MapForgeDockContext } from "./mapForgeDockContext";
 import type { DockviewApi } from "dockview";
-import { listGenerators, runGenerator } from "../lib/mapforge";
+import { generateRadar, listGenerators, runGenerator } from "../lib/mapforge";
 import {
   actionForBinding,
   bindingFor,
@@ -91,17 +93,32 @@ import {
   type MapForgeActionId,
   type MapForgeSettings,
 } from "../lib/mapforgeSettings";
-import { findShadowSlot } from "../lib/jaSlotPairs";
+import { findShadowSlot, isShadowOnlySlot } from "../lib/jaSlotPairs";
 import {
   shapeTiles,
   type ShapeKind,
   type Tile,
 } from "../lib/mapShapes";
+import {
+  sliceRegion,
+  pasteEdits,
+  stripBuddyShadows,
+  type ClipboardRegion,
+} from "../lib/mapClipboard";
 
 /** UI tool modes. Inspect = click-to-pin; Pencil = click/drag to paint
  * the active brush; Shape = drag to define a rectangle / line / room that
  * commits as one undoable stroke. */
-type Tool = "inspect" | "pencil" | "shape";
+type Tool = "inspect" | "pencil" | "shape" | "select";
+
+/** Compile-time exhaustiveness guard. When a new `Tool` is added to the
+ * union, any `if`/`switch` that forwards an unhandled value here stops
+ * compiling (the argument is no longer narrowed to `never`) — so a new
+ * tool can't silently fall through the canvas dispatch. Throws at
+ * runtime as a backstop. */
+function assertNever(x: never): never {
+  throw new Error(`Unhandled Tool case: ${JSON.stringify(x)}`);
+}
 
 /** What a committed stroke writes to each tile. `place` paints the active
  * brush into a layer; `set_room` stamps a room id. Mirrors the subset of
@@ -342,6 +359,8 @@ function MapForgeSectorInner() {
   // command. Launched by a toolbar button; closed via ✕ / Esc /
   // backdrop click (except during a streaming run).
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [showValidate, setShowValidate] = useState(false);
+  const [radarBusy, setRadarBusy] = useState(false);
   const [params, setParams] = useSearchParams();
   const datPath = params.get("dat") ?? "";
   const xmlPath = params.get("xml") ?? "";
@@ -677,6 +696,50 @@ function MapForgeSectorInner() {
   const [shapeKind, setShapeKind] = useState<ShapeKind>("rect-fill");
   const [shapeAnchor, setShapeAnchor] = useState<Tile | null>(null);
   const [shapeCursor, setShapeCursor] = useState<Tile | null>(null);
+  // ─── Select / region copy-paste state (A5 Phase 4) ────────────────
+  // selectAnchor/selectCursor mirror shapeAnchor/shapeCursor: anchor =
+  // where the marquee drag started, cursor = the live end-point. Both
+  // null when no select drag is in progress. selectRect is the COMMITTED
+  // rectangle (set on mouseup) — it persists so the Copy button has a
+  // region to slice. clipboard holds the last copied region (cleared on
+  // sector/tileset/session change). pasteMode = modal "click the map to
+  // drop the clipboard"; the next canvas click places the paste.
+  const [selectAnchor, setSelectAnchor] = useState<Tile | null>(null);
+  const [selectCursor, setSelectCursor] = useState<Tile | null>(null);
+  const [selectRect, setSelectRect] = useState<{ a: Tile; b: Tile } | null>(null);
+  const [clipboard, setClipboard] = useState<ClipboardRegion | null>(null);
+  const [pasteMode, setPasteMode] = useState(false);
+  // Synchronous re-entrancy latch for paste (see doPaste). A ref, not
+  // state, because it must read/write within a single event tick.
+  const pasteBusyRef = useRef(false);
+  // Clipboard + selection lifecycle. The route never remounts on a
+  // `?tileset=` / `?dat=` change (same component, new search params) and
+  // a session id is reused across the sidecar restart epoch, so a stale
+  // clipboard would otherwise survive into a different sector/tileset.
+  // Key on the RAW `tilesetParam` — NOT the resolved `tileset` memo,
+  // which flickers 0→N while the session opens and would spuriously
+  // clear a just-copied region.
+  useEffect(() => {
+    setClipboard(null);
+    setSelectRect(null);
+    setSelectAnchor(null);
+    setSelectCursor(null);
+    setPasteMode(false);
+  }, [datPath, tilesetParam, sessionRestartEpoch]);
+  // Leaving the select tool disarms paste mode, so switching to pencil
+  // and back doesn't leave a primed paste that fires on the next click.
+  useEffect(() => {
+    if (tool !== "select") setPasteMode(false);
+  }, [tool]);
+  // Esc cancels an armed paste (mirrors the rect-corner picker's Esc).
+  useEffect(() => {
+    if (!pasteMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); setPasteMode(false); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pasteMode]);
   // Room id written by the "Mark region as room" shape. The toolbar lets
   // the user retarget an existing room or pick 0 to clear membership.
   const [roomId, setRoomId] = useState(1);
@@ -1615,6 +1678,14 @@ function MapForgeSectorInner() {
           x: r.x, y: r.y, op: "set_room", room_id: r.roomId,
         });
       }
+      for (const h of entry.heightSnapshots) {
+        renderer.applyLocalEdit({
+          x: h.x, y: h.y, op: "set_height", height: h.height,
+        });
+        edits.push({
+          x: h.x, y: h.y, op: "set_height", height: h.height,
+        });
+      }
       setRenderEpoch((e) => e + 1);
       if (edits.length > 0) {
         const res = await applyEdits(session.session_id, edits);
@@ -1660,7 +1731,9 @@ function MapForgeSectorInner() {
     // the click landed near a diamond edge. "What you see is what you get."
     const tile = hovered ?? pixelToTile(e, { logToConsole: true });
     if (!tile) return;
-    if (tool === "pencil") {
+    if (tool === "inspect") {
+      // Inspect pins on click (onCanvasClick) — nothing to do on mousedown.
+    } else if (tool === "pencil") {
       if (!activeBrush) return;
       strokeRef.current = new Set();
       // Stroke label reflects what the user actually did: "Stamp 2_HELI
@@ -1681,6 +1754,19 @@ function MapForgeSectorInner() {
       if (shapeKind !== "room" && !activeBrush) return;
       setShapeAnchor(tile);
       setShapeCursor(tile);
+    } else if (tool === "select") {
+      if (pasteMode) {
+        // Armed paste: this click drops the clipboard with its top-left
+        // at the clicked tile (async — one stroke, then auto-validate).
+        if (clipboard) void doPaste(tile);
+      } else {
+        // Anchor a marquee drag; mouseup commits the selection rect.
+        setSelectAnchor(tile);
+        setSelectCursor(tile);
+        setSelectRect(null);
+      }
+    } else {
+      assertNever(tool);
     }
   }
 
@@ -1725,6 +1811,10 @@ function MapForgeSectorInner() {
     if (tool === "shape" && tile && e.buttons === 1 && shapeAnchor) {
       setShapeCursor(tile);
     }
+    // Select drag: track the marquee end-point while the button is held.
+    if (tool === "select" && tile && e.buttons === 1 && selectAnchor) {
+      setSelectCursor(tile);
+    }
   }
 
   function onCanvasMouseUp() {
@@ -1740,6 +1830,14 @@ function MapForgeSectorInner() {
       commitShape(shapeAnchor, shapeCursor ?? shapeAnchor);
       setShapeAnchor(null);
       setShapeCursor(null);
+    }
+    // Finalize a selection drag released over the canvas → committed rect
+    // (the Copy button slices this). Releases off-canvas are cancelled by
+    // onMouseUpDrag below.
+    if (tool === "select" && selectAnchor) {
+      setSelectRect({ a: selectAnchor, b: selectCursor ?? selectAnchor });
+      setSelectAnchor(null);
+      setSelectCursor(null);
     }
   }
 
@@ -1787,6 +1885,182 @@ function MapForgeSectorInner() {
     }
     renderer.endStroke();
     setUndoDepth(renderer.undoDepth());
+  }
+
+  /** Copy the committed selection rectangle into the clipboard. Reads the
+   * live (uncommitted) parsed sector, slices the rect into relative tiles
+   * + room ids + heights, then strips buddy-eligible shadow entries (the
+   * engine auto-re-adds those at load via HAS_SHADOW_BUDDY — keeping them
+   * would double-shadow in-game). Read-only-safe: copy never mutates. */
+  async function doCopy() {
+    if (!session || !renderer || !selectRect) return;
+    const name = datPath.split(/[\\/]/).pop() ?? "sector";
+    try {
+      const parsed = await getSessionParsed(session.session_id);
+      const raw = sliceRegion(parsed, selectRect.a, selectRect.b, name);
+      if (raw.tiles.length === 0) {
+        log?.append({ severity: "warn", message: "Selection is empty — nothing to copy." });
+        return;
+      }
+      const clip = stripBuddyShadows(raw, (slot) => isShadowOnlySlot(slot));
+      setClipboard(clip);
+      log?.append({
+        severity: "info",
+        message: `Copied ${clip.w}×${clip.h} region (${clip.tiles.length} tiles) from ${name}.`,
+      });
+    } catch (e) {
+      log?.append({
+        severity: "error",
+        message: "Copy failed — could not read the sector.",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  /** Place the clipboard at `anchor` (its top-left) as ONE undoable,
+   * transactional paste. Snapshots every touched axis (layers / room /
+   * height) BEFORE applying so a single Ctrl+Z reverts the whole paste;
+   * mirrors locally for an instant repaint, then persists via the
+   * transactional `applyEdits`, then auto-validates. Same-tileset only —
+   * cross-tileset is deferred (guarded here AND by a disabled button). */
+  async function doPaste(anchor: Tile) {
+    if (!session || session.read_only || !renderer || !clipboard) return;
+    // Re-entrancy guard: a double-click in paste mode fires two mousedowns
+    // before React re-renders pasteMode→false, so this synchronous ref is
+    // what actually prevents a double-paste (two strokes + two divergent
+    // room-id ranges). Cleared on every exit path.
+    if (pasteBusyRef.current) return;
+    pasteBusyRef.current = true;
+    setPasteMode(false);  // one Paste press = one placement attempt
+    if (clipboard.sourceTileset !== tileset) {
+      pasteBusyRef.current = false;
+      log?.append({
+        severity: "error",
+        message: `Cross-tileset paste isn't supported yet (clipboard tileset `
+          + `${clipboard.sourceTileset} → ${tileset}). Copy within the same tileset.`,
+      });
+      return;
+    }
+    const cols = info.data?.cols ?? renderer.getParsed().cols;
+    const rows = info.data?.rows ?? renderer.getParsed().rows;
+    setEditsInFlight((n) => n + 1);
+    // Flips true once the local stroke is committed — gates the catch
+    // rollback so a failure BEFORE the stroke (e.g. getSessionParsed) can't
+    // pop an unrelated earlier stroke.
+    let strokeCommitted = false;
+    try {
+      // The target's CURRENT room ids drive the remap to fresh unused ids.
+      const parsed = await getSessionParsed(session.session_id);
+      const { edits, targetTiles, droppedTiles } = pasteEdits(
+        clipboard, anchor, cols, rows, { existingRoomIds: parsed.rooms },
+      );
+      if (edits.length === 0) {
+        log?.append({
+          severity: "warn",
+          message: "Nothing pasted — the region fell entirely outside the map.",
+        });
+        return;
+      }
+      // Destructive-overwrite guard (stricter than fills' 2000 — paste
+      // replaces every layer of every target tile).
+      if (
+        targetTiles > 500
+        && !window.confirm(
+          `Paste over ${targetTiles} tiles? This replaces their current `
+          + `terrain, objects, structures, rooms and heights.`,
+        )
+      ) {
+        return;
+      }
+      // One stroke for the whole paste → one Ctrl+Z reverts it all.
+      renderer.beginStroke(
+        `Paste ${clipboard.w}×${clipboard.h} (${targetTiles} tiles)`,
+      );
+      for (const ed of edits) {
+        // Snapshot the right axis BEFORE the local mutation overwrites it.
+        if (ed.op === "set_entries" && ed.layer) {
+          renderer.recordSnapshot(ed.x, ed.y, ed.layer);
+        } else if (ed.op === "set_room") {
+          renderer.recordRoomSnapshot(ed.x, ed.y);
+        } else if (ed.op === "set_height") {
+          renderer.recordHeightSnapshot(ed.x, ed.y);
+        }
+        renderer.applyLocalEdit({
+          x: ed.x, y: ed.y, op: ed.op,
+          layer: ed.layer, slot: ed.slot, sub: ed.sub,
+          entries: ed.entries, roomId: ed.room_id, height: ed.height,
+        });
+      }
+      renderer.endStroke();
+      strokeCommitted = true;
+      setUndoDepth(renderer.undoDepth());
+      setRenderEpoch((e) => e + 1);
+      // Persist to the backend session (transactional: rolls back on any
+      // mid-batch failure, leaving the live session untouched).
+      const res = await applyEdits(session.session_id, edits);
+      setSession(res.session);
+      log?.append({
+        severity: "info",
+        message: `Pasted ${targetTiles} tiles`
+          + (droppedTiles > 0 ? ` (${droppedTiles} clipped at the map edge)` : "")
+          + ".",
+      });
+      // Auto-validate the post-paste state; surface findings (a paste can
+      // introduce e.g. a high object count or a JSD frame mismatch).
+      try {
+        const report = await validateSession(session.session_id);
+        if (report.errors > 0 || report.warnings > 0) {
+          const top = report.findings[0];
+          log?.append({
+            severity: report.errors > 0 ? "error" : "warn",
+            message: `Paste validation: ${report.errors} error(s), `
+              + `${report.warnings} warning(s). Opening the Validate panel.`,
+            detail: top ? `${top.code}: ${top.message}` : undefined,
+          });
+          setShowValidate(true);
+        } else {
+          log?.append({ severity: "info", message: "Paste validated clean." });
+        }
+      } catch (e) {
+        log?.append({
+          severity: "warn",
+          message: "Post-paste validation could not run.",
+          detail: e instanceof Error ? e.message : String(e),
+        });
+      }
+    } catch (e) {
+      // The backend `applyEdits` is transactional — on rejection the live
+      // session is untouched, so the optimistic local mirror is now ahead
+      // of the server. Revert it (no backend round-trip — the server is
+      // already at pre-paste state) and drop the dangling undo stroke so
+      // Ctrl+Z can't push a revert the server never needed.
+      if (strokeCommitted) {
+        const entry = renderer.popUndo();
+        if (entry) {
+          for (const s of entry.snapshots) {
+            renderer.applyLocalEdit({
+              x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries,
+            });
+          }
+          for (const r of entry.roomSnapshots) {
+            renderer.applyLocalEdit({ x: r.x, y: r.y, op: "set_room", roomId: r.roomId });
+          }
+          for (const h of entry.heightSnapshots) {
+            renderer.applyLocalEdit({ x: h.x, y: h.y, op: "set_height", height: h.height });
+          }
+          setUndoDepth(renderer.undoDepth());
+          setRenderEpoch((e2) => e2 + 1);
+        }
+      }
+      log?.append({
+        severity: "error",
+        message: "Paste failed — the edit batch was rejected; reverted local changes.",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+      pasteBusyRef.current = false;
+    }
   }
 
   /**
@@ -2327,6 +2601,14 @@ function MapForgeSectorInner() {
       setShapeAnchor(null);
       setShapeCursor(null);
     }
+    // Same for an in-progress selection drag that ended off-canvas. A
+    // release OVER the canvas commits the rect in onCanvasMouseUp first,
+    // clearing selectAnchor, so this is then a harmless no-op. The
+    // committed selectRect is left intact.
+    if (selectAnchor !== null) {
+      setSelectAnchor(null);
+      setSelectCursor(null);
+    }
   }
 
   // ─── Live shape preview ─────────────────────────────────────────────
@@ -2334,10 +2616,37 @@ function MapForgeSectorInner() {
   // preview only the perimeter (cheap) — the commit still fills the
   // whole region.
   const previewTiles = useMemo<Tile[] | null>(() => {
-    if (tool !== "shape" || !shapeAnchor) return null;
-    const cursor = shapeCursor ?? shapeAnchor;
     const cols = info.data?.cols ?? 0;
     const rows = info.data?.rows ?? 0;
+    // Select tool: marquee (active drag, else the committed rect) and,
+    // in paste mode, a ghost of the clipboard footprint at the cursor.
+    if (tool === "select") {
+      if (pasteMode && clipboard && hovered) {
+        if (clipboard.tiles.length > 6000) {
+          // Too many to fill cheaply — outline the footprint bbox instead.
+          return shapeTiles(
+            "rect-outline",
+            { x: hovered.x, y: hovered.y },
+            { x: hovered.x + clipboard.w - 1, y: hovered.y + clipboard.h - 1 },
+          ).filter((t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows);
+        }
+        const out: Tile[] = [];
+        for (const t of clipboard.tiles) {
+          const x = hovered.x + t.dx;
+          const y = hovered.y + t.dy;
+          if (x >= 0 && y >= 0 && x < cols && y < rows) out.push({ x, y });
+        }
+        return out;
+      }
+      const a = selectAnchor ?? selectRect?.a ?? null;
+      const b = selectAnchor ? (selectCursor ?? selectAnchor) : (selectRect?.b ?? null);
+      if (!a || !b) return null;
+      let tiles = shapeTiles("rect-fill", a, b);
+      if (tiles.length > 6000) tiles = shapeTiles("rect-outline", a, b);
+      return tiles.filter((t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows);
+    }
+    if (tool !== "shape" || !shapeAnchor) return null;
+    const cursor = shapeCursor ?? shapeAnchor;
     let tiles = shapeTiles(shapeKind, shapeAnchor, cursor);
     if (tiles.length > 6000) {
       tiles = shapeTiles("rect-outline", shapeAnchor, cursor);
@@ -2345,12 +2654,27 @@ function MapForgeSectorInner() {
     return tiles.filter(
       (t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows,
     );
-  }, [tool, shapeAnchor, shapeCursor, shapeKind, info.data]);
+  }, [tool, shapeAnchor, shapeCursor, shapeKind, info.data,
+      selectAnchor, selectCursor, selectRect, pasteMode, clipboard, hovered]);
 
   // Dimensions readout for the status bar while a shape drag is active.
   // Count is computed analytically (not from previewTiles, which is
   // capped to the outline for huge fills) so the readout is accurate.
-  const previewDims = useMemo(() => {
+  const previewDims = useMemo<
+    { w: number; h: number; count: number; label: string } | null
+  >(() => {
+    // Select tool: dims of the paste footprint, else the marquee rect.
+    if (tool === "select") {
+      if (pasteMode && clipboard) {
+        return { w: clipboard.w, h: clipboard.h, count: clipboard.tiles.length, label: "Paste" };
+      }
+      const a = selectAnchor ?? selectRect?.a ?? null;
+      const b = selectAnchor ? (selectCursor ?? selectAnchor) : (selectRect?.b ?? null);
+      if (!a || !b) return null;
+      const w = Math.abs(b.x - a.x) + 1;
+      const h = Math.abs(b.y - a.y) + 1;
+      return { w, h, count: w * h, label: "Selection" };
+    }
     if (tool !== "shape" || !shapeAnchor) return null;
     const cursor = shapeCursor ?? shapeAnchor;
     const w = Math.abs(cursor.x - shapeAnchor.x) + 1;
@@ -2359,9 +2683,15 @@ function MapForgeSectorInner() {
     if (shapeKind === "line") count = Math.max(w, h);
     else if (shapeKind === "rect-outline") {
       count = w === 1 || h === 1 ? w * h : 2 * (w + h) - 4;
-    } else count = w * h; // rect-fill / room
-    return { w, h, count };
-  }, [tool, shapeAnchor, shapeCursor, shapeKind]);
+    } else if (shapeKind === "rect-fill" || shapeKind === "room") {
+      count = w * h;
+    } else {
+      // diamond / cross / triangle / hexagon — exact count from the geometry
+      count = shapeTiles(shapeKind, shapeAnchor, cursor).length;
+    }
+    return { w, h, count, label: "Shape" };
+  }, [tool, shapeAnchor, shapeCursor, shapeKind,
+      selectAnchor, selectCursor, selectRect, pasteMode, clipboard]);
 
   function resetView() { setZoom(1); setPan({ x: 0, y: 0 }); }
 
@@ -2630,7 +2960,7 @@ function MapForgeSectorInner() {
           {pinned && ` · Pinned: (${pinned.x},${pinned.y})`}
           {previewDims && (
             <span className="ml-2 text-emerald-300">
-              · Shape: {previewDims.w}×{previewDims.h} = {previewDims.count} tile{previewDims.count === 1 ? "" : "s"}
+              · {previewDims.label}: {previewDims.w}×{previewDims.h} = {previewDims.count} tile{previewDims.count === 1 ? "" : "s"}
             </span>
           )}
           {showGrid && !showGridForThisView && (
@@ -2725,6 +3055,18 @@ function MapForgeSectorInner() {
           (info.data?.rooms.reduce((m, r) => Math.max(m, r.room_id), 0) ?? 0) + 1
         }
       />
+      <SelectOptions
+        tool={tool}
+        hasSelection={selectRect !== null}
+        clipboard={clipboard}
+        pasteMode={pasteMode}
+        readOnly={session?.read_only ?? false}
+        activeTileset={tileset}
+        busy={editsInFlight > 0}
+        onCopy={() => void doCopy()}
+        onArmPaste={() => setPasteMode(true)}
+        onCancelPaste={() => setPasteMode(false)}
+      />
     </div>
   );
 
@@ -2802,6 +3144,47 @@ function MapForgeSectorInner() {
           className="text-xs px-3 py-1.5 rounded border border-rust-500/60 bg-rust-500/15 text-rust-100 hover:bg-rust-500/30 font-medium"
         >
           ✨ Generate…
+        </button>
+      )}
+      {datPath && (
+        <button
+          type="button"
+          onClick={() => setShowValidate(true)}
+          title="Pre-flight validate this sector (crash traps, playability, JSD frame match)"
+          className="text-xs px-3 py-1.5 rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 font-medium"
+        >
+          ✓ Validate
+        </button>
+      )}
+      {datPath && xmlPath && (
+        <button
+          type="button"
+          disabled={radarBusy}
+          onClick={async () => {
+            setRadarBusy(true);
+            try {
+              const r = await generateRadar(datPath, xmlPath, tileset);
+              const fn = r.output_path.split(/[\\/]/).pop();
+              log?.append({
+                severity: "success",
+                message: `Radar map written: ${fn}`
+                  + (r.overrides_bundled ? " (overrides bundled radar)" : ""),
+                detail: r.output_path,
+              });
+            } catch (e) {
+              log?.append({
+                severity: "error",
+                message: "Radar generation failed",
+                detail: e instanceof Error ? e.message : String(e),
+              });
+            } finally {
+              setRadarBusy(false);
+            }
+          }}
+          title="Generate the 88×44 minimap STI the engine loads (writes to the install's user profile, above Radarmaps.slf)"
+          className="text-xs px-3 py-1.5 rounded border border-sky-500/60 bg-sky-500/15 text-sky-100 hover:bg-sky-500/30 font-medium disabled:opacity-50"
+        >
+          {radarBusy ? "Radar…" : "🛰 Radar"}
         </button>
       )}
       <SectorControls
@@ -2945,6 +3328,18 @@ function MapForgeSectorInner() {
               suggestedRoomId={
                 (info.data?.rooms.reduce((m, r) => Math.max(m, r.room_id), 0) ?? 0) + 1
               }
+            />
+            <SelectOptions
+              tool={tool}
+              hasSelection={selectRect !== null}
+              clipboard={clipboard}
+              pasteMode={pasteMode}
+              readOnly={session?.read_only ?? false}
+              activeTileset={tileset}
+              busy={editsInFlight > 0}
+              onCopy={() => void doCopy()}
+              onArmPaste={() => setPasteMode(true)}
+              onCancelPaste={() => setPasteMode(false)}
             />
             <BrushSubStrip
               brush={activeBrush}
@@ -3363,7 +3758,7 @@ function MapForgeSectorInner() {
               {pinned && ` · Pinned: (${pinned.x},${pinned.y})`}
               {previewDims && (
                 <span className="ml-2 text-emerald-300">
-                  · Shape: {previewDims.w}×{previewDims.h} = {previewDims.count} tile{previewDims.count === 1 ? "" : "s"}
+                  · {previewDims.label}: {previewDims.w}×{previewDims.h} = {previewDims.count} tile{previewDims.count === 1 ? "" : "s"}
                 </span>
               )}
               {showGrid && !showGridForThisView && (
@@ -3484,6 +3879,15 @@ function MapForgeSectorInner() {
           from the param schema with sliders + descriptions. Submits
           to the same streaming endpoint, so the canvas paints live
           and undo works identically. Task #117. */}
+      {showValidate && datPath && (
+        <MapForgeValidatePanel
+          datPath={datPath}
+          xmlPath={xmlPath}
+          tileset={tileset}
+          sessionId={session?.session_id ?? null}
+          onClose={() => setShowValidate(false)}
+        />
+      )}
       <MapForgeGeneratorWizard
         open={wizardOpen}
         onClose={() => {
@@ -4216,12 +4620,20 @@ const SHAPE_KINDS: ReadonlyArray<{ kind: ShapeKind; label: string }> = [
   { kind: "rect-fill", label: "▦ Fill" },
   { kind: "rect-outline", label: "▢ Outline" },
   { kind: "line", label: "╱ Line" },
+  { kind: "diamond", label: "◆ Diamond" },
+  { kind: "cross", label: "✛ Cross" },
+  { kind: "triangle", label: "▲ Triangle" },
+  { kind: "hexagon", label: "⬡ Hex" },
   { kind: "room", label: "⌂ Room" },
 ];
 const SHAPE_HINTS: Record<ShapeKind, string> = {
   "rect-fill": "Drag a box → fill the whole area with the active tile",
   "rect-outline": "Drag a box → paint just the perimeter (walls / fences)",
   "line": "Drag A→B → a straight run of the active tile (roads, fences)",
+  "diamond": "Drag a box → filled diamond inscribed in it",
+  "cross": "Drag a box → a plus/cross through the center",
+  "triangle": "Drag a box → filled triangle, apex at top",
+  "hexagon": "Drag a box → filled flat-top hexagon",
   "room": "Drag a box → mark it as a room (engine hides the roof inside)",
 };
 
@@ -4239,17 +4651,19 @@ function ToolSelector({
     inspect: "bg-blue-900 text-blue-100",
     pencil: "bg-emerald-900 text-emerald-100",
     shape: "bg-teal-900 text-teal-100",
+    select: "bg-purple-900 text-purple-100",
   };
   const toolLabel: Record<Tool, string> = {
-    inspect: "⌖ Inspect", pencil: "✎ Pencil", shape: "▦ Shape",
+    inspect: "⌖ Inspect", pencil: "✎ Pencil", shape: "▦ Shape", select: "⬚ Select",
   };
   return (
     <div>
       <span className="block text-xs text-gray-400">Tool</span>
       <div className="flex overflow-hidden rounded border border-gray-700">
-        {(["inspect", "pencil", "shape"] as const).map((t) => {
+        {(["inspect", "pencil", "shape", "select"] as const).map((t) => {
           // Pencil requires a brush; the shape tool's room sub-tool works
-          // without one, so shape is never hard-disabled here.
+          // without one, and select/inspect need no brush — so only pencil
+          // is ever hard-disabled here.
           const disabled = t === "pencil" && !hasBrush;
           return (
             <button
@@ -4269,7 +4683,9 @@ function ToolSelector({
                     ? "Paint the active brush (click or drag)"
                     : t === "shape"
                       ? "Drag to define a rectangle / line / room"
-                      : "Click tiles to inspect them"
+                      : t === "select"
+                        ? "Drag a rectangle to copy a region; paste it elsewhere"
+                        : "Click tiles to inspect them"
               }
             >
               {toolLabel[t]}
@@ -4439,6 +4855,109 @@ function ShapeOptions({
           comes later.
         </p>
       )}
+    </div>
+  );
+}
+
+/** Select-mode-only controls: Copy the marquee selection into the
+ * clipboard, then arm Paste (click-to-place). Hidden in other tools so
+ * the toolbar width stays stable. Mirrors ShapeOptions. Same-tileset
+ * only for now — a clipboard from a different tileset disables Paste
+ * (cross-tileset slot remap is deferred). */
+function SelectOptions({
+  tool, hasSelection, clipboard, pasteMode, readOnly, activeTileset, busy,
+  onCopy, onArmPaste, onCancelPaste,
+}: {
+  tool: Tool;
+  hasSelection: boolean;
+  clipboard: ClipboardRegion | null;
+  pasteMode: boolean;
+  readOnly: boolean;
+  activeTileset: number;
+  busy: boolean;
+  onCopy: () => void;
+  onArmPaste: () => void;
+  onCancelPaste: () => void;
+}) {
+  if (tool !== "select") return null;
+  const crossTileset = clipboard !== null && clipboard.sourceTileset !== activeTileset;
+  const canPaste = clipboard !== null && !readOnly && !crossTileset && !busy;
+  return (
+    <div className="flex items-end gap-2">
+      <div>
+        <span className="block text-xs text-gray-400">Region</span>
+        <div className="flex overflow-hidden rounded border border-gray-700">
+          <button
+            type="button"
+            onClick={onCopy}
+            disabled={!hasSelection || busy}
+            className="bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasSelection
+              ? "Copy the selected rectangle (all layers, rooms + heights) to the clipboard"
+              : "Drag a rectangle on the map first"}
+          >
+            ⧉ Copy
+          </button>
+          {pasteMode ? (
+            <button
+              type="button"
+              onClick={onCancelPaste}
+              className="bg-amber-900 px-2 py-1 text-xs text-amber-100 hover:bg-amber-800"
+              title="Cancel paste (Esc)"
+            >
+              ✕ Cancel
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onArmPaste}
+              disabled={!canPaste}
+              className="bg-purple-900 px-2 py-1 text-xs text-purple-100 hover:bg-purple-800 disabled:cursor-not-allowed disabled:opacity-40"
+              title={
+                clipboard === null
+                  ? "Copy a region first"
+                  : readOnly
+                    ? "This sector is read-only (open a loose copy to edit)"
+                    : crossTileset
+                      ? "Cross-tileset paste isn't supported yet — copy within the same tileset"
+                      : "Click the map to drop the copied region"
+              }
+            >
+              ⎘ Paste
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="max-w-[16rem] self-center text-[10px] leading-tight">
+        {clipboard ? (
+          <span className={crossTileset ? "text-amber-400" : "text-gray-400"}>
+            Clipboard: {clipboard.w}×{clipboard.h} · {clipboard.tiles.length} tiles
+            {" "}from {clipboard.sourceSector}
+            {crossTileset && " · different tileset (paste disabled)"}
+          </span>
+        ) : (
+          <span className="italic text-gray-500">
+            Clipboard empty — drag a rectangle, then Copy.
+          </span>
+        )}
+        {pasteMode && (
+          <span className="block text-purple-300">
+            Click the map to place · Esc to cancel.
+          </span>
+        )}
+        {!pasteMode && clipboard !== null && !readOnly && !crossTileset && (
+          <span className="block text-gray-500">
+            Tip: select generously — multi-tile structures clipped at the
+            edge can look broken.
+          </span>
+        )}
+        {readOnly && (
+          <span className="block text-amber-400">
+            Read-only sector — paste is disabled.
+          </span>
+        )}
+      </div>
     </div>
   );
 }

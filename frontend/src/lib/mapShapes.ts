@@ -15,7 +15,15 @@ export interface Tile {
   y: number;
 }
 
-export type ShapeKind = "rect-fill" | "rect-outline" | "line" | "room";
+export type ShapeKind =
+  | "rect-fill"
+  | "rect-outline"
+  | "line"
+  | "room"
+  | "diamond"
+  | "cross"
+  | "triangle"
+  | "hexagon";
 
 /** Normalize two corners into [x0,y0,x1,y1] with x0<=x1, y0<=y1. */
 export function normalizeRect(
@@ -97,6 +105,89 @@ export function lineTiles(a: Tile, b: Tile): Tile[] {
   return out;
 }
 
+/** Filled diamond (rhombus) inscribed in the bbox of a and b. A 1-wide or
+ * 1-tall drag falls back to the straight run so it never vanishes. */
+export function diamondTiles(a: Tile, b: Tile): Tile[] {
+  const { x0, y0, x1, y1 } = normalizeRect(a, b);
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w === 0 || h === 0) return rectFillTiles(a, b);
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  const rx = w / 2;
+  const ry = h / 2;
+  const out: Tile[] = [];
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if (Math.abs(x - cx) / rx + Math.abs(y - cy) / ry <= 1 + 1e-9) {
+        out.push({ x, y });
+      }
+    }
+  }
+  return out;
+}
+
+/** A plus/cross: the center row + center column spanning the bbox. */
+export function crossTiles(a: Tile, b: Tile): Tile[] {
+  const { x0, y0, x1, y1 } = normalizeRect(a, b);
+  const cx = Math.round((x0 + x1) / 2);
+  const cy = Math.round((y0 + y1) / 2);
+  const seen = new Set<string>();
+  const out: Tile[] = [];
+  const push = (x: number, y: number) => {
+    const k = `${x},${y}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ x, y });
+  };
+  for (let x = x0; x <= x1; x++) push(x, cy);
+  for (let y = y0; y <= y1; y++) push(cx, y);
+  return out;
+}
+
+/** Filled triangle, apex at top-center, base along the bottom edge. */
+export function triangleTiles(a: Tile, b: Tile): Tile[] {
+  const { x0, y0, x1, y1 } = normalizeRect(a, b);
+  const h = y1 - y0;
+  if (h === 0) return rectFillTiles(a, b);
+  const cx = (x0 + x1) / 2;
+  const rx = (x1 - x0) / 2;
+  const out: Tile[] = [];
+  for (let y = y0; y <= y1; y++) {
+    const half = rx * ((y - y0) / h); // 0 at apex, full at base
+    const lx = Math.ceil(cx - half);
+    const rxi = Math.floor(cx + half);
+    for (let x = lx; x <= rxi; x++) out.push({ x, y });
+  }
+  return out;
+}
+
+/** Filled flat-top hexagon inscribed in the bbox: left/right vertices at
+ * mid-height, top/bottom edges inset by ~1/4 width. */
+export function hexagonTiles(a: Tile, b: Tile): Tile[] {
+  const { x0, y0, x1, y1 } = normalizeRect(a, b);
+  const w = x1 - x0;
+  const h = y1 - y0;
+  if (w === 0 || h === 0) return rectFillTiles(a, b);
+  const inset = w / 4;
+  const cy = (y0 + y1) / 2;
+  const out: Tile[] = [];
+  for (let y = y0; y <= y1; y++) {
+    let leftEdge: number;
+    if (y <= cy) {
+      const t = cy === y0 ? 1 : (y - y0) / (cy - y0); // 0 top → 1 mid
+      leftEdge = x0 + inset * (1 - t);                // x0+inset → x0
+    } else {
+      const t = y1 === cy ? 1 : (y - cy) / (y1 - cy); // 0 mid → 1 bottom
+      leftEdge = x0 + inset * t;                       // x0 → x0+inset
+    }
+    const lx = Math.ceil(leftEdge);
+    const rxi = Math.floor(x1 - (leftEdge - x0));      // mirror across center
+    for (let x = lx; x <= rxi; x++) out.push({ x, y });
+  }
+  return out;
+}
+
 /** Dispatch to the right generator for a shape kind. "room" shares the
  * rectangle-fill footprint (it just writes room-ids instead of tiles). */
 export function shapeTiles(kind: ShapeKind, a: Tile, b: Tile): Tile[] {
@@ -108,6 +199,14 @@ export function shapeTiles(kind: ShapeKind, a: Tile, b: Tile): Tile[] {
       return rectOutlineTiles(a, b);
     case "line":
       return lineTiles(a, b);
+    case "diamond":
+      return diamondTiles(a, b);
+    case "cross":
+      return crossTiles(a, b);
+    case "triangle":
+      return triangleTiles(a, b);
+    case "hexagon":
+      return hexagonTiles(a, b);
     default:
       return [];
   }
