@@ -85,7 +85,8 @@ try:
     )
     from mercwizard_core.mapforge_engine.dat_edit_ops import (  # noqa: E402
         replace_layer_entry, add_layer_entry, remove_layer_entry,
-        place_layer_entry, set_layer_entries, set_room_id, EditOpError,
+        place_layer_entry, set_layer_entries, set_room_id, set_height,
+        EditOpError,
     )
     # SlfFS is what we use to enumerate + extract from .slf archives.
     # Pulled from the vendored ja2py inside the sidecar bundle.
@@ -93,6 +94,14 @@ try:
     _iso_renderer_available = True
 except Exception as e:  # noqa: BLE001
     _iso_renderer_import_error = f"{type(e).__name__}: {e}"
+
+# validate.py is pure (stdlib only) — import it OUTSIDE the renderer try
+# so the pre-flight validator's structure checks work even if the heavy
+# renderer deps (PIL / fs / ja2py) above failed to import.
+from mercwizard_core.mapforge_engine.validate import (  # noqa: E402
+    validate_parsed, Finding,
+)
+from mercwizard_core.vfs import parse_vfs_config, VfsConfigError  # noqa: E402
 
 
 # ─── Install-relative tileset asset resolution ─────────────────────────
@@ -2025,12 +2034,13 @@ class EditOp(BaseModel):
     `dat` (the session already knows which file)."""
     x: int
     y: int
-    op: str  # "replace" | "add" | "remove" | "place" | "set_entries" | "set_room"
+    op: str  # "replace" | "add" | "remove" | "place" | "set_entries" | "set_room" | "set_height"
     layer: Optional[str] = None
     entry_index: Optional[int] = None
     slot: Optional[int] = None
     sub: Optional[int] = None
     room_id: Optional[int] = None
+    height: Optional[int] = None
     # For `set_entries`: full entry list to write at (x, y, layer).
     # Each entry is a [slot, sub] pair. Empty list clears the tile.
     # Used by client-side undo to restore a snapshot in one op.
@@ -2069,6 +2079,257 @@ def _session_info(sess: MapForgeSession) -> SessionInfo:
     )
 
 
+# ─── Pre-flight validation (A4) ────────────────────────────────────────
+class ValidationFinding(BaseModel):
+    severity: str            # "error" | "warn" | "info"
+    code: str
+    message: str
+    tiles: list[int] = []    # affected gridnos (sampled, capped at 50)
+    count: Optional[int] = None
+    slot: Optional[int] = None
+
+
+class ValidationReport(BaseModel):
+    dat_path: str
+    rows: int
+    cols: int
+    errors: int
+    warnings: int
+    infos: int
+    jsd_checked: bool
+    findings: list[ValidationFinding]
+
+
+def _validate_tileset_jsds(xml_path: Path, tileset: int) -> list[Finding]:
+    """JSD frame-match pre-flight. For each slot in `tileset` whose STI has
+    a companion .jsd, confirm the JSD's usNumberOfStructures (or its stored
+    count) matches the STI's sub-frame count. A mismatch is the documented
+    cause of the worlddef.cpp LoadMapTileset assertion at map load.
+
+    Uses the cached JSD harvest (one SLF walk, then a dict lookup per slot)
+    rather than a per-slot SLF scan, so it's cheap after the first call."""
+    import struct as _struct
+    try:
+        slot_map = load_tileset_xml(xml_path, tileset)
+    except Exception as e:  # noqa: BLE001
+        return [Finding("info", "JSD_CHECK_SKIPPED",
+                        f"Could not load the tileset {tileset} slot map "
+                        f"({e}); JSD frame-match check skipped.")]
+    loose, slf = _tileset_paths_for(xml_path)
+    jsd_lookup = _harvest_jsd_lookup(slf, loose, tileset)
+    cache = StiCache(tileset, loose_dirs=loose, slf_paths=slf)
+    findings: list[Finding] = []
+    for slot_idx in sorted(slot_map):
+        name = slot_map[slot_idx]
+        if not name:
+            continue
+        stem = name[:-4] if name.lower().endswith(".sti") else name
+        entry = jsd_lookup.get((stem + ".jsd").lower())
+        if entry is None:
+            continue
+        data = entry[0]
+        if len(data) < 10:
+            continue
+        try:
+            n_struct, n_stored, _ = _struct.unpack("<HHH", data[4:10])
+        except _struct.error:
+            continue
+        try:
+            frame_count = len(cache.get(name))
+        except Exception:  # noqa: BLE001
+            continue
+        # n_stored differs from n_struct only for dedup'd JSDs; accept a
+        # match against EITHER so we don't cry wolf on those.
+        if frame_count and frame_count not in (n_struct, n_stored):
+            findings.append(Finding(
+                "error", "JSD_FRAME_MISMATCH",
+                f"Tileset {tileset} slot {slot_idx} ({name}): the JSD "
+                f"declares {n_struct} structure(s) (stored {n_stored}) but "
+                f"the STI has {frame_count} sub-frame(s). This mismatch "
+                f"asserts at LoadMapTileset when the map loads.",
+                slot=slot_idx,
+            ))
+    return findings
+
+
+def _to_validation_report(dat_path: str, parsed: dict,
+                          findings: list[Finding],
+                          jsd_checked: bool) -> ValidationReport:
+    return ValidationReport(
+        dat_path=dat_path,
+        rows=parsed.get("rows", 160),
+        cols=parsed.get("cols", 160),
+        errors=sum(1 for f in findings if f.severity == "error"),
+        warnings=sum(1 for f in findings if f.severity == "warn"),
+        infos=sum(1 for f in findings if f.severity == "info"),
+        jsd_checked=jsd_checked,
+        findings=[ValidationFinding(
+            severity=f.severity, code=f.code, message=f.message,
+            tiles=f.tiles, count=f.count, slot=f.slot,
+        ) for f in findings],
+    )
+
+
+@router.get("/sector/validate", response_model=ValidationReport)
+def sector_validate(
+    dat: str = Query(..., description="Absolute path to .dat sector or slf:// URI"),
+    xml: Optional[str] = Query(None, description="Ja2Set.dat.xml — enables the JSD check"),
+    tileset: Optional[int] = Query(None, description="Tileset index — enables the JSD check"),
+    check_jsd: bool = Query(True, description="Run the (heavier) JSD frame-match check"),
+):
+    """Pre-flight validate a .dat: crash traps + playability + (optionally)
+    the tileset JSD frame-match check. Read-only — never writes."""
+    _require_renderer()
+    dat_path = _resolve_dat_path(dat)
+    parsed = parse_dat_file(dat_path)
+    findings = list(validate_parsed(parsed))
+    jsd_checked = False
+    if check_jsd and xml and tileset is not None:
+        xml_path = _validate_path(xml, ".xml")
+        findings.extend(_validate_tileset_jsds(xml_path, tileset))
+        jsd_checked = True
+    return _to_validation_report(str(dat_path), parsed, findings, jsd_checked)
+
+
+@router.get("/sessions/{session_id}/validate", response_model=ValidationReport)
+def session_validate(
+    session_id: str,
+    check_jsd: bool = Query(True, description="Run the (heavier) JSD frame-match check"),
+):
+    """Validate the session's in-memory (uncommitted) state — run this
+    before saving to catch problems while they're still cheap to fix."""
+    _require_renderer()
+    sess = _session_store.get(session_id)
+    findings = list(validate_parsed(sess.parsed))
+    jsd_checked = False
+    if check_jsd:
+        findings.extend(_validate_tileset_jsds(sess.xml_path, sess.tileset))
+        jsd_checked = True
+    return _to_validation_report(str(sess.dat_path), sess.parsed, findings, jsd_checked)
+
+
+# ─── Radar / minimap STI generation (A3) ───────────────────────────────
+_RADAR_BACKUP_DIR = (
+    Path(os.environ.get("APPDATA") or Path.home() / ".config")
+    / "MercWizard" / "mapforge" / "radar_backups"
+)
+
+
+class RadarResult(BaseModel):
+    output_path: str
+    bytes_written: int
+    width: int
+    height: int
+    # True when a same-named radar exists in Radarmaps.slf — i.e. we are
+    # overriding the bundled vanilla minimap (informational only).
+    overrides_bundled: bool
+    # base64 PNG of the generated 88x44 image for an in-UI preview.
+    preview_png_b64: str
+
+
+def _radarmaps_slf_has(install_root: Path, name_upper: str) -> bool:
+    """Best-effort: does any Radarmaps.slf in the install contain
+    `<name>.STI`? Only for the informational `overrides_bundled` flag —
+    `resolve_read` can't see SLF members."""
+    try:
+        from ja2py.fileformats.SlfFS import SlfFS  # noqa: E402
+    except ImportError:
+        return False
+    target = f"{name_upper}.STI".lower()
+    for layer in _TILESET_LAYERS:
+        slf = install_root / layer / "Radarmaps.slf"
+        if not slf.exists():
+            continue
+        try:
+            fs = SlfFS(str(slf))
+            for p in fs.walk.files():
+                if os.path.basename(p).lower() == target:
+                    return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+@router.post("/sector/radar", response_model=RadarResult)
+def sector_radar(
+    dat: str = Query(..., description="Absolute path to .dat sector or slf:// URI"),
+    xml: str = Query(..., description="Absolute path to Ja2Set.dat.xml"),
+    tileset: int = Query(..., description="Tileset index"),
+):
+    """Generate the sector's 88x44 radar/minimap STI and write it into the
+    install's WRITABLE VFS profile — the layer the engine reads first (above
+    Radarmaps.slf), exactly where the engine's own editor Radar Map button
+    writes. Reads the .dat; writes one derived STI."""
+    _require_renderer()
+    import base64 as _b64
+    import shutil as _shutil
+    from mercwizard_core.mapforge_engine.radar import (
+        render_radar_image, write_radar_sti, RADAR_W, RADAR_H,
+    )
+    from mercwizard_core.sti_decode import decode_sti_frame_to_png
+
+    dat_path = _resolve_dat_path(dat)
+    xml_path = _validate_path(xml, ".xml")
+    install_root = _active_install_root()
+    if install_root is None:
+        raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL",
+            "message": "No active install to write the radar map into."})
+    loose_dirs, slf_paths = _tileset_paths_for(xml_path)
+
+    # Sector name from the ORIGINAL arg (the resolved temp path for an
+    # slf:// dat would carry a temp name, not the sector name).
+    raw = dat.split("!")[-1] if dat.startswith("slf://") else dat
+    name = Path(raw).stem.upper()
+
+    # 1. Resolve the engine-read write target: the writable profile, which is
+    #    front-of-stack and overrides Radarmaps.slf (correct by construction).
+    try:
+        layout = parse_vfs_config(install_root)
+        out_path = layout.resolve_override_write(f"RADARMAPS/{name}.STI")
+    except VfsConfigError as e:
+        raise HTTPException(400, {"error": "NO_WRITE_PROFILE", "message": str(e)})
+
+    # 2. Render → 88x44.
+    img = render_radar_image(dat_path, xml_path, tileset, loose_dirs, slf_paths)
+
+    # 3. Back up any prior override OUTSIDE mounted dirs, then write atomically.
+    if out_path.exists():
+        try:
+            _RADAR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(out_path, _RADAR_BACKUP_DIR / f"{name}.STI.prev")
+        except OSError:
+            pass
+    write_radar_sti(img, out_path)
+
+    # 4. Read-back assertion: the file landed UNDER the engine write profile
+    #    AND decodes as a valid STI. (We can't prove non-shadowing via
+    #    resolve_read — it ignores SLFs — so correctness is by-construction:
+    #    we wrote to the top-of-stack writable profile. This confirms the
+    #    write took and is where the engine will look.)
+    ewp = layout.engine_write_profile()
+    under_profile = False
+    if ewp is not None and ewp.profile_root is not None:
+        try:
+            under_profile = out_path.resolve().is_relative_to(ewp.profile_root.resolve())
+        except (OSError, ValueError):
+            under_profile = False
+    decoded = decode_sti_frame_to_png(out_path.read_bytes(), 0)
+    if not under_profile or decoded is None:
+        raise HTTPException(500, {"error": "RADAR_WRITE_UNVERIFIED",
+            "message": (f"Radar written to {out_path} but the read-back check "
+                        "failed (location or decode) — the engine may not read it.")})
+
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG")
+    return RadarResult(
+        output_path=str(out_path),
+        bytes_written=out_path.stat().st_size,
+        width=RADAR_W, height=RADAR_H,
+        overrides_bundled=_radarmaps_slf_has(install_root, name),
+        preview_png_b64=_b64.b64encode(buf.getvalue()).decode("ascii"),
+    )
+
+
 def _apply_single_edit(parsed: dict, edit: EditOp, rows: int, cols: int) -> None:
     """Dispatch a single edit op. Raises EditOpError / HTTPException on
     bad input. Mutates `parsed` in place."""
@@ -2084,6 +2345,12 @@ def _apply_single_edit(parsed: dict, edit: EditOp, rows: int, cols: int) -> None
             raise HTTPException(400, {"error": "MISSING_FIELDS",
                 "message": "set_room needs room_id"})
         set_room_id(parsed, gridno, edit.room_id)
+        return
+    if edit.op == "set_height":
+        if edit.height is None:
+            raise HTTPException(400, {"error": "MISSING_FIELDS",
+                "message": "set_height needs height"})
+        set_height(parsed, gridno, edit.height)
         return
     if edit.layer not in ("land", "objs", "shadows", "structs", "roofs", "onroofs"):
         raise HTTPException(400, {"error": "BAD_LAYER",
@@ -2398,6 +2665,53 @@ def close_session(session_id: str):
     return {"closed": session_id}
 
 
+# Rolling pre-save backups live OUTSIDE the install (the in-dir one-shot
+# .bak only preserves the pristine original; a second bad save would
+# otherwise overwrite the canonical .dat with no fresh recovery point).
+_DAT_BACKUP_DIR = (
+    Path(os.environ.get("APPDATA") or Path.home() / ".config")
+    / "MercWizard" / "mapforge" / "dat_backups"
+)
+
+_EDIT_LAYER_PLURALS = ("land", "objs", "structs", "shadows", "roofs", "onroofs")
+
+
+def _snapshot_tiles(parsed: dict, gridnos: list[int]) -> dict:
+    """Capture full per-tile state (6 layer entry lists + their count
+    nibbles + room + height) for `gridnos`, so a failed edit batch can be
+    rolled back tile-by-tile — O(touched tiles), NOT a full-map deepcopy
+    (which would regress the interactive paint hot path)."""
+    npt = parsed.get("n_per_tile") or {}
+    rooms = parsed.get("rooms")
+    heights = parsed.get("heights")
+    snap: dict[int, dict] = {}
+    for g in gridnos:
+        snap[g] = {
+            "layers": {pl: list(parsed[pl][g]) for pl in _EDIT_LAYER_PLURALS},
+            "counts": {ck: npt[ck][g] for ck in npt},
+            "room": rooms[g] if rooms is not None else None,
+            "height": (heights[g] if heights is not None and g < len(heights)
+                       else None),
+        }
+    return snap
+
+
+def _restore_tiles(parsed: dict, snap: dict) -> None:
+    """Undo a partial edit batch from a `_snapshot_tiles` capture."""
+    npt = parsed.get("n_per_tile") or {}
+    rooms = parsed.get("rooms")
+    heights = parsed.get("heights")
+    for g, s in snap.items():
+        for pl, entries in s["layers"].items():
+            parsed[pl][g] = list(entries)
+        for ck, c in s["counts"].items():
+            npt[ck][g] = c
+        if s["room"] is not None and rooms is not None:
+            rooms[g] = s["room"]
+        if s["height"] is not None and heights is not None and g < len(heights):
+            heights[g] = s["height"]
+
+
 @router.put("/sessions/{session_id}/edits", response_model=ApplyEditsResult)
 def apply_edits(session_id: str, body: ApplyEditsBody):
     """Apply a batch of edits to the session's in-memory parsed dict.
@@ -2419,13 +2733,43 @@ def apply_edits(session_id: str, body: ApplyEditsBody):
     cols = sess.parsed["cols"]
     applied = 0
     with sess._lock:
+        # Transactional: snapshot every touched tile BEFORE applying, so a
+        # mid-batch failure rolls the WHOLE batch back — no half-applied
+        # paste/paint left in the live session. `_apply_single_edit` raises
+        # EditOpError (15-cap, etc.) AND HTTPException (OOB / BAD_LAYER /
+        # BAD_ENTRIES); both must roll back. Snapshot is O(touched tiles).
+        world_max = rows * cols
+        touched: list[int] = []
+        seen: set[int] = set()
         for edit in body.edits:
-            try:
+            g = edit.y * cols + edit.x
+            if 0 <= g < world_max and g not in seen:
+                seen.add(g)
+                touched.append(g)
+        snap = _snapshot_tiles(sess.parsed, touched)
+        # The edit ops also mutate the map-global `counts` totals dict;
+        # snapshot it so a rollback restores it too (defense-in-depth —
+        # today only `sector_info` reads it, and it re-parses off disk).
+        counts_before = dict(sess.parsed.get("counts") or {})
+
+        def _rollback() -> None:
+            _restore_tiles(sess.parsed, snap)
+            c = sess.parsed.get("counts")
+            if c is not None:
+                c.clear()
+                c.update(counts_before)
+
+        try:
+            for edit in body.edits:
                 _apply_single_edit(sess.parsed, edit, rows, cols)
-            except EditOpError as e:
-                raise HTTPException(400, {"error": "EDIT_OP_ERROR",
-                    "message": str(e), "applied_before_error": applied})
-            applied += 1
+                applied += 1
+        except EditOpError as e:
+            _rollback()
+            raise HTTPException(400, {"error": "EDIT_OP_ERROR",
+                "message": str(e), "applied_before_error": applied})
+        except Exception:
+            _rollback()
+            raise
         sess.edit_count += applied
         sess.dirty = applied > 0
     return ApplyEditsResult(applied=applied, session=_session_info(sess))
@@ -2483,10 +2827,28 @@ def save_session(session_id: str):
                 f"Specific desync: {desync}"
             ),
         })
-    # Write the new .dat
+    # Rolling pre-save backup: copy the CURRENT on-disk .dat (the version
+    # about to be overwritten) to a timestamped file OUTSIDE the install,
+    # so EVERY save is recoverable — not just the pristine original the
+    # one-shot .bak holds. Best-effort; never block the save on it.
+    if sess.dat_path.exists():
+        try:
+            import shutil as _shutil
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            roll_dir = _DAT_BACKUP_DIR / sess.dat_path.stem
+            roll_dir.mkdir(parents=True, exist_ok=True)
+            # uuid suffix so two saves in the same wall-clock second can't
+            # collide and silently overwrite the earlier rolling backup.
+            _shutil.copy2(sess.dat_path, roll_dir / f"{stamp}_{uuid.uuid4().hex[:6]}.dat")
+        except OSError:
+            pass  # disk full / permission — the save itself still proceeds
+    # Write the new .dat ATOMICALLY (tmp + replace) so a crash mid-write
+    # can't truncate the canonical .dat.
     try:
         new_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
-        sess.dat_path.write_bytes(new_bytes)
+        tmp_path = sess.dat_path.with_suffix(sess.dat_path.suffix + ".mwtmp")
+        tmp_path.write_bytes(new_bytes)
+        tmp_path.replace(sess.dat_path)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, {"error": "WRITE_FAILED",
             "message": f"{type(e).__name__}: {e}"})
@@ -2581,9 +2943,11 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
 
     Final event always:
       - `{"done": true, "ok": true, "applied": int}` on success
-      - `{"done": true, "ok": false, "error": str, "applied": int}`
-        on failure (whatever has been applied so far stays applied —
-        callers Ctrl+Z to revert)
+      - `{"done": true, "ok": false, "error": str, "applied": 0}`
+        on failure — the run is TRANSACTIONAL: any mid-run failure
+        rolls back every op applied so far, so the session is left
+        exactly as it was before the run (nothing to undo; `applied`
+        is 0). Mirrors `apply_edits`.
 
     The session is locked for the duration of the run (no concurrent
     user paint can race with generator ops). Generator runs go through
@@ -2668,17 +3032,59 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
             # /edits-batch route already does.
             buffered: list[dict] = []
             with sess._lock:
-                for event in gen.iter_ops(ctx, body.params):
-                    # Phase event: just buffer; no mutation.
-                    if "phase" in event:
-                        buffered.append(event)
-                        continue
-                    # Op event: validate + apply via the same path the
-                    # /edits route uses.
-                    op_obj = EditOp(**event)
-                    _apply_single_edit(sess.parsed, op_obj, rows, cols)
-                    applied += 1
-                    buffered.append({"op": event})
+                # Transactional, mirroring `apply_edits`: snapshot every
+                # tile an op touches BEFORE applying it, so ANY mid-run
+                # failure — an EditOpError (e.g. the 15-entry nibble cap),
+                # an out-of-bounds op, a malformed EditOp, or the generator
+                # itself raising — rolls the WHOLE run back. No half-applied
+                # map is left stranded in the session. Generator ops STREAM
+                # in, so (unlike apply_edits) the touched set isn't known up
+                # front: capture each gridno's pre-state lazily the first
+                # time an op hits it — O(touched tiles), not a full-map
+                # deepcopy. Every generator mutation flows through
+                # `_apply_single_edit` on an op's (x, y) — GeneratorContext
+                # is read-only by contract — so the per-tile snapshot
+                # captures all of them.
+                world_max = rows * cols
+                snap: dict[int, dict] = {}
+                seen: set[int] = set()
+                # The ops also bump the map-global `counts` totals; snapshot
+                # it wholesale so a rollback restores it too (same defense-
+                # in-depth as apply_edits).
+                counts_before = dict(sess.parsed.get("counts") or {})
+
+                def _rollback() -> None:
+                    _restore_tiles(sess.parsed, snap)
+                    c = sess.parsed.get("counts")
+                    if c is not None:
+                        c.clear()
+                        c.update(counts_before)
+
+                try:
+                    for event in gen.iter_ops(ctx, body.params):
+                        # Phase event: just buffer; no mutation.
+                        if "phase" in event:
+                            buffered.append(event)
+                            continue
+                        # Op event: validate + apply via the same path the
+                        # /edits route uses.
+                        op_obj = EditOp(**event)
+                        # Snapshot this tile's pre-state the FIRST time an
+                        # op touches it, BEFORE the mutation. Bounds filter
+                        # mirrors apply_edits's touched-set computation.
+                        g = op_obj.y * cols + op_obj.x
+                        if 0 <= g < world_max and g not in seen:
+                            seen.add(g)
+                            snap.update(_snapshot_tiles(sess.parsed, [g]))
+                        _apply_single_edit(sess.parsed, op_obj, rows, cols)
+                        applied += 1
+                        buffered.append({"op": event})
+                except Exception:
+                    # Roll the whole run back, then re-raise so the outer
+                    # handler emits the proper done-event. edit_count /
+                    # dirty are NOT bumped — the session is left untouched.
+                    _rollback()
+                    raise
                 sess.edit_count += applied
                 sess.dirty = sess.dirty or applied > 0
             # Lock released — safe to suspend on yield.
@@ -2691,23 +3097,23 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
                 "generator": name,
             }) + "\n"
         except EditOpError as e:
+            # Rolled back above — 0 ops are live in the session now.
             yield json.dumps({
                 "done": True,
                 "ok": False,
                 "error": "EDIT_OP_ERROR",
                 "message": str(e),
-                "applied": applied,
+                "applied": 0,
             }) + "\n"
         except Exception as e:  # noqa: BLE001
-            # Generator itself raised — the partial state stays in the
-            # session. Frontend can Ctrl+Z to step back through the
-            # applied ops.
+            # Generator (or an op) raised — the run was rolled back, so
+            # the session is exactly as it was before. 0 ops applied.
             yield json.dumps({
                 "done": True,
                 "ok": False,
                 "error": "GENERATOR_FAILED",
                 "message": f"{type(e).__name__}: {e}",
-                "applied": applied,
+                "applied": 0,
             }) + "\n"
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
