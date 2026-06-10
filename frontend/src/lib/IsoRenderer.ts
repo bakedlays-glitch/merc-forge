@@ -408,6 +408,38 @@ export class IsoRenderer {
    * snapshot we actually want for revert). */
   private strokeSeenKeys: Set<string> = new Set();
   private undoStack: UndoEntry[] = [];
+  /** Redo history. Populated when `popUndo` reverts a stroke (the
+   * pre-revert state is captured here) and consumed by `popRedo`. Cleared
+   * by `endStroke` — a fresh edit invalidates the redo timeline (standard
+   * undo/redo semantics). */
+  private redoStack: UndoEntry[] = [];
+
+  /** Capture the CURRENT state of every axis named in `entry` into a new
+   * UndoEntry — the inverse of applying `entry`. Used to build the redo
+   * mirror before an undo reverts (and the undo mirror before a redo), so
+   * undo/redo are perfectly symmetric. */
+  private captureMirror(entry: UndoEntry): UndoEntry {
+    const mirror: UndoEntry = {
+      snapshots: [], roomSnapshots: [], heightSnapshots: [], label: entry.label,
+    };
+    for (const s of entry.snapshots) {
+      const gn = s.y * this.parsed.cols + s.x;
+      const cur = this.parsed[s.layer][gn] ?? [];
+      mirror.snapshots.push({
+        x: s.x, y: s.y, layer: s.layer,
+        entries: cur.map((e) => [e[0] as number, e[1] as number]),
+      });
+    }
+    for (const r of entry.roomSnapshots) {
+      const gn = r.y * this.parsed.cols + r.x;
+      mirror.roomSnapshots.push({ x: r.x, y: r.y, roomId: this.parsed.rooms[gn] ?? 0 });
+    }
+    for (const h of entry.heightSnapshots) {
+      const gn = h.y * this.parsed.cols + h.x;
+      mirror.heightSnapshots.push({ x: h.x, y: h.y, height: this.parsed.heights[gn] ?? 0 });
+    }
+    return mirror;
+  }
 
   /** Begin a paint stroke. Subsequent `recordSnapshot` calls staple
    * onto this stroke; `endStroke` commits to the undo history. Calling
@@ -467,6 +499,8 @@ export class IsoRenderer {
     if (s.snapshots.length === 0 && s.roomSnapshots.length === 0
         && s.heightSnapshots.length === 0) return;
     this.undoStack.push(s);
+    // A fresh committed edit invalidates the redo timeline.
+    this.redoStack = [];
     // Cap at 100 strokes. Each snapshot is small (a few ints) so this
     // is generous — the cap is really just to avoid stale memory after
     // a marathon editing session.
@@ -479,7 +513,24 @@ export class IsoRenderer {
    * — `applyLocalEdit` runs on the same set_entries op via the standard
    * path. Returns null when the stack is empty. */
   popUndo(): UndoEntry | null {
-    return this.undoStack.pop() ?? null;
+    const entry = this.undoStack.pop();
+    if (!entry) return null;
+    // Capture the current (post-edit) state of the touched axes as the
+    // redo entry BEFORE the caller applies the pre-edit snapshots.
+    this.redoStack.push(this.captureMirror(entry));
+    while (this.redoStack.length > 100) this.redoStack.shift();
+    return entry;
+  }
+
+  /** Pop the top redo entry, capturing current state onto the undo stack
+   * first so the redo can itself be undone. Symmetric with `popUndo`; the
+   * caller applies the returned entry's snapshots via the same path. */
+  popRedo(): UndoEntry | null {
+    const entry = this.redoStack.pop();
+    if (!entry) return null;
+    this.undoStack.push(this.captureMirror(entry));
+    while (this.undoStack.length > 100) this.undoStack.shift();
+    return entry;
   }
 
   /** Inspect the top undo label without popping. Used by the UI to
@@ -493,10 +544,21 @@ export class IsoRenderer {
     return this.undoStack.length;
   }
 
-  /** Drop the entire undo history. Called on session change / refetch
-   * so undo doesn't try to revert into a stale parsed dict. */
+  redoDepth(): number {
+    return this.redoStack.length;
+  }
+
+  /** Inspect the top redo label without popping (for the Redo button). */
+  peekRedoLabel(): string | null {
+    const top = this.redoStack[this.redoStack.length - 1];
+    return top ? top.label : null;
+  }
+
+  /** Drop the entire undo + redo history. Called on session change /
+   * refetch so undo/redo don't try to apply into a stale parsed dict. */
   clearUndo(): void {
     this.undoStack = [];
+    this.redoStack = [];
     this.pendingStroke = null;
     this.strokeSeenKeys = new Set();
   }

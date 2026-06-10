@@ -78,6 +78,7 @@ export function formatBinding(binding: string): string {
 
 export type MapForgeActionId =
   | "undo"
+  | "redo"
   | "save"
   | "tool-pencil"
   | "tool-inspect"
@@ -111,6 +112,13 @@ export const MAPFORGE_ACTIONS: MapForgeAction[] = [
     label: "Undo",
     description: "Revert the last paint stroke (or inspector edit).",
     defaultBinding: "Ctrl+Z",
+    group: "Edit",
+  },
+  {
+    id: "redo",
+    label: "Redo",
+    description: "Re-apply the last undone stroke.",
+    defaultBinding: "Ctrl+Y",
     group: "Edit",
   },
   {

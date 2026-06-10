@@ -861,6 +861,7 @@ function MapForgeSectorInner() {
   // Bumped after every undo/redo so React re-renders the toolbar
   // button label ("Undo: Paint floor (12 tiles)" → "Undo: empty").
   const [undoDepth, setUndoDepth] = useState(0);
+  const [redoDepth, setRedoDepth] = useState(0);
   // Stack depth at the last save. The backend's session.edit_count
   // counts BOTH paint and undo applyEdits as edits, so a paint+undo
   // round-trip leaves edit_count positive even though the parsed dict
@@ -940,9 +941,10 @@ function MapForgeSectorInner() {
     setPhaseFloor(0);
     setPhasePct(0);
     setFirstPaintDone(false);
-    // Fresh session → fresh undo state. savedAtDepth and undoDepth
-    // both reset to 0 so the Save button starts clean.
+    // Fresh session → fresh undo/redo state. savedAtDepth + undoDepth
+    // reset to 0 so the Save button starts clean; redo clears too.
     setUndoDepth(0);
+    setRedoDepth(0);
     setSavedAtDepth(0);
 
     // Helpers that advance phases monotonically. `accFloor` runs in a
@@ -1762,6 +1764,56 @@ function MapForgeSectorInner() {
     }
   }
 
+  /** Sync both history depths from the renderer. Called after every stroke
+   * commit, undo, and redo so the Undo/Redo buttons + dirty flag track the
+   * real stacks (endStroke clears redo → a fresh paint disables Redo). */
+  function bumpHistory() {
+    if (!renderer) return;
+    const u = renderer.undoDepth();
+    const r = renderer.redoDepth();
+    setUndoDepth(u);
+    setRedoDepth(r);
+  }
+
+  /** Re-apply the last undone stroke. Mirror of `undo()` but pulls from the
+   * renderer's redo stack (popRedo also pushes the inverse back onto the
+   * undo stack, so a redo can itself be undone). */
+  async function redo() {
+    if (!session || !renderer || session.read_only) return;
+    const entry = renderer.popRedo();
+    if (!entry) return;
+    setEditsInFlight((n) => n + 1);
+    try {
+      const edits: SessionEdit[] = [];
+      for (const s of entry.snapshots) {
+        renderer.applyLocalEdit({
+          x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries,
+        });
+        edits.push({
+          x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries,
+        });
+      }
+      for (const r of entry.roomSnapshots) {
+        renderer.applyLocalEdit({ x: r.x, y: r.y, op: "set_room", roomId: r.roomId });
+        edits.push({ x: r.x, y: r.y, op: "set_room", room_id: r.roomId });
+      }
+      for (const h of entry.heightSnapshots) {
+        renderer.applyLocalEdit({ x: h.x, y: h.y, op: "set_height", height: h.height });
+        edits.push({ x: h.x, y: h.y, op: "set_height", height: h.height });
+      }
+      setRenderEpoch((e) => e + 1);
+      if (edits.length > 0) {
+        const res = await applyEdits(session.session_id, edits);
+        setSession(res.session);
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("redo backend sync failed", e);
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
   /**
    * Canvas-button cycle for pencil:
    *   mousedown   → beginStroke, paint first tile
@@ -1902,7 +1954,7 @@ function MapForgeSectorInner() {
     // Close the pencil stroke if one is open. (Inspect = no-op.)
     if (strokeRef.current !== null && renderer) {
       renderer.endStroke();
-      setUndoDepth(renderer.undoDepth());
+      bumpHistory();
     }
     strokeRef.current = null;
     // Commit a shape drag released over the canvas. (Releases off-canvas
@@ -1965,7 +2017,7 @@ function MapForgeSectorInner() {
       });
     }
     renderer.endStroke();
-    setUndoDepth(renderer.undoDepth());
+    bumpHistory();
   }
 
   /** Copy the committed selection rectangle into the clipboard. Reads the
@@ -2074,7 +2126,7 @@ function MapForgeSectorInner() {
       }
       renderer.endStroke();
       strokeCommitted = true;
-      setUndoDepth(renderer.undoDepth());
+      bumpHistory();
       setRenderEpoch((e) => e + 1);
       // Persist to the backend session (transactional: rolls back on any
       // mid-batch failure, leaving the live session untouched).
@@ -2129,7 +2181,7 @@ function MapForgeSectorInner() {
           for (const h of entry.heightSnapshots) {
             renderer.applyLocalEdit({ x: h.x, y: h.y, op: "set_height", height: h.height });
           }
-          setUndoDepth(renderer.undoDepth());
+          bumpHistory();
           setRenderEpoch((e2) => e2 + 1);
         }
       }
@@ -2331,7 +2383,7 @@ function MapForgeSectorInner() {
             return;
           }
           await undo();
-          setUndoDepth(renderer.undoDepth());
+          bumpHistory();
         },
       },
       {
@@ -2474,7 +2526,7 @@ function MapForgeSectorInner() {
               // earlier `d + 1` lie was wrong (no snapshots recorded
               // pre-fix). Now beginStroke/endStroke + recordSnapshot
               // make this accurate.
-              if (renderer) setUndoDepth(renderer.undoDepth());
+              if (renderer) bumpHistory();
             }
           } catch (err) {
             ctx.print(
@@ -2533,7 +2585,12 @@ function MapForgeSectorInner() {
       switch (action) {
         case "undo":
           if (renderer && session && !session.read_only) {
-            undo().then(() => setUndoDepth(renderer.undoDepth()));
+            undo().then(() => bumpHistory());
+          }
+          break;
+        case "redo":
+          if (renderer && session && !session.read_only) {
+            redo().then(() => bumpHistory());
           }
           break;
         case "save":
@@ -3246,13 +3303,22 @@ function MapForgeSectorInner() {
   const renderViewPanel = () => (
     <div className="flex flex-wrap items-end gap-3 p-2">
       {session && !session.read_only && renderer && (
-        <UndoButton
-          undoDepth={undoDepth}
-          label={renderer.peekUndoLabel()}
-          onUndo={() => {
-            undo().then(() => setUndoDepth(renderer.undoDepth()));
-          }}
-        />
+        <>
+          <UndoButton
+            undoDepth={undoDepth}
+            label={renderer.peekUndoLabel()}
+            onUndo={() => {
+              undo().then(() => bumpHistory());
+            }}
+          />
+          <RedoButton
+            redoDepth={redoDepth}
+            label={renderer.peekRedoLabel()}
+            onRedo={() => {
+              redo().then(() => bumpHistory());
+            }}
+          />
+        </>
       )}
       {session && !session.read_only && (
         <SaveButton
@@ -3505,13 +3571,22 @@ function MapForgeSectorInner() {
               cuts the "everything in one giant row" crowd. */}
           <div className="flex flex-wrap items-end justify-end gap-3">
             {session && !session.read_only && renderer && (
-              <UndoButton
-                undoDepth={undoDepth}
-                label={renderer.peekUndoLabel()}
-                onUndo={() => {
-                  undo().then(() => setUndoDepth(renderer.undoDepth()));
-                }}
-              />
+              <>
+                <UndoButton
+                  undoDepth={undoDepth}
+                  label={renderer.peekUndoLabel()}
+                  onUndo={() => {
+                    undo().then(() => bumpHistory());
+                  }}
+                />
+                <RedoButton
+                  redoDepth={redoDepth}
+                  label={renderer.peekRedoLabel()}
+                  onRedo={() => {
+                    redo().then(() => bumpHistory());
+                  }}
+                />
+              </>
             )}
             {session && !session.read_only && (
               <SaveButton
@@ -4124,14 +4199,14 @@ function MapForgeSectorInner() {
             getSessionParsed(session.session_id).then((parsed) => {
               renderer.setParsed(parsed);
               setRenderEpoch((e) => e + 1);
-              setUndoDepth(renderer.undoDepth());
+              bumpHistory();
             }).catch((e) => {
               log?.append({
                 severity: "warn",
                 message: `Canvas resync failed: ${e instanceof Error ? e.message : String(e)}. Click any tile to force refresh.`,
               });
               setRenderEpoch((e2) => e2 + 1);
-              setUndoDepth(renderer.undoDepth());
+              bumpHistory();
             });
           } else {
             // No renderer / no session / no ops applied — still paint
@@ -4139,7 +4214,7 @@ function MapForgeSectorInner() {
             // renderer if available (it may have a partial stroke
             // committed even when applied==0 for weird race cases).
             setRenderEpoch((e) => e + 1);
-            if (renderer) setUndoDepth(renderer.undoDepth());
+            if (renderer) bumpHistory();
           }
         }}
       />
@@ -5266,6 +5341,35 @@ function UndoButton({
     >
       ↶ Undo
       {enabled && <span className="ml-1 text-amber-300">({undoDepth})</span>}
+    </button>
+  );
+}
+
+// ─── Redo button ──────────────────────────────────────────────────────
+function RedoButton({
+  redoDepth, label, onRedo,
+}: {
+  redoDepth: number;
+  label: string | null;
+  onRedo: () => void;
+}) {
+  const enabled = redoDepth > 0 && label !== null;
+  return (
+    <button
+      type="button"
+      onClick={enabled ? onRedo : undefined}
+      disabled={!enabled}
+      className={`rounded border px-3 py-1.5 text-xs ${
+        enabled
+          ? "border-amber-600 bg-amber-900 text-amber-100 hover:bg-amber-800"
+          : "border-gray-700 bg-gray-900 text-gray-500"
+      } disabled:opacity-50`}
+      title={enabled
+        ? `Redo: ${label} (Ctrl+Y)`
+        : "Nothing to redo (Ctrl+Y)"}
+    >
+      ↷ Redo
+      {enabled && <span className="ml-1 text-amber-300">({redoDepth})</span>}
     </button>
   );
 }
