@@ -109,7 +109,7 @@ import {
 /** UI tool modes. Inspect = click-to-pin; Pencil = click/drag to paint
  * the active brush; Shape = drag to define a rectangle / line / room that
  * commits as one undoable stroke. */
-type Tool = "inspect" | "pencil" | "shape" | "select";
+type Tool = "inspect" | "pencil" | "shape" | "select" | "height";
 
 /** Compile-time exhaustiveness guard. When a new `Tool` is added to the
  * union, any `if`/`switch` that forwards an unhandled value here stops
@@ -851,6 +851,13 @@ function MapForgeSectorInner() {
   // Initial value comes from user settings.
   const [brushRadius, setBrushRadius] = useState(
     () => loadSettings().defaultBrushRadius);
+  // Height brush (P5): mode + value. "raise"/"lower" step the touched
+  // tile's current height by `heightValue` (clamped 0..255); "set" writes
+  // `heightValue` absolutely. Both renderers ignore height for Z, so the
+  // height OVERLAY (numbers/tint, shown only while this tool is active) is
+  // what makes the brush observable.
+  const [heightMode, setHeightMode] = useState<"raise" | "lower" | "set">("raise");
+  const [heightValue, setHeightValue] = useState(1);
   // Bumped after every undo/redo so React re-renders the toolbar
   // button label ("Undo: Paint floor (12 tiles)" → "Undo: empty").
   const [undoDepth, setUndoDepth] = useState(0);
@@ -1649,6 +1656,62 @@ function MapForgeSectorInner() {
     }
   }
 
+  /** Height brush (P5): apply a height edit to the clicked tile + its
+   * radius footprint as part of the open stroke. "raise"/"lower" read each
+   * tile's CURRENT height and step it by `heightValue` (clamped 0..255);
+   * "set" writes the value absolutely. `strokeRef` dedupes so one
+   * click/drag steps each tile exactly once. Snapshot → local apply →
+   * background applyEdits, mirroring paintBrush; bumps renderEpoch so the
+   * height overlay refreshes. */
+  async function paintHeight(tile: { x: number; y: number }) {
+    if (!session || !renderer || session.read_only) return;
+    const cols = info.data?.cols ?? 0;
+    const rows = info.data?.rows ?? 0;
+    const parsed = renderer.getParsed();
+    const r = brushRadius - 1;
+    if (!strokeRef.current) strokeRef.current = new Set();
+    const edits: SessionEdit[] = [];
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        // Manhattan filter → diamond brush in iso space (matches paintBrush).
+        if (Math.abs(dx) + Math.abs(dy) > r) continue;
+        const x = tile.x + dx;
+        const y = tile.y + dy;
+        if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+        const key = `${x},${y}`;
+        if (strokeRef.current.has(key)) continue;  // once per stroke
+        strokeRef.current.add(key);
+        const cur = parsed.heights[y * cols + x] ?? 0;
+        const next = heightMode === "set"
+          ? Math.max(0, Math.min(255, heightValue))
+          : heightMode === "raise"
+            ? Math.min(255, cur + heightValue)
+            : Math.max(0, cur - heightValue);
+        if (next === cur) continue;  // no-op (already at clamp / same value)
+        renderer.recordHeightSnapshot(x, y);
+        renderer.applyLocalEdit({ x, y, op: "set_height", height: next });
+        edits.push({ x, y, op: "set_height", height: next });
+      }
+    }
+    if (edits.length === 0) return;
+    scheduleRenderEpoch();
+    setEditsInFlight((n) => n + 1);
+    try {
+      const res = await applyEdits(session.session_id, edits);
+      setSession(res.session);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("height brush backend sync failed", e);
+      log?.append({
+        severity: "error",
+        message: "Height sync failed — backend rejected an edit",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
   /** Pop one undo entry: translates its snapshots back into set_entries
    * + set_room ops and dispatches them via the same applyEdits path
    * (backend + local in lock-step). */
@@ -1765,6 +1828,19 @@ function MapForgeSectorInner() {
         setSelectCursor(tile);
         setSelectRect(null);
       }
+    } else if (tool === "height") {
+      // Height brush: open a stroke + step the first tile. The drag
+      // continues in onCanvasMove; mouseup closes the stroke (strokeRef
+      // is non-null, so the existing endStroke block fires).
+      if (session?.read_only) return;
+      strokeRef.current = new Set();
+      const verb = heightMode === "set"
+        ? `Set height ${heightValue}`
+        : heightMode === "raise"
+          ? `Raise height +${heightValue}`
+          : `Lower height -${heightValue}`;
+      renderer.beginStroke(verb);
+      void paintHeight(tile);
     } else {
       assertNever(tool);
     }
@@ -1814,6 +1890,11 @@ function MapForgeSectorInner() {
     // Select drag: track the marquee end-point while the button is held.
     if (tool === "select" && tile && e.buttons === 1 && selectAnchor) {
       setSelectCursor(tile);
+    }
+    // Height brush drag: step each freshly entered tile (strokeRef dedupes
+    // so a tile already touched this stroke isn't stepped again).
+    if (tool === "height" && tile && e.buttons === 1 && strokeRef.current !== null) {
+      void paintHeight(tile);
     }
   }
 
@@ -2693,6 +2774,28 @@ function MapForgeSectorInner() {
   }, [tool, shapeAnchor, shapeCursor, shapeKind,
       selectAnchor, selectCursor, selectRect, pasteMode, clipboard]);
 
+  // ─── Height overlay ─────────────────────────────────────────────────
+  // Per-tile heights are invisible in the iso render (neither renderer
+  // uses height for Z), so while the height brush is active we overlay the
+  // non-zero-height tiles — tinted by height, numbered when zoomed in.
+  // Recomputed on every edit (renderEpoch) so it tracks the brush live.
+  const heightOverlay = useMemo<Array<{ x: number; y: number; h: number }> | null>(() => {
+    if (tool !== "height" || !renderer) return null;
+    const parsed = renderer.getParsed();
+    const heights = parsed?.heights;
+    if (!heights) return null;
+    const cols = parsed.cols;
+    const rows = parsed.rows;
+    const out: Array<{ x: number; y: number; h: number }> = [];
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const h = heights[y * cols + x] ?? 0;
+        if (h > 0) out.push({ x, y, h });
+      }
+    }
+    return out;
+  }, [tool, renderer, renderEpoch]);
+
   function resetView() { setZoom(1); setPan({ x: 0, y: 0 }); }
 
   const showGridForThisView =
@@ -2924,6 +3027,25 @@ function MapForgeSectorInner() {
                   }));
               })()}
               brushRadiusPreview={(() => {
+                // Height brush: plain radius footprint (no brush/stamp logic).
+                if (tool === "height") {
+                  if (!hovered || brushRadius <= 1) return null;
+                  const r = brushRadius - 1;
+                  const cols = info.data?.cols ?? 0;
+                  const rows = info.data?.rows ?? 0;
+                  const tiles: Array<{ x: number; y: number; safe: boolean }> = [];
+                  for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                      if (Math.abs(dx) + Math.abs(dy) > r) continue;
+                      if (dx === 0 && dy === 0) continue;
+                      const tx = hovered.x + dx;
+                      const ty = hovered.y + dy;
+                      const safe = tx >= 0 && ty >= 0 && tx < cols && ty < rows;
+                      tiles.push({ x: tx, y: ty, safe });
+                    }
+                  }
+                  return tiles;
+                }
                 if (tool !== "pencil" || !hovered || !activeBrush || !renderer) {
                   return null;
                 }
@@ -2948,6 +3070,7 @@ function MapForgeSectorInner() {
                 }
                 return tiles;
               })()}
+              heightOverlay={heightOverlay}
             />
           </div>
         </div>
@@ -3066,6 +3189,13 @@ function MapForgeSectorInner() {
         onCopy={() => void doCopy()}
         onArmPaste={() => setPasteMode(true)}
         onCancelPaste={() => setPasteMode(false)}
+      />
+      <HeightOptions
+        tool={tool}
+        heightMode={heightMode}
+        setHeightMode={setHeightMode}
+        heightValue={heightValue}
+        setHeightValue={setHeightValue}
       />
     </div>
   );
@@ -3340,6 +3470,13 @@ function MapForgeSectorInner() {
               onCopy={() => void doCopy()}
               onArmPaste={() => setPasteMode(true)}
               onCancelPaste={() => setPasteMode(false)}
+            />
+            <HeightOptions
+              tool={tool}
+              heightMode={heightMode}
+              setHeightMode={setHeightMode}
+              heightValue={heightValue}
+              setHeightValue={setHeightValue}
             />
             <BrushSubStrip
               brush={activeBrush}
@@ -3717,6 +3854,26 @@ function MapForgeSectorInner() {
                     // stamps already force radius=1 in paintBrush, so
                     // we skip preview there to avoid double-marking
                     // (the stampPreview already shows the footprint).
+                    //
+                    // Height brush: plain radius footprint, no brush/stamp logic.
+                    if (tool === "height") {
+                      if (!hovered || brushRadius <= 1) return null;
+                      const r = brushRadius - 1;
+                      const cols = info.data?.cols ?? 0;
+                      const rows = info.data?.rows ?? 0;
+                      const tiles: Array<{ x: number; y: number; safe: boolean }> = [];
+                      for (let dy = -r; dy <= r; dy++) {
+                        for (let dx = -r; dx <= r; dx++) {
+                          if (Math.abs(dx) + Math.abs(dy) > r) continue;
+                          if (dx === 0 && dy === 0) continue;
+                          const tx = hovered.x + dx;
+                          const ty = hovered.y + dy;
+                          const safe = tx >= 0 && ty >= 0 && tx < cols && ty < rows;
+                          tiles.push({ x: tx, y: ty, safe });
+                        }
+                      }
+                      return tiles;
+                    }
                     if (tool !== "pencil" || !hovered || !activeBrush || !renderer) {
                       return null;
                     }
@@ -3743,6 +3900,7 @@ function MapForgeSectorInner() {
                     }
                     return tiles;
                   })()}
+                  heightOverlay={heightOverlay}
                 />
               </div>
             </div>
@@ -4079,6 +4237,7 @@ function IsoOverlay({
   debugClick,
   stampPreview,
   brushRadiusPreview,
+  heightOverlay,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -4106,6 +4265,9 @@ function IsoOverlay({
    * so the user can see what they'll paint AND whether any tiles will
    * be clipped. safe=false → red outline. */
   brushRadiusPreview: Array<{ x: number; y: number; safe: boolean }> | null;
+  /** Non-zero-height tiles to overlay while the height brush is active —
+   * tinted by height, numbered when zoomed in. Null for other tools. */
+  heightOverlay: Array<{ x: number; y: number; h: number }> | null;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -4201,6 +4363,47 @@ function IsoOverlay({
         />
       )}
 
+      {/* Height overlay — only while the height brush is active. Tint each
+          non-zero tile by its height (opacity ramped to the max present),
+          and draw the value when zoomed in enough to read + the count is
+          modest. Capped at 4000 nodes so a fully-sculpted map can't emit
+          25k SVG elements. */}
+      {heightOverlay && heightOverlay.length > 0 && (() => {
+        const maxH = heightOverlay.reduce((m, t) => Math.max(m, t.h), 1);
+        const labels = meta.tileW >= 22 && heightOverlay.length <= 1200;
+        return (
+          <g>
+            {heightOverlay.slice(0, 4000).map((t) => (
+              <TileMarker
+                key={`h-${t.x},${t.y}`}
+                tile={t} meta={meta}
+                fill={`rgba(255,150,40,${(0.15 + (t.h / maxH) * 0.45).toFixed(3)})`}
+                stroke="rgba(255,170,60,0.55)"
+                strokeWidth={0.5}
+              />
+            ))}
+            {labels && heightOverlay.map((t) => {
+              const p = tileToCanvasPixel(t.x, t.y, meta);
+              return (
+                <text
+                  key={`ht-${t.x},${t.y}`}
+                  x={p.x}
+                  y={p.y - meta.tileH / 2}
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                  fontSize={9}
+                  fill="#fff"
+                  stroke="#000"
+                  strokeWidth={0.5}
+                  style={{ paintOrder: "stroke" }}
+                >
+                  {t.h}
+                </text>
+              );
+            })}
+          </g>
+        );
+      })()}
       {hovered && (
         <TileMarker tile={hovered} meta={meta}
           fill="rgba(120,220,255,0.22)" stroke="rgba(120,220,255,0.85)" />
@@ -4652,18 +4855,20 @@ function ToolSelector({
     pencil: "bg-emerald-900 text-emerald-100",
     shape: "bg-teal-900 text-teal-100",
     select: "bg-purple-900 text-purple-100",
+    height: "bg-orange-900 text-orange-100",
   };
   const toolLabel: Record<Tool, string> = {
     inspect: "⌖ Inspect", pencil: "✎ Pencil", shape: "▦ Shape", select: "⬚ Select",
+    height: "⛰ Height",
   };
   return (
     <div>
       <span className="block text-xs text-gray-400">Tool</span>
       <div className="flex overflow-hidden rounded border border-gray-700">
-        {(["inspect", "pencil", "shape", "select"] as const).map((t) => {
+        {(["inspect", "pencil", "shape", "select", "height"] as const).map((t) => {
           // Pencil requires a brush; the shape tool's room sub-tool works
-          // without one, and select/inspect need no brush — so only pencil
-          // is ever hard-disabled here.
+          // without one, and select/inspect/height need no brush — so only
+          // pencil is ever hard-disabled here.
           const disabled = t === "pencil" && !hasBrush;
           return (
             <button
@@ -4685,7 +4890,9 @@ function ToolSelector({
                       ? "Drag to define a rectangle / line / room"
                       : t === "select"
                         ? "Drag a rectangle to copy a region; paste it elsewhere"
-                        : "Click tiles to inspect them"
+                        : t === "height"
+                          ? "Raise / lower / set per-tile terrain height (drag to sculpt)"
+                          : "Click tiles to inspect them"
               }
             >
               {toolLabel[t]}
@@ -4958,6 +5165,75 @@ function SelectOptions({
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Height-brush-only controls: mode (Raise / Lower / Set) + the value
+ * (a step for raise/lower, an absolute level for set). Hidden in other
+ * tools so the toolbar width stays stable. Mirrors SelectOptions. */
+function HeightOptions({
+  tool, heightMode, setHeightMode, heightValue, setHeightValue,
+}: {
+  tool: Tool;
+  heightMode: "raise" | "lower" | "set";
+  setHeightMode: (m: "raise" | "lower" | "set") => void;
+  heightValue: number;
+  setHeightValue: (v: number) => void;
+}) {
+  if (tool !== "height") return null;
+  const modes: Array<{ id: "raise" | "lower" | "set"; label: string; title: string }> = [
+    { id: "raise", label: "▲ Raise", title: "Add the step to each tile's current height (clamped at 255)" },
+    { id: "lower", label: "▼ Lower", title: "Subtract the step from each tile's current height (clamped at 0)" },
+    { id: "set", label: "= Set", title: "Write the value as the tile's absolute height" },
+  ];
+  return (
+    <div className="flex items-end gap-2">
+      <div>
+        <span className="block text-xs text-gray-400">Height</span>
+        <div className="flex overflow-hidden rounded border border-gray-700">
+          {modes.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => setHeightMode(m.id)}
+              title={m.title}
+              className={`px-2 py-1 text-xs ${
+                heightMode === m.id
+                  ? "bg-orange-900 text-orange-100"
+                  : "bg-gray-900 text-gray-300 hover:bg-gray-800"
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div>
+        <span className="block text-xs text-gray-400">
+          {heightMode === "set" ? "Level" : "Step"}
+          <span className="ml-1 font-mono text-gray-200">{heightValue}</span>
+        </span>
+        <input
+          type="number"
+          min={heightMode === "set" ? 0 : 1}
+          max={255}
+          value={heightValue}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            if (Number.isNaN(n)) return;
+            setHeightValue(Math.max(0, Math.min(255, n)));
+          }}
+          className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs"
+          title={heightMode === "set"
+            ? "Absolute height (0–255) painted onto each tile"
+            : "How many height units each click/drag steps a tile (1–255)"}
+        />
+      </div>
+      <span className="max-w-[14rem] self-center text-[10px] leading-tight text-gray-500">
+        Heights don't change the iso render (the engine uses them in-game);
+        the orange overlay shows current values — drag to sculpt.
+      </span>
     </div>
   );
 }
