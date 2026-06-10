@@ -149,9 +149,23 @@ def write_dat_bytes(parsed: Dict[str, Any], original_bytes: bytes) -> bytes:
 
     out = bytearray()
     out.extend(_pack_header(parsed, original_bytes))
-    # Heights region: pass through original bytes (preserves UINT8-read-as-INT16
-    # garbage in the high byte of each per-tile slot).
-    out.extend(original_bytes[header_len:header_len + heights_size])
+    # Heights region: emit from parsed["heights"] (low byte) + parsed
+    # ["heights_high"] (the original UINT8-read-as-INT16 high byte we preserve
+    # verbatim). Byte-identical to the original EXCEPT any tile whose height
+    # was intentionally edited. Falls back to the original-bytes passthrough
+    # when heights_high isn't available (e.g. a parsed dict from older code or
+    # built from scratch).
+    heights = parsed.get("heights")
+    heights_high = parsed.get("heights_high")
+    if (heights is not None and heights_high is not None
+            and len(heights) == world_max and len(heights_high) == world_max):
+        hb = bytearray(heights_size)
+        for i in range(world_max):
+            hb[2 * i] = heights[i] & 0xFF
+            hb[2 * i + 1] = heights_high[i] & 0xFF
+        out.extend(hb)
+    else:
+        out.extend(original_bytes[header_len:header_len + heights_size])
     out.extend(_pack_layer_counts(parsed))
     out.extend(_pack_pass_2byte(parsed["land"]))
     out.extend(_pack_pass_object(parsed["objs"]))

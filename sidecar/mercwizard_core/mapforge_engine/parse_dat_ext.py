@@ -309,9 +309,13 @@ def parse_dat_full(
     # (80) for cliff tops.
     heights_region = data[header_len:header_len + heights_size]
     heights = list(heights_region[::2])
-    # The discarded high bytes (the garbage from the adjacent MAPELEMENT field
-    # at save time) are NOT exposed — they're not engine-meaningful, and the
-    # value pattern varies per .dat file based on runtime state.
+    # The high byte of each 2-byte slot is the engine's UINT8-read-as-INT16
+    # over-read (it lands in the adjacent MAPELEMENT field `ubAdjacentSoldierCnt`,
+    # runtime combat state — not load-critical, not engine-meaningful). We KEEP
+    # it as `heights_high` so the writer can re-emit the heights region
+    # byte-identically — only an intentionally-edited low byte differs —
+    # instead of a verbatim passthrough that can't support height edits.
+    heights_high = list(heights_region[1::2])
 
     # --- Per-tile layer counts + world_flags ----------------------------
     n_land    = [0] * world_max
@@ -489,6 +493,7 @@ def parse_dat_full(
         "world_flags": world_flags,
         "unused_nib":  unused_nib,
         "heights":     heights,
+        "heights_high": heights_high,
         "land":    land,
         "objs":    objs,
         "structs": structs,

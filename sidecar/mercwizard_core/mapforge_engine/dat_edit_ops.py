@@ -209,3 +209,21 @@ def set_room_id(parsed: Dict[str, Any], gridno: int, room_id: int) -> int:
     old = parsed["rooms"][gridno]
     parsed["rooms"][gridno] = room_id
     return old
+
+
+def set_height(parsed: Dict[str, Any], gridno: int, height: int) -> int:
+    """Set the per-tile terrain height (the low byte of the 2-byte slot).
+    Returns the previous height. The high byte (`ubAdjacentSoldierCnt`,
+    runtime state) is preserved separately via `heights_high`, so the writer
+    re-emits the slot byte-identically except this edited low byte."""
+    world_max = parsed["rows"] * parsed["cols"]
+    if not 0 <= gridno < world_max:
+        raise EditOpError(f"gridno {gridno} out of range 0..{world_max - 1}")
+    if not 0 <= height <= 0xFF:
+        raise EditOpError(f"height {height} out of range 0..255")
+    heights = parsed.get("heights")
+    if heights is None or gridno >= len(heights):
+        raise EditOpError("this parsed map has no heights array to edit")
+    old = heights[gridno]
+    heights[gridno] = height
+    return old
