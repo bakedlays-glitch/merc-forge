@@ -71,6 +71,7 @@ import { MapForgeAssetViewer, MapForgeAssetBrowserBody } from "./MapForgeAssetVi
 import { MapForgeTilesetBrowser } from "./MapForgeTilesetBrowser";
 import { MapForgePaletteRail, RecentBrushGrid } from "./MapForgePaletteRail";
 import {
+  MapForgeLogFull,
   MapForgeLogPanel,
   MapForgeLogProvider,
   useMapForgeLog,
@@ -930,6 +931,12 @@ function MapForgeSectorInner() {
     onComplete: (c1: { x: number; y: number }, c2: { x: number; y: number }) => void;
     onCancel: () => void;
   } | null>(null);
+  // Region-pick event plumbing: the anchoring mousedown also fires a
+  // click (swallow it so it can't double as the second corner), and a
+  // drag-complete on mouseup is followed by a click (swallow that too
+  // so it can't pin the inspector).
+  const pickJustAnchoredRef = useRef(false);
+  const pickSuppressClickRef = useRef(false);
   // Wizard restore-state — set when the wizard's "Pick on map" button
   // closes the wizard for a corner pick. After the picker resolves we
   // reopen the wizard with these prefilled so the user lands back
@@ -1883,10 +1890,20 @@ function MapForgeSectorInner() {
     // Plain left button only; alt+left and middle are reserved for pan
     // (the wrapper div handles those).
     if (e.button !== 0 || e.altKey) return;
-    // While picking rect corners (generator wizard), the canvas is a
-    // corner-picker — not a paint/shape surface. Block mousedown so we
-    // don't anchor a shape or stamp on the first corner click.
-    if (pickingRect) return;
+    // While picking a region (generator wizard), the canvas is a
+    // region-picker — not a paint/shape surface. Mousedown ANCHORS the
+    // first corner so the user can drag a box (release completes), or
+    // release in place and click the opposite corner instead.
+    if (pickingRect) {
+      if (pickingRect.stage === 0) {
+        const tile = hovered ?? pixelToTile(e);
+        if (tile) {
+          pickJustAnchoredRef.current = true;
+          setPickingRect({ ...pickingRect, stage: 1, corner1: tile });
+        }
+      }
+      return;
+    }
     if (!renderer) return;
     // Prefer the HOVERED tile (what the user visually sees) over the
     // re-resolved mousedown coords. The physical button press often
@@ -1947,14 +1964,23 @@ function MapForgeSectorInner() {
   }
 
   function onCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
-    // Rectangle corner-picker mode (started from the wizard's "Pick
-    // on map" button). Captures two clicks, then fires the callback.
+    // A region pick just completed on mouseup — swallow the click that
+    // follows it so it can't pin the inspector / start a tool action.
+    if (pickSuppressClickRef.current) {
+      pickSuppressClickRef.current = false;
+      return;
+    }
+    // Region-picker mode (generator wizard side-trip). Mousedown anchors
+    // (see onCanvasMouseDown), mouseup-on-another-tile completes; this
+    // click path is the click-then-click fallback's second corner.
     if (pickingRect) {
+      if (pickJustAnchoredRef.current) {
+        pickJustAnchoredRef.current = false;
+        return;
+      }
       const tile = pixelToTile(e);
       if (!tile) return;
-      if (pickingRect.stage === 0) {
-        setPickingRect({ ...pickingRect, stage: 1, corner1: tile });
-      } else if (pickingRect.corner1) {
+      if (pickingRect.stage === 1 && pickingRect.corner1) {
         const cb = pickingRect.onComplete;
         const c1 = pickingRect.corner1;
         setPickingRect(null);
@@ -1999,6 +2025,20 @@ function MapForgeSectorInner() {
   }
 
   function onCanvasMouseUp() {
+    // Region pick: releasing a drag over a DIFFERENT tile completes the
+    // region. Releasing on the anchor tile keeps the picker armed, so
+    // click-then-click still works for precision picks.
+    if (pickingRect?.stage === 1 && pickingRect.corner1) {
+      const c1 = pickingRect.corner1;
+      const tile = hovered;
+      if (tile && (tile.x !== c1.x || tile.y !== c1.y)) {
+        const cb = pickingRect.onComplete;
+        pickSuppressClickRef.current = true;
+        setPickingRect(null);
+        cb(c1, tile);
+      }
+      return;
+    }
     // Close the pencil stroke if one is open. (Inspect = no-op.)
     if (strokeRef.current !== null && renderer) {
       renderer.endStroke();
@@ -2824,6 +2864,18 @@ function MapForgeSectorInner() {
   const previewTiles = useMemo<Tile[] | null>(() => {
     const cols = info.data?.cols ?? 0;
     const rows = info.data?.rows ?? 0;
+    // Region corner-pick (generator wizard side-trip): live-tint the
+    // rectangle between the anchored corner and the cursor so the user
+    // sees the region before confirming — overrides any tool preview.
+    if (pickingRect?.stage === 1 && pickingRect.corner1 && hovered) {
+      let tiles = shapeTiles("rect-fill", pickingRect.corner1, hovered);
+      if (tiles.length > 6000) {
+        tiles = shapeTiles("rect-outline", pickingRect.corner1, hovered);
+      }
+      return tiles.filter(
+        (t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows,
+      );
+    }
     // Select tool: marquee (active drag, else the committed rect) and,
     // in paste mode, a ghost of the clipboard footprint at the cursor.
     if (tool === "select") {
@@ -2861,7 +2913,8 @@ function MapForgeSectorInner() {
       (t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows,
     );
   }, [tool, shapeAnchor, shapeCursor, shapeKind, info.data,
-      selectAnchor, selectCursor, selectRect, pasteMode, clipboard, hovered]);
+      selectAnchor, selectCursor, selectRect, pasteMode, clipboard, hovered,
+      pickingRect]);
 
   // Dimensions readout for the status bar while a shape drag is active.
   // Count is computed analytically (not from previewTiles, which is
@@ -2869,6 +2922,12 @@ function MapForgeSectorInner() {
   const previewDims = useMemo<
     { w: number; h: number; count: number; label: string } | null
   >(() => {
+    // Region corner-pick: dims of the in-progress region drag.
+    if (pickingRect?.stage === 1 && pickingRect.corner1 && hovered) {
+      const w = Math.abs(hovered.x - pickingRect.corner1.x) + 1;
+      const h = Math.abs(hovered.y - pickingRect.corner1.y) + 1;
+      return { w, h, count: w * h, label: "Region" };
+    }
     // Select tool: dims of the paste footprint, else the marquee rect.
     if (tool === "select") {
       if (pasteMode && clipboard) {
@@ -2897,7 +2956,8 @@ function MapForgeSectorInner() {
     }
     return { w, h, count, label: "Shape" };
   }, [tool, shapeAnchor, shapeCursor, shapeKind,
-      selectAnchor, selectCursor, selectRect, pasteMode, clipboard]);
+      selectAnchor, selectCursor, selectRect, pasteMode, clipboard,
+      pickingRect, hovered]);
 
   // ─── Height overlay ─────────────────────────────────────────────────
   // Per-tile heights are invisible in the iso render (neither renderer
@@ -3056,8 +3116,8 @@ function MapForgeSectorInner() {
             </span>
             <span>
               {pickingRect.stage === 0
-                ? "Click the first corner of the rectangle"
-                : `First corner pinned at (${pickingRect.corner1?.x}, ${pickingRect.corner1?.y}) — click the second corner`}
+                ? "Drag a box over the region (or click two corners)"
+                : `Corner pinned at (${pickingRect.corner1?.x}, ${pickingRect.corner1?.y}) — release or click the opposite corner`}
             </span>
           </div>
           <span className="text-xs text-rust-200">ESC to cancel</span>
@@ -3259,7 +3319,7 @@ function MapForgeSectorInner() {
     />
   );
 
-  const renderLogPanel = () => <MapForgeLogPanel />;
+  const renderLogPanel = () => <MapForgeLogFull />;
 
   // Toolbar as a dock panel (Phase 2). Left-aligned copy of the header
   // toolbar — the fixed header keeps its right-aligned inline version
@@ -3919,8 +3979,8 @@ function MapForgeSectorInner() {
                 </span>
                 <span>
                   {pickingRect.stage === 0
-                    ? "Click the first corner of the rectangle"
-                    : `First corner pinned at (${pickingRect.corner1?.x}, ${pickingRect.corner1?.y}) — click the second corner`}
+                    ? "Drag a box over the region (or click two corners)"
+                    : `Corner pinned at (${pickingRect.corner1?.x}, ${pickingRect.corner1?.y}) — release or click the opposite corner`}
                 </span>
               </div>
               <span className="text-xs text-rust-200">ESC to cancel</span>

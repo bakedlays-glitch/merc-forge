@@ -220,3 +220,58 @@ export function MapForgeLogPanel() {
     </div>
   );
 }
+
+/**
+ * Full-height log view for the DOCK "Log" panel. Unlike the toast-pill
+ * `MapForgeLogPanel` (designed for inline flow under the canvas), this
+ * fills whatever space the user gives the panel: no width cap, no
+ * height cap, no auto-collapse — a dedicated panel should use its
+ * space (user feedback 2026-06-10). Newest entries first.
+ */
+export function MapForgeLogFull() {
+  const log = useMapForgeLog();
+  if (!log) return null;
+  return (
+    <div className="flex h-full w-full flex-col">
+      <div className="flex items-center justify-between border-b border-gray-800 px-2 py-1">
+        <span className="text-[11px] font-semibold text-gray-300">
+          Log <span className="text-gray-500">({log.entries.length})</span>
+        </span>
+        <button
+          type="button"
+          onClick={log.clear}
+          className="rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[10px] text-gray-400 hover:border-gray-500 hover:text-gray-200"
+          title="Clear all entries"
+        >
+          Clear
+        </button>
+      </div>
+      <ul className="min-h-0 flex-1 overflow-y-auto p-1">
+        {log.entries.length === 0 && (
+          <li className="px-2 py-1 text-[11px] text-gray-500">
+            No events yet.
+          </li>
+        )}
+        {[...log.entries].reverse().map((e) => {
+          const tint = SEV_TINT[e.severity];
+          return (
+            <li
+              key={e.id}
+              className={`my-0.5 rounded px-2 py-1 text-[11px] ${tint.bg} ${tint.fg} ring-1 ring-inset ${tint.ring}`}
+            >
+              <div className="flex items-baseline gap-2">
+                <span className="font-mono text-[9px] text-gray-500">
+                  {fmtTime(e.ts)}
+                </span>
+                <span className="flex-1">{e.message}</span>
+              </div>
+              {e.detail && (
+                <div className="mt-0.5 text-[10px] opacity-70">{e.detail}</div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}

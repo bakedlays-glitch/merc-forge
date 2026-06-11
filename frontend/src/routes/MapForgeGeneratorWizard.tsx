@@ -138,6 +138,21 @@ export default function MapForgeGeneratorWizard({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, step, onClose]);
 
+  // Region generators must have a real region before Generate unlocks —
+  // running with the degenerate default (0,0)→(0,0) was a silent
+  // one-tile no-op that read as "the generator did nothing".
+  const needsRegionPick = useMemo(() => {
+    if (!selected || !onPickRectCorners) return false;
+    const hasCorners = ["x1", "y1", "x2", "y2"].every(
+      (n) => selected.params.some((p) => p.name === n),
+    );
+    if (!hasCorners) return false;
+    const n = (v: unknown) => (typeof v === "number" ? v : 0);
+    const w = Math.abs(n(paramValues.x2) - n(paramValues.x1)) + 1;
+    const h = Math.abs(n(paramValues.y2) - n(paramValues.y1)) + 1;
+    return w * h <= 1;
+  }, [selected, paramValues, onPickRectCorners]);
+
   const pickGenerator = (g: GeneratorInfo) => {
     setSelected(g);
     // Initialize each param to its declared default.
@@ -348,16 +363,24 @@ export default function MapForgeGeneratorWizard({
               <button
                 type="button"
                 onClick={runSelected}
-                disabled={!sessionId}
+                disabled={!sessionId || needsRegionPick}
                 className={
                   "text-xs px-4 py-1.5 rounded font-medium "
-                  + (!sessionId
+                  + (!sessionId || needsRegionPick
                     ? "border border-wasteland-700 bg-wasteland-900 text-wasteland-600 cursor-not-allowed"
                     : "border border-rust-500/60 bg-rust-500/25 text-rust-50 hover:bg-rust-500/40")
                 }
-                title={!sessionId ? "Open a sector first" : "Run the generator against the current session"}
+                title={!sessionId
+                  ? "Open a sector first"
+                  : needsRegionPick
+                    ? "Drag a region on the map first (🖱 button above)"
+                    : "Run the generator against the current session"}
               >
-                {sessionId ? `Generate →` : "Open a sector first"}
+                {!sessionId
+                  ? "Open a sector first"
+                  : needsRegionPick
+                    ? "Pick a region first"
+                    : "Generate →"}
               </button>
             </>
           )}
@@ -462,6 +485,21 @@ function ConfigureForm({
       </p>
     );
   }
+  // Rectangle-region generators get a drag-on-map picker as the PRIMARY
+  // way to set the region — typing four corner coordinates into number
+  // boxes for something you can see on screen was the single worst
+  // piece of UI friction (user feedback 2026-06-10).
+  const hasRectCorners = useMemo(
+    () => ["x1", "y1", "x2", "y2"].every(
+      (n) => generator.params.some((p) => p.name === n),
+    ),
+    [generator.params],
+  );
+  // When the canvas picker is available, the raw x1/y1/x2/y2 rows are
+  // HIDDEN from the form (the region block shows the picked values, and
+  // the picker is how you change them). They fall back to visible rows
+  // only when no picker is wired (defensive).
+  const hideCornerRows = hasRectCorners && !!onPickRectCorners;
   // Group params into "key" (essentials) vs "advanced" (region bounds,
   // seeds, etc.) for a cleaner form. Heuristic — anything with name
   // starting "region_" or named "seed" is advanced. Everything else is
@@ -473,9 +511,10 @@ function ConfigureForm({
   }, [generator.params]);
   const primary = useMemo(() => {
     return generator.params.filter(
-      (p) => !p.name.startsWith("region_") && p.name !== "seed",
+      (p) => !p.name.startsWith("region_") && p.name !== "seed"
+        && !(hideCornerRows && ["x1", "y1", "x2", "y2"].includes(p.name)),
     );
-  }, [generator.params]);
+  }, [generator.params, hideCornerRows]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // If the generator declares BOTH slot and sub params, we render a
@@ -491,35 +530,41 @@ function ConfigureForm({
   const currentSlot = typeof values.slot === "number" ? values.slot : 0;
   const currentSub = typeof values.sub === "number" ? values.sub : 1;
 
-  // Rectangle generator gets a "Pick corners on map" button — typing
-  // four numbers for the corners is friction, especially when the user
-  // can see exactly where they want it on screen.
-  const hasRectCorners = useMemo(
-    () => ["x1", "y1", "x2", "y2"].every(
-      (n) => generator.params.some((p) => p.name === n),
-    ),
-    [generator.params],
-  );
+  // Region readout for the picker block.
+  const rx1 = typeof values.x1 === "number" ? values.x1 : 0;
+  const ry1 = typeof values.y1 === "number" ? values.y1 : 0;
+  const rx2 = typeof values.x2 === "number" ? values.x2 : 0;
+  const ry2 = typeof values.y2 === "number" ? values.y2 : 0;
+  const regionW = Math.abs(rx2 - rx1) + 1;
+  const regionH = Math.abs(ry2 - ry1) + 1;
+  const regionPicked = regionW * regionH > 1;
 
   return (
     <div className="space-y-3">
-      {hasRectCorners && onPickRectCorners && (
-        <div className="rounded border border-rust-500/40 bg-rust-500/10 p-2 flex items-center justify-between gap-3">
+      {hideCornerRows && (
+        <div className="rounded border border-rust-500/40 bg-rust-500/10 p-3 flex items-center justify-between gap-3">
           <div className="text-xs text-wasteland-200">
-            <strong className="text-rust-200">Tip:</strong> click two
-            tiles on the canvas instead of typing corner coordinates.
-            Current values:{" "}
-            <span className="font-mono text-wasteland-300">
-              ({String(values.x1 ?? 0)},{String(values.y1 ?? 0)}) → ({String(values.x2 ?? 0)},{String(values.y2 ?? 0)})
-            </span>
+            <div className="font-medium text-rust-200">Region</div>
+            {regionPicked ? (
+              <div className="mt-0.5 font-mono text-wasteland-300">
+                ({rx1},{ry1}) → ({rx2},{ry2})
+                <span className="ml-2 text-wasteland-500">
+                  {regionW}×{regionH} = {(regionW * regionH).toLocaleString()} tiles
+                </span>
+              </div>
+            ) : (
+              <div className="mt-0.5 text-wasteland-400 italic">
+                No region picked yet — drag a box on the map.
+              </div>
+            )}
           </div>
           <button
             type="button"
             onClick={onPickRectCorners}
-            className="text-xs px-3 py-1.5 rounded border border-rust-500/60 bg-rust-500/25 text-rust-50 hover:bg-rust-500/40 whitespace-nowrap"
-            title="Close the wizard, click two corners on the map, reopen with x1/y1/x2/y2 filled in"
+            className="text-sm px-4 py-2 rounded border border-rust-500/60 bg-rust-500/25 text-rust-50 hover:bg-rust-500/40 whitespace-nowrap font-medium"
+            title="The wizard steps aside; drag a box on the canvas (or click two corners) and it reopens with the region set"
           >
-            📍 Pick on map →
+            🖱 {regionPicked ? "Re-pick region on map" : "Drag region on map"} →
           </button>
         </div>
       )}
