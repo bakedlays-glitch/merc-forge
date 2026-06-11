@@ -1600,6 +1600,101 @@ class BuildingStampGenerator(Generator):
 # heights are exclusively multiples of this, max 3 raises (0/80/160/240).
 WORLD_CLIFF_HEIGHT = 80
 
+# ── Cliff-face sprites (R2) ────────────────────────────────────────────────
+#
+# PROVENANCE — empirical corpus scan, cross-checked against the editor C++:
+#
+#   Scan: sidecar/.venv/Scripts/python.exe tools/scan_cliff_faces.py \
+#             --installs-dir "C:/Jagged Alliance 2" --top 12
+#   (2026-06-10; 5,193 unique maps across 30 installs, 661 with heights —
+#    ALL 661 carry cliff art. The canonical-install slice [287 maps, 33
+#    with heights] shows the identical shape.)
+#
+#   * LAYER + PAIRING: every cliff anchor in real maps is a DUAL entry —
+#     structs (slot 10, FIRSTCLIFF) + objs (slot 9, FIRSTCLIFFHANG), SAME
+#     sub, SAME gridno (51.2% / 48.7% layer split; on the canonical
+#     install 1059/1059 perfectly paired). This is exactly what the
+#     in-game editor does: PasteBanks (Editor/edit_sys.cpp:672) calls
+#     AddStructToHead(FIRSTCLIFF…) then AddObjectToHead(FIRSTCLIFFHANG…).
+#     The FIRSTCLIFFSHADOW (slot 11) add there is commented OUT and slot
+#     11 is 0.1% corpus-wide (57 of ~52k entries, mod-map noise) → no
+#     shadow entry is placed.
+#   * ADD vs PLACE: AddStructToHead/AddObjectToHead are additive and the
+#     corpus tiles keep their land texture under the cliff → op = "add".
+#   * RAISED vs LOWER: 89-91% of anchors sit ON the raised tile (the tile
+#     whose 4-neighbor height drops define the face direction); the rest
+#     are diagonal-escarpment spill. We place on the raised border tile.
+#   * ROLE → SUB (corpus role histogram, raised-tile anchors, down-sides =
+#     face direction; full-sweep counts):
+#       E  → 6 (x1811) / 5 (x1663) / 4      S  → 7 (x919) / 1 / 12
+#       SE → 7 (x1682) / 9                  SW → 8 (x1192) / 11
+#       NE → 13 (x479)                      N  → 13 (x834)
+#       W  → 11 (x1284)
+#     Pools below keep the dominant subs whose multi-tile footprint
+#     (CliffOffsetData, edit_sys.cpp:1210) fits a straight axis-aligned
+#     border run — the 10-11-tile diagonals (subs 1/2/15/16) are for
+#     diagonal escarpments and are excluded.
+#   * ENGINE CROSS-CHECK: the in-game editor's RaiseWorldLand
+#     (edit_sys.cpp:1363) WIPES all heights and recomputes them from these
+#     sprites' per-tile RAISE flags (CliffRaiseData, edit_sys.cpp:1265):
+#     east-face runs (subs 5/6) are all RAISE_LAND_START, the west-face
+#     run (sub 11) all RAISE_LAND_END, and the SW piece (sub 8) carries
+#     the row-end END — matching the corpus role assignment (heights rise
+#     between an END and a START in the engine's row scan). The C++ names
+#     no explicit role→sub table (only LAND_DROP_1..5 = subs 1/11/12/15/8),
+#     so the corpus histogram is the authority for role→sub.
+#   * NW CORNER: ZERO anchors corpus-wide (in iso view the N/W faces sit
+#     BEHIND the raised terrain) → deliberately no NW piece; the N and W
+#     runs reach the corner's neighboring cells, the corner cell itself
+#     carries no art — exactly like vanilla.
+#
+# Cliff pieces are MULTI-TILE sprites anchored at one gridno (corpus anchor
+# density on raised-edge tiles: ~6%), so edges get strided anchors, not one
+# per border tile. `cover` is the span of border cells the piece's art
+# occupies along its edge axis, relative to the anchor (from its
+# CliffOffsetData footprint); the walk in `_cliff_run_anchors` strides by
+# that span and clamps so art never overshoots off the plateau.
+
+CLIFF_STRUCT_SLOT = 10   # FIRSTCLIFF      → structs layer
+CLIFF_HANG_SLOT = 9      # FIRSTCLIFFHANG  → objs layer (paired entry)
+
+CLIFF_FACE_LUT: dict[str, dict] = {
+    # subs: [(sub, corpus weight), …] — seeded weighted pick per anchor.
+    # cover: (off_lo, off_hi) border cells covered along the edge axis.
+    "edge_E":    {"subs": [(6, 1811), (5, 1663)], "cover": (-4, 0)},
+    "edge_W":    {"subs": [(11, 1284)],           "cover": (-3, 0)},
+    "edge_S":    {"subs": [(7, 919)],             "cover": (-4, -1)},
+    "edge_N":    {"subs": [(13, 834)],            "cover": (-2, 0)},
+    "corner_SE": {"subs": [(7, 1682)]},
+    "corner_SW": {"subs": [(8, 1192)]},
+    "corner_NE": {"subs": [(13, 479)]},
+    # corner_NW: intentionally absent (see provenance above).
+}
+
+
+def _cliff_run_anchors(lo: int, hi: int, cover: tuple[int, int]) -> list[int]:
+    """Anchor coordinates along one edge whose piece art (covering
+    [a+off_lo, a+off_hi] border cells) tiles the segment [lo, hi]
+    gap-free WITHOUT overshooting either end. Walks from the hi end in
+    piece-span strides; the final anchor is clamped (pieces may overlap —
+    vanilla overlaps too). Returns [] when the segment is shorter than
+    one piece (vanilla has no cliff art that small)."""
+    off_lo, off_hi = cover
+    a_max = hi - off_hi          # largest anchor that doesn't overshoot hi
+    a_min = lo - off_lo          # smallest anchor that doesn't overshoot lo
+    if a_max < a_min:
+        return []
+    span = off_hi - off_lo + 1
+    anchors: list[int] = []
+    a = a_max
+    while True:
+        a = max(a, a_min)
+        anchors.append(a)
+        if a + off_lo <= lo:
+            break
+        a -= span
+    return anchors
+
 
 class BankGenerator(Generator):
     """Raise a rectangular region into a uniform CLIFF PLATEAU by editing
@@ -1627,24 +1722,42 @@ class BankGenerator(Generator):
     the engine has no climbable slope for the steps to soften.
 
     The plateau is ORTHOGONAL by construction (a rectangle has no
-    diagonal edges → no diagonal cliffs). The matching cliff-FACE
-    *sprites* are deliberately NOT placed here — correct directional
-    face/corner selection needs the tile-connection ("Smart Method")
-    autotiler, a separate roadmap item; stamping a fixed cliff sub here
-    would produce exactly the wrong-facing artifact that work exists to
-    fix.
+    diagonal edges → no diagonal cliffs), which makes cliff-face art
+    DETERMINISTIC: every border position has a known role (N/S/E/W edge,
+    NE/SE/SW corner), so a fixed role→(layer, slot, sub) LUT suffices —
+    no autotiler needed. After the set_height ops, the generator emits
+    the visible cliff-face sprites around the border per CLIFF_FACE_LUT
+    (provenance comment above it): each anchor is the vanilla dual entry
+    — structs (slot 10 FIRSTCLIFF) + objs (slot 9 FIRSTCLIFFHANG), same
+    sub, same tile, op "add" — placed ON the raised border tile. Cliff
+    pieces are multi-tile sprites, so edge anchors are STRIDED by the
+    piece's span (`_cliff_run_anchors`), not stamped per tile; the NW
+    corner gets no piece (vanilla places none — it's hidden behind the
+    raised terrain in iso view). Edges shorter than one piece get no run
+    art (vanilla has no cliff art that small). `place_cliff_faces=false`
+    restores the old heights-only behavior; `levels=0` (flatten) never
+    emits faces.
+
+    CORRECTNESS ORACLE: the in-game editor's RaiseWorldLand
+    (Editor/edit_sys.cpp:1363) recomputes ALL heights from cliff-face
+    sprites on save — a generated plateau is right iff its heights AND
+    faces survive an in-game-editor resave. The LUT's RAISE-flag
+    cross-check (see provenance) is designed for exactly that; verify
+    in-game on first use.
 
     No object-count guard is needed: set_height touches the fixed header
-    region, never the object layer.
+    region, and the handful of border face entries are nowhere near the
+    layer caps.
     """
     name = "bank"
-    label = "Cliff plateau / bank (heights)"
+    label = "Cliff plateau / bank (heights + cliff faces)"
     description = (
         "Raise a rectangle into a uniform cliff plateau in the engine's "
-        "native 80-unit steps (levels × 80; 0 flattens back to ground). "
+        "native 80-unit steps (levels × 80; 0 flattens back to ground) "
+        "and dress its border with the vanilla cliff-face sprites "
+        "(FIRSTCLIFF struct + FIRSTCLIFFHANG obj pairs, corpus-derived LUT). "
         "Mercs cannot cross ANY height difference — this is route-blocking "
-        "scenery, like vanilla cliffs. Heights only; cliff-face sprites "
-        "come later via the autotiler."
+        "scenery, like vanilla cliffs."
     )
     params = [
         Param(name="x1", type="int", default=0, description="One corner X", min=0, max=255),
@@ -1655,11 +1768,56 @@ class BankGenerator(Generator):
               description="Cliff raises (×80 height units each, the engine's "
                           "native step). 0 = flatten back to ground level.",
               min=0, max=3),
+        Param(name="place_cliff_faces", type="bool", default=True,
+              description="Dress the plateau border with visible cliff-face "
+                          "sprites (vanilla FIRSTCLIFF/FIRSTCLIFFHANG pairs). "
+                          "Off = heights only (invisible ledge)."),
+        Param(name="seed", type="int", default=42,
+              description="RNG seed for the cliff-face variant picks — same "
+                          "seed + params = same faces."),
     ] + [_PLAYABLE_PARAM_OFF]
+
+    def _iter_face_anchors(
+        self, x1: int, y1: int, x2: int, y2: int, rng: random.Random,
+    ) -> Iterator[tuple[int, int, int]]:
+        """Yield (x, y, sub) cliff-face anchors around the border of the
+        raised rect, per CLIFF_FACE_LUT. Corners first, then the four
+        edge runs (strided per piece span, clamped on-rect). A run
+        anchor that lands on a corner-anchor tile is skipped — its
+        coverage duplicates the corner piece's."""
+        def pick(role: str) -> int:
+            pool = CLIFF_FACE_LUT[role]["subs"]
+            return rng.choices([s for s, _ in pool],
+                               weights=[w for _, w in pool], k=1)[0]
+
+        corner_tiles = set()
+        for role, (cx, cy) in (("corner_SE", (x2, y2)),
+                               ("corner_SW", (x1, y2)),
+                               ("corner_NE", (x2, y1))):
+            corner_tiles.add((cx, cy))
+            yield cx, cy, pick(role)
+
+        # Open edge segments (border ring minus the corner cells).
+        # (role, axis lo, axis hi, anchor → (x, y))
+        edges = (
+            ("edge_E", y1 + 1, y2 - 1, lambda a: (x2, a)),
+            ("edge_W", y1 + 1, y2 - 1, lambda a: (x1, a)),
+            ("edge_S", x1 + 1, x2 - 1, lambda a: (a, y2)),
+            ("edge_N", x1 + 1, x2 - 1, lambda a: (a, y1)),
+        )
+        for role, lo, hi, to_xy in edges:
+            cover = CLIFF_FACE_LUT[role]["cover"]
+            for a in _cliff_run_anchors(lo, hi, cover):
+                xy = to_xy(a)
+                if xy in corner_tiles:
+                    continue
+                yield xy[0], xy[1], pick(role)
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
         levels = max(0, min(3, int(params.get("levels", 1))))
         target = levels * WORLD_CLIFF_HEIGHT
+        place_faces = bool(params.get("place_cliff_faces", True))
+        rng = random.Random(int(params.get("seed", 42)))
         playable = _make_playable_predicate(
             ctx, bool(params.get("clip_to_playable", False)))
 
@@ -1682,13 +1840,25 @@ class BankGenerator(Generator):
         ]
         total = len(coords)
 
+        # Cliff-face anchors (computed up front for the honest total).
+        # levels=0 is a FLATTEN — no faces; a 1-wide/1-tall rect has no
+        # well-defined edge roles (vanilla has no cliff art that small).
+        anchors: list[tuple[int, int, int]] = []
+        if place_faces and levels > 0 and x2 > x1 and y2 > y1:
+            anchors = [
+                (x, y, sub)
+                for (x, y, sub) in self._iter_face_anchors(x1, y1, x2, y2, rng)
+                if playable is None or playable(x, y)
+            ]
+        total += 2 * len(anchors)   # each anchor = structs + objs entry
+
         yield {
             "phase": "bank",
             "status": "start",
             "label": (
                 f"Raising ({x1},{y1})→({x2},{y2}) to height {target} "
                 f"({levels} cliff level{'s' if levels != 1 else ''}) — "
-                f"{total} tiles…"
+                f"{len(coords)} tiles, {len(anchors)} cliff-face anchors…"
             ),
             "total": total,
         }
@@ -1696,11 +1866,29 @@ class BankGenerator(Generator):
         for x, y in coords:
             yield {"x": x, "y": y, "op": "set_height", "height": target}
 
+        # Border face art — the vanilla dual entry per anchor (PasteBanks:
+        # struct FIRSTCLIFF + object FIRSTCLIFFHANG, same sub, same tile).
+        for x, y, sub in anchors:
+            yield {"x": x, "y": y, "op": "add", "layer": "structs",
+                   "slot": CLIFF_STRUCT_SLOT, "sub": sub}
+            yield {"x": x, "y": y, "op": "add", "layer": "objs",
+                   "slot": CLIFF_HANG_SLOT, "sub": sub}
+
+        if anchors:
+            face_note = f"{len(anchors)} cliff-face anchors placed."
+        elif levels == 0:
+            face_note = "no cliff faces (flatten)."
+        elif not place_faces:
+            face_note = "no cliff faces (disabled)."
+        else:
+            face_note = "no cliff faces (rect too small for cliff art)."
         yield {"phase": "bank", "status": "done",
                "label": (
-                   f"Plateau done — {total} tiles at height {target}. "
-                   "Raised terrain is impassable scenery (no engine climb); "
-                   "cliff-face sprites ride the autotiler."
+                   f"Plateau done — {len(coords)} tiles at height {target}; "
+                   f"{face_note} "
+                   "Raised terrain is impassable scenery (no engine climb). "
+                   "Oracle: heights+faces must survive an in-game-editor "
+                   "RaiseWorldLand resave."
                )}
 
 

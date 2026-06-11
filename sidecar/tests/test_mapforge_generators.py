@@ -387,30 +387,40 @@ def test_bank_registered():
     assert isinstance(REGISTRY["bank"], BankGenerator)
 
 
+def _bank_split(ctx, params):
+    """(set_height ops, cliff-face ops) for one bank run."""
+    events = [e for e in BankGenerator().iter_ops(ctx, params) if "op" in e]
+    heights = [e for e in events if e["op"] == "set_height"]
+    faces = [e for e in events if e["op"] != "set_height"]
+    return heights, faces
+
+
 def test_bank_uniform_plateau_in_80_steps():
     """levels × 80 (the engine's WORLD_CLIFF_HEIGHT) on every tile —
     vanilla cliff semantics; no terrace bands (those just made
     concentric impassable rings)."""
     ctx = _bank_ctx(20, 20)
-    events = list(BankGenerator().iter_ops(ctx, {
+    heights, faces = _bank_split(ctx, {
         "x1": 2, "y1": 2, "x2": 6, "y2": 6, "levels": 2,
-    }))
-    ops = [e for e in events if "op" in e]
-    assert len(ops) == 25
-    for o in ops:
-        assert o["op"] == "set_height"
+    })
+    assert len(heights) == 25
+    for o in heights:
         assert o["height"] == 160
-    assert {(o["x"], o["y"]) for o in ops} == {
+    assert {(o["x"], o["y"]) for o in heights} == {
         (x, y) for x in range(2, 7) for y in range(2, 7)
     }
+    # R2: the border now carries cliff-face art. A 5×5 rect fits no E/W/S
+    # runs (shorter than one piece) — 3 corners + 1 N-run anchor, each a
+    # structs+objs dual entry.
+    assert len(faces) == 2 * 4
 
 
 def test_bank_default_is_one_cliff_level():
     ctx = _bank_ctx(10, 10)
-    ops = [e for e in BankGenerator().iter_ops(ctx, {
+    heights, _faces = _bank_split(ctx, {
         "x1": 0, "y1": 0, "x2": 1, "y2": 1,
-    }) if "op" in e]
-    assert all(o["height"] == 80 for o in ops)
+    })
+    assert heights and all(o["height"] == 80 for o in heights)
 
 
 def test_bank_levels_zero_flattens():
@@ -418,7 +428,7 @@ def test_bank_levels_zero_flattens():
     ops = [e for e in BankGenerator().iter_ops(ctx, {
         "x1": 0, "y1": 0, "x2": 1, "y2": 1, "levels": 0,
     }) if "op" in e]
-    assert all(o["height"] == 0 for o in ops)
+    assert ops and all(o["height"] == 0 for o in ops)
 
 
 def test_bank_normalizes_corners():
@@ -432,22 +442,114 @@ def test_bank_normalizes_corners():
 
 def test_bank_clamps_oob_region_and_levels():
     ctx = _bank_ctx(10, 10)
-    ops = [e for e in BankGenerator().iter_ops(ctx, {
+    heights, _faces = _bank_split(ctx, {
         "x1": 0, "y1": 0, "x2": 999, "y2": 999, "levels": 999,
-    }) if "op" in e]
-    assert len(ops) == 100               # region clamped to the 10×10 grid
+    })
+    assert len(heights) == 100           # region clamped to the 10×10 grid
     # levels clamp to the engine max of 3 raises → 240, never 255-ish junk.
-    assert all(o["height"] == 240 for o in ops)
+    assert all(o["height"] == 240 for o in heights)
 
 
 def test_bank_phase_start_has_total():
+    """The start event's `total` must equal the number of mutation ops
+    actually emitted (heights + cliff-face entries)."""
     ctx = _bank_ctx(20, 20)
-    start = next(
-        e for e in BankGenerator().iter_ops(ctx, {
-            "x1": 1, "y1": 1, "x2": 5, "y2": 8, "levels": 1})
-        if e.get("status") == "start"
-    )
-    assert start["total"] == 5 * 8  # width 5 × height 8
+    events = list(BankGenerator().iter_ops(ctx, {
+        "x1": 1, "y1": 1, "x2": 5, "y2": 8, "levels": 1}))
+    start = next(e for e in events if e.get("status") == "start")
+    n_ops = sum(1 for e in events if "op" in e)
+    assert start["total"] == n_ops
+    assert n_ops > 5 * 8                 # heights plus at least the corners
+
+
+# ── R2: cliff-face sprites around the plateau border ────────────────────
+
+
+# Known 12×10 rect — anchor positions hand-derived from CLIFF_FACE_LUT's
+# covers + the `_cliff_run_anchors` walk (see generators.py provenance).
+_R2_RECT = {"x1": 2, "y1": 2, "x2": 13, "y2": 11, "levels": 1}
+_R2_EXPECTED = {
+    (13, 11): "corner_SE",   # sub 7
+    (2, 11):  "corner_SW",   # sub 8
+    (13, 2):  "corner_NE",   # sub 13
+    (13, 10): "edge_E", (13, 7): "edge_E",
+    (2, 10):  "edge_W", (2, 6): "edge_W",
+    (9, 11):  "edge_S", (7, 11): "edge_S",   # a=13 dropped (SE corner tile)
+    (12, 2):  "edge_N", (9, 2): "edge_N", (6, 2): "edge_N", (5, 2): "edge_N",
+}
+
+
+def test_bank_faces_exactly_on_border_ring():
+    """Every cliff-face op sits on the border ring, at exactly the
+    hand-derived anchor positions, as a structs(10)+objs(9) dual entry
+    with the same sub. The NW corner (2,2) gets NO art (vanilla places
+    zero NW anchors corpus-wide)."""
+    ctx = _bank_ctx(40, 40)
+    _heights, faces = _bank_split(ctx, dict(_R2_RECT))
+    assert len(faces) == 2 * len(_R2_EXPECTED)
+
+    by_tile: dict = {}
+    for o in faces:
+        by_tile.setdefault((o["x"], o["y"]), {})[o["layer"]] = o
+    assert set(by_tile) == set(_R2_EXPECTED)
+    assert (2, 2) not in by_tile         # NW corner stays bare
+
+    for (x, y), per_layer in by_tile.items():
+        # On the ring…
+        assert x in (2, 13) or y in (2, 11)
+        # …and the vanilla dual entry: same sub on both layers.
+        assert set(per_layer) == {"structs", "objs"}
+        assert per_layer["structs"]["slot"] == 10   # FIRSTCLIFF
+        assert per_layer["objs"]["slot"] == 9       # FIRSTCLIFFHANG
+        assert per_layer["structs"]["sub"] == per_layer["objs"]["sub"]
+
+
+def test_bank_corners_get_corner_subs():
+    from mercwizard_core.mapforge.generators import CLIFF_FACE_LUT
+    ctx = _bank_ctx(40, 40)
+    _heights, faces = _bank_split(ctx, dict(_R2_RECT))
+    subs = {(o["x"], o["y"]): o["sub"] for o in faces if o["layer"] == "structs"}
+    assert subs[(13, 11)] == 7           # corner_SE
+    assert subs[(2, 11)] == 8            # corner_SW
+    assert subs[(13, 2)] == 13           # corner_NE
+    # Edge anchors draw from their LUT pools.
+    for (x, y), role in _R2_EXPECTED.items():
+        pool = {s for s, _ in CLIFF_FACE_LUT[role]["subs"]}
+        assert subs[(x, y)] in pool, (x, y, role)
+
+
+def test_bank_levels_zero_emits_no_faces():
+    ctx = _bank_ctx(40, 40)
+    heights, faces = _bank_split(ctx, dict(_R2_RECT, levels=0))
+    assert heights and not faces
+
+
+def test_bank_place_cliff_faces_false_heights_only():
+    ctx = _bank_ctx(40, 40)
+    heights, faces = _bank_split(ctx, dict(_R2_RECT, place_cliff_faces=False))
+    assert len(heights) == 12 * 10
+    assert not faces
+
+
+def test_bank_face_ops_are_valid_editop_shapes():
+    """Face ops must be route-applicable: add op, valid layer, int coords,
+    1-based sub, slot 9/10 — the EditOp shape routes/mapforge.py expects."""
+    ctx = _bank_ctx(40, 40)
+    _heights, faces = _bank_split(ctx, dict(_R2_RECT))
+    for o in faces:
+        assert o["op"] == "add"
+        assert o["layer"] in ALL_LAYERS
+        assert o["layer"] in ("structs", "objs")
+        assert isinstance(o["x"], int) and isinstance(o["y"], int)
+        assert isinstance(o["slot"], int) and o["slot"] in (9, 10)
+        assert isinstance(o["sub"], int) and 1 <= o["sub"] <= 17
+
+
+def test_bank_seed_determinism():
+    ctx = _bank_ctx(40, 40)
+    a = list(BankGenerator().iter_ops(ctx, dict(_R2_RECT, seed=7)))
+    b = list(BankGenerator().iter_ops(ctx, dict(_R2_RECT, seed=7)))
+    assert a == b
 
 
 # ────────────────────────────────────────────────────────────────────────
