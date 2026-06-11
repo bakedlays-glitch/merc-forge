@@ -1770,3 +1770,43 @@ def test_bank_escarpment_faces_use_only_straight_run_subs():
     _h, faces_w = _bank_split(ctx, {"x1": 0, "y1": 0, "x2": 20, "y2": 5,
                                     "levels": 1, "high_side": "W"})
     assert {o["sub"] for o in faces_w} <= {5, 6}
+
+
+def test_bank_escarpment_quadrants():
+    """Corner high-sides raise a quadrant with an L-shaped visible face;
+    SE (both boundaries away-facing) raises heights with no art."""
+    ctx = _bank_ctx(40, 40)
+    drag = {"x1": 10, "y1": 12, "x2": 22, "y2": 18, "levels": 1}
+
+    # NW: E face on col 22 + S face on row 18 with the SE-corner sub 7.
+    heights, faces = _bank_split(ctx, dict(drag, high_side="NW"))
+    assert {(o["x"], o["y"]) for o in heights} == {
+        (x, y) for y in range(0, 19) for x in range(0, 23)
+    }
+    fxy = {(o["x"], o["y"]) for o in faces}
+    assert all(x == 22 or y == 18 for x, y in fxy)
+    assert any(o["x"] == 22 and o["y"] == 18 and o["sub"] == 7 for o in faces)
+
+    # NE: S face from x1 to the east border + SW sub-8 taper at (10, 18).
+    heights, faces = _bank_split(ctx, dict(drag, high_side="NE"))
+    assert {(o["x"], o["y"]) for o in heights} == {
+        (x, y) for y in range(0, 19) for x in range(10, 40)
+    }
+    assert any(o["x"] == 10 and o["y"] == 18 and o["sub"] == 8 for o in faces)
+    assert max(o["x"] for o in faces) == 39
+    assert all(o["y"] == 18 for o in faces)
+
+    # SW: E face on col 22 from the south border, flush at y1.
+    heights, faces = _bank_split(ctx, dict(drag, high_side="SW"))
+    assert {(o["x"], o["y"]) for o in heights} == {
+        (x, y) for y in range(12, 40) for x in range(0, 23)
+    }
+    assert all(o["x"] == 22 for o in faces)
+    assert {o["sub"] for o in faces} <= {5, 6}
+
+    # SE: heights only, no faces (away-facing boundaries are bare).
+    heights, faces = _bank_split(ctx, dict(drag, high_side="SE"))
+    assert {(o["x"], o["y"]) for o in heights} == {
+        (x, y) for y in range(12, 40) for x in range(10, 40)
+    }
+    assert faces == []

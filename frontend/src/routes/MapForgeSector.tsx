@@ -1619,6 +1619,16 @@ function MapForgeSectorInner() {
     // would draw 5 overlapping helis. Force radius 1 when stamping.
     const effectiveRadius = effectiveStamp ? 1 : brushRadius;
 
+    // ONE stamp per stroke. Drag-paint calls paintBrush again for every
+    // tile the cursor crosses while the button is held — each new anchor
+    // stamped ANOTHER full footprint, so a click with 1 tile of mouse
+    // wobble placed 2 overlapping cars and a short drag placed a pile
+    // (user screenshot, A10 car). A stamp commits on the initial press
+    // only; click again for another copy.
+    if (effectiveStamp && strokeRef.current && strokeRef.current.size > 0) {
+      return;
+    }
+
     // Compute the tiles inside the brush radius. radius=1 means just
     // the clicked tile; radius>1 paints a Manhattan-style square in
     // tile coords (matches iso-grid intuition because the visible
@@ -1871,9 +1881,19 @@ function MapForgeSectorInner() {
    * (backend + local in lock-step). */
   async function undo() {
     if (!session || !renderer || session.read_only) return;
-    // Ghost preview live — undoing under a ghost would interleave with
-    // snapshots the ghost is about to restore. Clear/Apply first.
-    if (ghostActive) return;
+    // Ghost preview live: undoing under it would interleave with the
+    // snapshots the ghost will restore — so the FIRST Ctrl+Z acts as
+    // "Clear preview" (a silent no-op here just felt broken, user
+    // feedback 2026-06-11). The next Ctrl+Z undoes map edits normally.
+    if (ghostActive) {
+      clearGhost();
+      log?.append({
+        severity: "info",
+        message: "Cleared the generator preview (nothing was applied). "
+          + "Undo again for map edits.",
+      });
+      return;
+    }
     const entry = renderer.popUndo();
     if (!entry) return;
     setEditsInFlight((n) => n + 1);
@@ -2006,7 +2026,7 @@ function MapForgeSectorInner() {
    * undo stack, so a redo can itself be undone). */
   async function redo() {
     if (!session || !renderer || session.read_only) return;
-    if (ghostActive) return;   // same guard as undo()
+    if (ghostActive) { clearGhost(); return; }   // same behavior as undo()
     const entry = renderer.popRedo();
     if (!entry) return;
     setEditsInFlight((n) => n + 1);

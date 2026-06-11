@@ -1811,11 +1811,14 @@ class BankGenerator(Generator):
                           "raised. plateau = raise only the dragged rectangle "
                           "(a freestanding mesa)."),
         Param(name="high_side", type="str", default="N",
-              description="Escarpment only: which side of the line is the "
-                          "high ground. N = everything north of the drag's "
-                          "south edge rises (cliff faces look south — the "
-                          "iso-visible direction). W = everything west of the "
-                          "drag's east edge rises (faces look east)."),
+              description="Escarpment only: which side/quadrant is the high "
+                          "ground, keyed to the drag's edges. N / W = "
+                          "half-map (line runs edge to edge). NW / NE / SW / "
+                          "SE = quadrant (an L-shaped cliff from the drag's "
+                          "corner to two map edges). Faces render on the "
+                          "iso-visible sides (S- and E-looking); SE-high has "
+                          "only away-facing boundaries, so its ledge is "
+                          "invisible like vanilla's bare north rims."),
         Param(name="levels", type="int", default=1,
               description="Cliff raises (×80 height units each, the engine's "
                           "native step). 0 = flatten back to ground level.",
@@ -1827,7 +1830,7 @@ class BankGenerator(Generator):
         Param(name="seed", type="int", default=42,
               description="RNG seed for the cliff-face variant picks — same "
                           "seed + params = same faces."),
-    ] + [_PLAYABLE_PARAM_OFF]
+    ] + [_PLAYABLE_PARAM]
 
     def _iter_face_anchors(
         self, x1: int, y1: int, x2: int, y2: int, rng: random.Random,
@@ -1873,29 +1876,54 @@ class BankGenerator(Generator):
         yield x1, y2, 8
 
     def _iter_escarpment_anchors(
-        self, ctx: GeneratorContext, x2: int, y2: int, high_side: str,
-        rng: random.Random,
+        self, ctx: GeneratorContext, x1: int, y1: int, x2: int, y2: int,
+        high_side: str, rng: random.Random,
     ) -> Iterator[tuple[int, int, int]]:
         """Face anchors for an EDGE-TO-EDGE cliff line (escarpment mode).
-        No corners exist — the run terminates at the map border, where the
-        iso diamond clips it (vanilla edge-to-edge runs end the same way,
-        e.g. A6's 112-tile row-38 line). Same chaining grammar as the
-        plateau faces (stride ≤4, 1-tile overlaps)."""
+        Half-map sides (N/W) are a single straight run terminating at the
+        map border, where the iso diamond clips it (vanilla edge-to-edge
+        runs end the same way, e.g. A6's 112-tile row-38 line). Quadrants
+        (NW/NE/SW/SE) are an L from the drag's corner to two map edges,
+        reusing the plateau corner grammar where the two visible faces
+        meet. Same chaining as everywhere (stride ≤4, 1-tile overlaps);
+        away-facing boundaries stay bare like vanilla."""
         def pick(role: str) -> int:
             pool = CLIFF_FACE_LUT[role]["subs"]
             return rng.choices([s for s, _ in pool],
                                weights=[w for _, w in pool], k=1)[0]
 
         if high_side == "W":
-            # East-looking face down the FULL height of col x2. Pieces
-            # cover rows y-4..y; cap 4 so the top piece covers rows 0..4.
+            # East-looking face down the FULL height of col x2.
             for y in _face_chain(ctx.rows - 1, 4):
                 yield x2, y, pick("edge_E")
-        else:
-            # South-looking face across the FULL width of row y2. Pieces
-            # cover cols x-4..x-1; cap 4 so the west piece covers 0..3.
+        elif high_side == "N":
+            # South-looking face across the FULL width of row y2.
             for x in _face_chain(ctx.cols - 1, 4):
                 yield x, y2, pick("edge_S")
+        elif high_side == "NW":
+            # Exposed corner at (x2, y2) -> E face up col x2 + S face west
+            # along row y2, meeting with the plateau's SE-corner grammar
+            # (sub 7 forced at the corner; the E bottom piece shares the
+            # corner tile — vanilla multi-anchors gridnos).
+            for y in _face_chain(y2, 4):
+                yield x2, y, pick("edge_E")
+            for x in _face_chain(x2, 4):
+                yield x, y2, 7 if x == x2 else pick("edge_S")
+        elif high_side == "NE":
+            # Exposed corner at (x1, y2) -> S face east along row y2 to the
+            # map border + the SW sub-8 taper wrapping onto the low ground
+            # (covers col x1's face). W boundary faces away -> bare.
+            for x in _face_chain(ctx.cols - 1, min(x1 + 4, ctx.cols - 1)):
+                yield x, y2, pick("edge_S")
+            yield x1, y2, 8
+        elif high_side == "SW":
+            # Exposed corner at (x2, y1) -> E face down col x2 from the map
+            # border, top piece flush at y1 (plateau E-top grammar). N
+            # boundary faces away -> bare.
+            for y in _face_chain(ctx.rows - 1, min(y1 + 4, ctx.rows - 1)):
+                yield x2, y, pick("edge_E")
+        # SE: both boundaries face away from the iso camera -> no art
+        # (vanilla leaves N/W-looking rims bare).
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
         levels = max(0, min(3, int(params.get("levels", 1))))
@@ -1918,7 +1946,7 @@ class BankGenerator(Generator):
         high_side = str(params.get("high_side", "N")).strip().upper()
         if mode not in ("plateau", "escarpment"):
             mode = "escarpment"
-        if high_side not in ("N", "W"):
+        if high_side not in ("N", "W", "NW", "NE", "SW", "SE"):
             high_side = "N"
 
         # Raised region + cliff line per mode. ESCARPMENT (default) is
@@ -1927,14 +1955,17 @@ class BankGenerator(Generator):
         # reads odd in iso view (user feedback 2026-06-11; A6's main
         # escarpment is a 112-tile edge-to-edge run).
         if mode == "escarpment":
-            if high_side == "W":
-                # High ground = everything west of the drag's EAST edge.
-                raised = [(x, y) for y in range(ctx.rows)
-                          for x in range(0, x2 + 1)]
-            else:
-                # High ground = everything north of the drag's SOUTH edge.
-                raised = [(x, y) for y in range(0, y2 + 1)
-                          for x in range(ctx.cols)]
+            x_rng = {
+                "N": range(ctx.cols), "W": range(0, x2 + 1),
+                "NW": range(0, x2 + 1), "NE": range(x1, ctx.cols),
+                "SW": range(0, x2 + 1), "SE": range(x1, ctx.cols),
+            }[high_side]
+            y_rng = {
+                "N": range(0, y2 + 1), "W": range(ctx.rows),
+                "NW": range(0, y2 + 1), "NE": range(0, y2 + 1),
+                "SW": range(y1, ctx.rows), "SE": range(y1, ctx.rows),
+            }[high_side]
+            raised = [(x, y) for y in y_rng for x in x_rng]
         else:
             raised = [(x, y) for y in range(y1, y2 + 1)
                       for x in range(x1, x2 + 1)]
@@ -1951,7 +1982,7 @@ class BankGenerator(Generator):
         if place_faces and levels > 0:
             if mode == "escarpment":
                 anchors = list(self._iter_escarpment_anchors(
-                    ctx, x2, y2, high_side, rng))
+                    ctx, x1, y1, x2, y2, high_side, rng))
             elif x2 - x1 >= 4 and y2 - y1 >= 4:
                 anchors = list(self._iter_face_anchors(x1, y1, x2, y2, rng))
             anchors = [(x, y, sub) for (x, y, sub) in anchors
@@ -1960,8 +1991,14 @@ class BankGenerator(Generator):
 
         where = (
             f"({x1},{y1})→({x2},{y2})" if mode == "plateau"
-            else (f"everything north of row {y2}" if high_side == "N"
-                  else f"everything west of col {x2}")
+            else {
+                "N": f"everything north of row {y2}",
+                "W": f"everything west of col {x2}",
+                "NW": f"the NW quadrant (x≤{x2}, y≤{y2})",
+                "NE": f"the NE quadrant (x≥{x1}, y≤{y2})",
+                "SW": f"the SW quadrant (x≤{x2}, y≥{y1})",
+                "SE": f"the SE quadrant (x≥{x1}, y≥{y1})",
+            }[high_side]
         )
         yield {
             "phase": "bank",

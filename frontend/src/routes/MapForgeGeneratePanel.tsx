@@ -399,18 +399,25 @@ export function MapForgeGeneratePanel({
 
   // ── Form param split ────────────────────────────────────────────────
   const hidden = useMemo(() => hiddenParams(scheme), [scheme]);
+  // Tuning/safety knobs live under Advanced — the primary form is the
+  // handful of choices a run actually varies on (user feedback: clip /
+  // levels are options, not front-and-center).
+  const ADV_NAMES = ["seed", "biome", "clip_to_playable", "levels",
+    "place_cliff_faces"];
   const primary = useMemo(
     () => (selected?.params ?? []).filter(
-      (p) => !hidden.has(p.name) && p.name !== "seed"
-        && !p.name.startsWith("corpus_") && p.name !== "biome",
+      (p) => !hidden.has(p.name) && !ADV_NAMES.includes(p.name)
+        && !p.name.startsWith("corpus_"),
     ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selected, hidden],
   );
   const advanced = useMemo(
     () => (selected?.params ?? []).filter(
       (p) => !hidden.has(p.name)
-        && (p.name === "seed" || p.name.startsWith("corpus_") || p.name === "biome"),
+        && (ADV_NAMES.includes(p.name) || p.name.startsWith("corpus_")),
     ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [selected, hidden],
   );
   const hasSlotSub = hasSlotSubParams;
@@ -848,8 +855,12 @@ export function ParamRow({
           onChange={(e) => onChange(e.target.value)}
           className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100"
         >
-          <option value="N">North — high ground above the drag's bottom edge</option>
-          <option value="W">West — high ground left of the drag's right edge</option>
+          <option value="N">North half — line runs edge to edge</option>
+          <option value="W">West half — line runs edge to edge</option>
+          <option value="NW">NW quadrant — L-shaped cliff (both faces visible)</option>
+          <option value="NE">NE quadrant — south face visible</option>
+          <option value="SW">SW quadrant — east face visible</option>
+          <option value="SE">SE quadrant — ledge faces away (no visible cliff art)</option>
         </select>
       </div>
     );
