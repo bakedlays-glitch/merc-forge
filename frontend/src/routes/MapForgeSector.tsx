@@ -964,6 +964,11 @@ function MapForgeSectorInner() {
     heights: Map<string, { x: number; y: number; height: number }>;
   } | null>(null);
   const [ghostActive, setGhostActive] = useState(false);
+  // True when the live ghost contains set_height ops — heights are
+  // invisible in the iso render, so the height overlay force-shows
+  // while such a ghost is up (otherwise a cliff preview LOOKS like
+  // the generator did nothing — user-reported).
+  const [ghostHasHeights, setGhostHasHeights] = useState(false);
 
   const clearGhost = useCallback(() => {
     const g = ghostSnapsRef.current;
@@ -983,6 +988,7 @@ function MapForgeSectorInner() {
       setRenderEpoch((e) => e + 1);
     }
     setGhostActive(false);
+    setGhostHasHeights(false);
   }, [renderer]);
 
   const applyGhostOps = useCallback((ops: unknown[]) => {
@@ -1036,6 +1042,7 @@ function MapForgeSectorInner() {
     }
     ghostSnapsRef.current = g;
     setGhostActive(true);
+    setGhostHasHeights(g.heights.size > 0);
     setRenderEpoch((e) => e + 1);
   }, [renderer, clearGhost]);
 
@@ -1060,7 +1067,7 @@ function MapForgeSectorInner() {
       if (existing) {
         existing.api.setActive();
       } else {
-        api.addPanel({
+        const p = api.addPanel({
           id: "generate",
           component: "default",
           title: "Generate",
@@ -1068,6 +1075,10 @@ function MapForgeSectorInner() {
             ? { referencePanel: "inspector", direction: "within" }
             : undefined,
         });
+        // The panel needs real width for its sliders + region block —
+        // squeezed into a skinny inspector column it grows an inner
+        // scrollbar and reads as clutter (user screenshot, 2026-06-10).
+        try { p.group.api.setSize({ width: 380 }); } catch { /* best effort */ }
       }
       return;
     }
@@ -3184,7 +3195,10 @@ function MapForgeSectorInner() {
   // non-zero-height tiles — tinted by height, numbered when zoomed in.
   // Recomputed on every edit (renderEpoch) so it tracks the brush live.
   const heightOverlay = useMemo<Array<{ x: number; y: number; h: number }> | null>(() => {
-    if (tool !== "height" || !renderer) return null;
+    // Shown while the height TOOL is active — or while a generator
+    // ghost containing heights is up (heights are invisible in the iso
+    // render; without this a cliff preview looks like a no-op).
+    if ((tool !== "height" && !ghostHasHeights) || !renderer) return null;
     const parsed = renderer.getParsed();
     const heights = parsed?.heights;
     if (!heights) return null;
@@ -3198,7 +3212,7 @@ function MapForgeSectorInner() {
       }
     }
     return out;
-  }, [tool, renderer, renderEpoch]);
+  }, [tool, renderer, renderEpoch, ghostHasHeights]);
 
   function resetView() { setZoom(1); setPan({ x: 0, y: 0 }); }
 
@@ -3815,6 +3829,7 @@ function MapForgeSectorInner() {
         sessionId={session?.session_id ?? null}
         renderer={renderer}
         readOnly={session?.read_only ?? false}
+        activeBrush={activeBrush}
         pickRegion={pickRegionForPanel}
         applyGhostOps={applyGhostOps}
         clearGhost={clearGhost}

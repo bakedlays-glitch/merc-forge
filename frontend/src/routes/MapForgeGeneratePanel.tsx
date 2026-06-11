@@ -29,7 +29,8 @@ import {
 } from "../lib/mapforge";
 import type { IsoRenderer } from "../lib/IsoRenderer";
 import { useMapForgeLog } from "./MapForgeLog";
-import { LAYER_NAMES, ParamRow, SlotSubPreview } from "./MapForgeGeneratorWizard";
+import type { ActiveBrush } from "./MapForgePalette";
+import { ParamRow, SlotSubPreview } from "./MapForgeGeneratorWizard";
 
 interface XY { x: number; y: number }
 
@@ -37,6 +38,10 @@ export interface GeneratePanelProps {
   sessionId: string | null;
   renderer: IsoRenderer | null;
   readOnly: boolean;
+  /** The editor's active paint brush. Generators with slot/sub params
+   * INHERIT it on selection (hunting slot numbers when the brush
+   * already holds the right tree was the #1 usability complaint). */
+  activeBrush: ActiveBrush | null;
   /** Ask the parent to enter region-pick mode on the canvas; `cb` fires
    * with the two picked corners. The panel stays open the whole time —
    * no modal close/reopen dance. */
@@ -114,13 +119,25 @@ function regionSummary(
   values: Record<string, unknown>,
 ): { picked: boolean; text: string } {
   const n = (k: string) => (typeof values[k] === "number" ? (values[k] as number) : 0);
-  if (scheme === "corners" || scheme === "region") {
-    const p = scheme === "corners" ? "" : "region_";
-    const w = Math.abs(n(`${p}x2`) - n(`${p}x1`)) + 1;
-    const h = Math.abs(n(`${p}y2`) - n(`${p}y1`)) + 1;
+  if (scheme === "corners") {
+    const w = Math.abs(n("x2") - n("x1")) + 1;
+    const h = Math.abs(n("y2") - n("y1")) + 1;
     return {
       picked: w * h > 1,
-      text: `(${n(`${p}x1`)},${n(`${p}y1`)}) → (${n(`${p}x2`)},${n(`${p}y2`)}) · ${w}×${h} = ${(w * h).toLocaleString()} tiles`,
+      text: `(${n("x1")},${n("y1")}) → (${n("x2")},${n("y2")}) · ${w}×${h} = ${(w * h).toLocaleString()} tiles`,
+    };
+  }
+  if (scheme === "region") {
+    // region_* generators treat all-zeros as "whole map" (backend
+    // sentinel) — a legitimate run, so it never gates Apply.
+    const w = Math.abs(n("region_x2") - n("region_x1")) + 1;
+    const h = Math.abs(n("region_y2") - n("region_y1")) + 1;
+    if (w * h <= 1) {
+      return { picked: true, text: "whole map — drag a box to limit it" };
+    }
+    return {
+      picked: true,
+      text: `(${n("region_x1")},${n("region_y1")}) → (${n("region_x2")},${n("region_y2")}) · ${w}×${h} = ${(w * h).toLocaleString()} tiles`,
     };
   }
   if (scheme === "center") {
@@ -165,7 +182,7 @@ function hiddenParams(scheme: RegionScheme | null): Set<string> {
 }
 
 export function MapForgeGeneratePanel({
-  sessionId, renderer, readOnly,
+  sessionId, renderer, readOnly, activeBrush,
   pickRegion, applyGhostOps, clearGhost, ghostActive,
   onOp, onComplete,
 }: GeneratePanelProps) {
@@ -181,6 +198,10 @@ export function MapForgeGeneratePanel({
   const [autoPreview, setAutoPreview] = useState(true);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewCount, setPreviewCount] = useState<number | null>(null);
+  // Surfaced in red under the form. A generator failure (e.g. missing
+  // corpus data) previously vanished into a silent .catch — the user
+  // saw nothing happen and read the generator as broken.
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
@@ -209,11 +230,37 @@ export function MapForgeGeneratePanel({
     previewAbortRef.current?.abort();
     clearGhost();
     setPreviewCount(null);
+    setPreviewError(null);
     setSelectedName(name);
     const g = (list.data ?? []).find((x) => x.name === name);
     const defaults: Record<string, unknown> = {};
     if (g) for (const p of g.params) defaults[p.name] = p.default;
+    // Inherit the ACTIVE BRUSH: if the generator paints a (slot, sub),
+    // start from what the user already picked in the palette instead
+    // of the meaningless slot-0 default.
+    if (g && activeBrush
+        && g.params.some((p) => p.name === "slot")
+        && g.params.some((p) => p.name === "sub")) {
+      defaults.slot = activeBrush.slot;
+      defaults.sub = activeBrush.sub;
+      if (g.params.some((p) => p.name === "layer")) {
+        defaults.layer = activeBrush.layer;
+      }
+    }
     setValues(defaults);
+  };
+
+  /** Re-sync slot/sub/layer from the current brush on demand. */
+  const useBrush = () => {
+    if (!activeBrush) return;
+    setValues((prev) => ({
+      ...prev,
+      slot: activeBrush.slot,
+      sub: activeBrush.sub,
+      ...(selected?.params.some((p) => p.name === "layer")
+        ? { layer: activeBrush.layer }
+        : {}),
+    }));
   };
 
   // ── Live preview: dry-run on every (debounced) param change ────────
@@ -232,10 +279,24 @@ export function MapForgeGeneratePanel({
       }, { dryRun: true, signal: ac.signal })
         .then((final) => {
           if (ac.signal.aborted) return;
+          if (!final.ok) {
+            // Generator failed (missing corpus data, bad params, …) —
+            // SAY so. The silent version read as "generator is broken".
+            clearGhost();
+            setPreviewCount(null);
+            setPreviewError(final.message ?? final.error ?? "preview failed");
+            return;
+          }
+          setPreviewError(null);
           applyGhostOps(ops);
           setPreviewCount(final.op_count ?? ops.length);
         })
-        .catch(() => { /* aborted (params changed) or failed — keep last ghost */ })
+        .catch((err) => {
+          // Aborts (params changed mid-preview) are routine; anything
+          // else is a real failure the user must see.
+          if (ac.signal.aborted) return;
+          setPreviewError(err instanceof Error ? err.message : String(err));
+        })
         .finally(() => {
           if (previewAbortRef.current === ac) setPreviewBusy(false);
         });
@@ -250,12 +311,18 @@ export function MapForgeGeneratePanel({
     if (!sessionId || !selected || !renderer || running) return;
     previewAbortRef.current?.abort();
     clearGhost();
+    setPreviewError(null);
     setRunning(true);
     const start = performance.now();
+    let wroteHeights = false;
     renderer.beginStroke(`Generator: ${selected.label}`);
     try {
       const final = await runGenerator(sessionId, selected.name, values, (e) => {
-        if ("op" in e) onOp((e as { op: unknown }).op);
+        if ("op" in e) {
+          const op = (e as { op: unknown }).op;
+          if ((op as { op?: string })?.op === "set_height") wroteHeights = true;
+          onOp(op);
+        }
       });
       renderer.endStroke();
       const ms = Math.round(performance.now() - start);
@@ -265,6 +332,16 @@ export function MapForgeGeneratePanel({
           ? `${selected.label}: ${final.applied.toLocaleString()} ops in ${ms} ms (Ctrl+Z undoes the whole run)`
           : `${selected.label} failed: ${final.message ?? final.error ?? "unknown"}`,
       });
+      if (final.ok && wroteHeights) {
+        // Terrain heights don't show in the iso render — without this
+        // note, a successful cliff run reads as "nothing happened".
+        log?.append({
+          severity: "info",
+          message: "This run wrote terrain HEIGHTS — they're invisible "
+            + "in the map view. Select the Height tool to see the "
+            + "elevation overlay (cliff-face art comes with the autotiler).",
+        });
+      }
       onComplete(final.applied, final.ok);
     } catch (err) {
       renderer.endStroke();
@@ -333,7 +410,9 @@ export function MapForgeGeneratePanel({
         ))}
       </select>
       {selected && (
-        <p className="text-[10px] leading-snug text-gray-500">{selected.description}</p>
+        <p className="line-clamp-3 text-[10px] leading-snug text-gray-500" title={selected.description}>
+          {selected.description}
+        </p>
       )}
 
       {selected && (
@@ -390,6 +469,23 @@ export function MapForgeGeneratePanel({
               onChange={(v) => setValues((prev) => ({ ...prev, [p.name]: v }))}
             />
           ))}
+          {hasSlotSub && activeBrush && (
+            <div className="flex items-center justify-between gap-2 rounded border border-gray-700 bg-gray-900/60 px-2 py-1">
+              <span className="truncate text-[10px] text-gray-400">
+                Brush: <span className="text-gray-200">{activeBrush.sti_filename.replace(/\.sti$/i, "")}</span>
+                {" "}· slot {activeBrush.slot} sub {activeBrush.sub}
+              </span>
+              <button
+                type="button"
+                onClick={useBrush}
+                disabled={values.slot === activeBrush.slot && values.sub === activeBrush.sub}
+                className="whitespace-nowrap rounded border border-gray-600 bg-gray-800 px-2 py-0.5 text-[10px] text-gray-200 hover:bg-gray-700 disabled:opacity-40"
+                title="Copy the active brush's slot/sub (and layer) into this generator"
+              >
+                ⟵ Use brush
+              </button>
+            </div>
+          )}
           {hasSlotSub && renderer && (
             <SlotSubPreview
               renderer={renderer}
@@ -426,6 +522,11 @@ export function MapForgeGeneratePanel({
       {/* Footer: preview status + Apply/Cancel */}
       {selected && (
         <div className="space-y-1.5 border-t border-gray-800 pt-2">
+          {previewError && (
+            <div className="rounded border border-red-800 bg-red-950 px-2 py-1 text-[10px] leading-snug text-red-200">
+              Preview failed: {previewError}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2">
             <label className="flex items-center gap-1 text-[10px] text-gray-400"
               title="Re-preview on every change (dry run — nothing is applied until you click Apply)">

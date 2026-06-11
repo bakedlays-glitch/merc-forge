@@ -1534,3 +1534,22 @@ def test_autoshadow_dedupes_two_trees_one_shadow_per_tile():
     assert ops == [{"x": 4, "y": 4, "op": "add", "layer": "shadows",
                     "slot": 32, "sub": 5}]
 
+
+
+def test_cluster_respects_region():
+    """region_x1..y2 confines cluster CENTERS (objects may spill by at
+    most the cluster radius); 0/0/0/0 stays whole-map (scatter's
+    sentinel convention)."""
+    from mercwizard_core.mapforge.generators import ClusterScatterGenerator
+    ctx = _bank_ctx(80, 80)
+    radius = 3
+    ops = [e for e in ClusterScatterGenerator().iter_ops(ctx, {
+        "cluster_count": 6, "objects_per_cluster": 8,
+        "cluster_radius": radius, "slot": 1, "sub": 1,
+        "region_x1": 20, "region_y1": 30, "region_x2": 40, "region_y2": 50,
+        "clip_to_playable": False,
+    }) if "op" in e]
+    assert ops, "region run placed nothing"
+    for o in ops:
+        assert 20 - radius <= o["x"] <= 40 + radius
+        assert 30 - radius <= o["y"] <= 50 + radius

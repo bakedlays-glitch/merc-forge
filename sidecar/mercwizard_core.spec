@@ -26,6 +26,14 @@ a = Analysis(
     datas=[
         ('mercwizard_core/data', 'mercwizard_core/data'),
         ('mercwizard_core/presets', 'mercwizard_core/presets'),
+        # Distilled generator corpus — without these the FROZEN build's
+        # corpus.available() is False and the building stamp (the one
+        # generator that needs the corpus by default) fails on every
+        # run. Dev runs never hit this (the JSONs sit next to the .py).
+        ('mercwizard_core/mapforge/corpus/generator_corpus.json',
+         'mercwizard_core/mapforge/corpus'),
+        ('mercwizard_core/mapforge/corpus/coverage.json',
+         'mercwizard_core/mapforge/corpus'),
         ('ja2py', 'ja2py'),
     ],
     hiddenimports=[

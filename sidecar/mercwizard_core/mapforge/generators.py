@@ -934,6 +934,14 @@ class ClusterScatterGenerator(Generator):
               description="STI sub-index — 1-BASED (sub=1 = first frame). sub=0 renders nothing.",
               min=1, max=255),
         Param(name="seed", type="int", default=42, description="RNG seed"),
+        Param(name="region_x1", type="int", default=0,
+              description="Region corner 1 X (all four 0 = whole map)", min=0, max=255),
+        Param(name="region_y1", type="int", default=0,
+              description="Region corner 1 Y", min=0, max=255),
+        Param(name="region_x2", type="int", default=0,
+              description="Region corner 2 X", min=0, max=255),
+        Param(name="region_y2", type="int", default=0,
+              description="Region corner 2 Y", min=0, max=255),
         Param(name="subs", type="str", default="",
               description=(
                   "Optional sub VARIANTS — comma list, each optionally sub:weight. "
@@ -984,17 +992,39 @@ class ClusterScatterGenerator(Generator):
             "total": cluster_count * objects_per_cluster,
         }
 
+        # Optional region (same 0/0/0/0 = whole-map sentinel as scatter)
+        # so "forest patch HERE" doesn't require post-hoc cleanup of a
+        # whole-map spray.
+        rx1 = int(params.get("region_x1", 0))
+        ry1 = int(params.get("region_y1", 0))
+        rx2 = int(params.get("region_x2", 0))
+        ry2 = int(params.get("region_y2", 0))
+        explicit_region = not (rx1 == 0 and ry1 == 0 and rx2 == 0 and ry2 == 0)
+        if explicit_region:
+            gx1, gy1, gx2, gy2 = _normalize_region(ctx, rx1, ry1, rx2, ry2)
+        else:
+            gx1, gy1, gx2, gy2 = 0, 0, ctx.cols - 1, ctx.rows - 1
+
         # Place cluster CENTERS with rejection sampling against each
         # other so clusters don't overlap. Center inset by `radius` so
-        # the whole cluster stays inside the grid.
-        x_lo, x_hi = radius, ctx.cols - 1 - radius
-        y_lo, y_hi = radius, ctx.rows - 1 - radius
+        # the whole cluster stays inside the region/grid. A hand-drawn
+        # region narrower than 2×radius collapses the center band to
+        # its midline (the user clearly wants clusters THERE); a whole-
+        # map run that can't fit the radius bails with an explanation.
+        x_lo, x_hi = gx1 + radius, gx2 - radius
+        y_lo, y_hi = gy1 + radius, gy2 - radius
         if x_hi < x_lo or y_hi < y_lo:
-            yield {
-                "phase": "cluster", "status": "done",
-                "label": f"cluster_radius={radius} too large for {ctx.cols}×{ctx.rows} grid.",
-            }
-            return
+            if explicit_region:
+                if x_hi < x_lo:
+                    x_lo = x_hi = (gx1 + gx2) // 2
+                if y_hi < y_lo:
+                    y_lo = y_hi = (gy1 + gy2) // 2
+            else:
+                yield {
+                    "phase": "cluster", "status": "done",
+                    "label": f"cluster_radius={radius} too large for {ctx.cols}×{ctx.rows} grid.",
+                }
+                return
 
         centers: list[tuple[int, int]] = []
         center_min_dist = max(1, 2 * radius)  # so clusters don't collide
