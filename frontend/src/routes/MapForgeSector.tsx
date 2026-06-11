@@ -115,6 +115,7 @@ import {
   type Tile,
 } from "../lib/mapShapes";
 import {
+  CLIP_LAYERS,
   sliceRegion,
   pasteEdits,
   stripBuddyShadows,
@@ -923,21 +924,31 @@ function MapForgeSectorInner() {
   const pickJustAnchoredRef = useRef(false);
   const pickSuppressClickRef = useRef(false);
   // ─── StarCraft-style building placement mode ────────────────────────
-  // Armed by the Generate panel's "Place building" flow. While set, the
+  // Armed by the Generate panel's building-library flow. While set, the
   // canvas shows the building's w×h FOOTPRINT rect at the cursor (the
-  // hovered tile = footprint top-left); LEFT CLICK calls run(x, y) —
-  // the panel fires the building generator anchored there — and STAYS
-  // armed so repeated clicks stamp more buildings (each gets a fresh
-  // auto room id from the backend's room_id=0 sentinel). ESC or a tool
-  // change exits. `label` feeds the canvas banner. The full-building
-  // live ghost (dry-run at every hovered tile) is the v2 upgrade path;
-  // the footprint rect + instant real stamp is the v1 StarCraft feel.
+  // hovered tile = footprint top-left) PLUS — when `region` carries the
+  // building's verbatim tiles — a REAL SPRITE GHOST of the building
+  // (ghost-engine ops at the hovered anchor; see the placement-ghost
+  // effect below). LEFT CLICK calls run(x, y) — the panel stamps the
+  // building there via the pasteEdits batch path — and STAYS armed so
+  // repeated clicks stamp more buildings (room ids are renumbered per
+  // stamp). ESC or a tool change exits. `label` feeds the canvas
+  // banner. A Promise-returning run() gates the ghost + further clicks
+  // while a stamp is in flight.
   const [placingBuilding, setPlacingBuilding] = useState<{
     w: number;
     h: number;
     label: string;
-    run: (x: number, y: number) => void;
+    region?: ClipboardRegion;
+    run: (x: number, y: number) => void | Promise<void>;
   } | null>(null);
+  // True while a placement stamp's backend round-trip is in flight —
+  // suppresses the sprite ghost (its snapshots would interleave with
+  // the stamp's local edits) and further stamp clicks.
+  const [placementStampBusy, setPlacementStampBusy] = useState(false);
+  // True when the CURRENT ghost belongs to placement mode (vs a
+  // generator preview) — placement owns clearing only its own ghost.
+  const placementGhostRef = useRef(false);
   // Exit placement mode when the user switches tools, sectors, tilesets
   // or the sidecar restarts — a stale run() closure must never fire
   // against a different session.
@@ -1054,6 +1065,45 @@ function MapForgeSectorInner() {
     setGhostHasHeights(g.heights.size > 0);
     setRenderEpoch((e) => e + 1);
   }, [renderer, clearGhost]);
+
+  // ─── Placement sprite ghost (canon building library) ────────────────
+  // While placement mode carries a verbatim building `region`, ghost
+  // the REAL sprites at the hovered anchor — on top of the footprint
+  // tint the previewTiles overlay already draws. The hover state only
+  // changes per TILE (onCanvasMove dedupes), so this re-ghosts at most
+  // once per tile change; the repaint itself is the ghost engine's
+  // single epoch bump. The ops are local set_entries translated to the
+  // anchor — no backend dry-run. Suppressed while a stamp is in flight
+  // (ghost snapshots must not interleave with the stamp's local
+  // edits + the post-stamp resync). Owns ONLY its own ghost via
+  // placementGhostRef so it can't clobber a generator preview.
+  useEffect(() => {
+    const region = placingBuilding?.region;
+    if (!region || !renderer || placementStampBusy || !hovered) {
+      if (placementGhostRef.current) {
+        placementGhostRef.current = false;
+        clearGhost();
+      }
+      return;
+    }
+    const parsed = renderer.getParsed();
+    const cols = parsed?.cols ?? 0;
+    const rows = parsed?.rows ?? 0;
+    const ops: unknown[] = [];
+    for (const t of region.tiles) {
+      const x = hovered.x + t.dx;
+      const y = hovered.y + t.dy;
+      if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+      for (const l of CLIP_LAYERS) {
+        ops.push({ x, y, op: "set_entries", layer: l, entries: t.layers[l] });
+      }
+    }
+    // applyGhostOps clears the previous ghost itself (restoring the
+    // previous anchor's tiles) before applying the new one.
+    applyGhostOps(ops);
+    placementGhostRef.current = ops.length > 0;
+  }, [placingBuilding, hovered, placementStampBusy, renderer,
+      applyGhostOps, clearGhost]);
 
   // Region pick for the Generate panel — drag/click two corners on the
   // canvas while the panel stays docked.
@@ -2133,11 +2183,25 @@ function MapForgeSectorInner() {
     // Building placement mode (StarCraft-style): left click stamps the
     // building anchored at the hovered tile — the same top-left the
     // footprint ghost shows — and STAYS in placement mode so repeated
-    // clicks stamp more buildings. The panel's run() guards re-entrancy
-    // while a stamp is in flight.
+    // clicks stamp more buildings. Placement takes PRECEDENCE over the
+    // ghostActive block below (the sprite ghost is placement's own).
+    // The panel's run() also guards re-entrancy while a stamp flies.
     if (placingBuilding) {
+      if (placementStampBusy) return;
       const tile = hovered ?? pixelToTile(e);
-      if (tile) placingBuilding.run(tile.x, tile.y);
+      if (!tile) return;
+      // Clear the placement sprite ghost SYNCHRONOUSLY before stamping —
+      // the stamp's snapshots must capture the real pre-stamp tiles,
+      // not ghosted ones.
+      if (placementGhostRef.current) {
+        placementGhostRef.current = false;
+        clearGhost();
+      }
+      const r = placingBuilding.run(tile.x, tile.y);
+      if (r instanceof Promise) {
+        setPlacementStampBusy(true);
+        void r.finally(() => setPlacementStampBusy(false));
+      }
       return;
     }
     // A generator ghost is being previewed — painting now would tangle
@@ -3679,6 +3743,8 @@ function MapForgeSectorInner() {
         sessionId={session?.session_id ?? null}
         renderer={renderer}
         readOnly={session?.read_only ?? false}
+        xmlPath={xmlPath}
+        tileset={tileset}
         activeBrush={activeBrush}
         pickRegion={pickRegionForPanel}
         applyGhostOps={applyGhostOps}

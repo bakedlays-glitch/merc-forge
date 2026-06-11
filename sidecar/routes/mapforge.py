@@ -3069,6 +3069,107 @@ def list_buildings():
     return out
 
 
+# ─── Canon building library ─────────────────────────────────────────────
+# Verbatim building grafts extracted from the install's real maps —
+# the primary building-placement path (replaces the procedural stamp
+# as the headline flow; the generator stays available in the generic
+# dropdown). Built lazily on first request per (install, tileset) and
+# cached under %APPDATA%/MercWizard/mapforge/building_library/ keyed on
+# a fingerprint of the Maps sources, so map edits invalidate it.
+
+_BUILDING_LIB_CACHE_DIR = (
+    Path(os.environ.get("APPDATA") or Path.home() / ".config")
+    / "MercWizard" / "mapforge" / "building_library"
+)
+
+# One build at a time per process — a cold build can take tens of
+# seconds; concurrent first requests must not duplicate the work.
+import threading as _bl_threading
+_building_lib_lock = _bl_threading.Lock()
+
+
+@router.get("/building-library")
+def building_library(
+    xml: str = Query(..., description="Absolute path to Ja2Set.dat.xml"),
+    tileset: int = Query(..., description="Tileset index"),
+    rebuild: bool = Query(False, description="Force a fresh scan"),
+):
+    """The canon building library for one (install, tileset): every
+    building found in every map of that tileset in the install, as
+    verbatim layer grafts + thumbnails + context labels.
+
+    First call per (install, tileset) scans + renders (slow — up to
+    ~60s on a big install); subsequent calls return the cached JSON
+    instantly until any map in the install changes."""
+    _require_renderer()
+    if not isinstance(rebuild, bool):
+        # Direct (non-HTTP) calls receive the truthy Query(...) sentinel
+        # as the default — normalize so tests can call this function.
+        rebuild = False
+    xml_path = _validate_path(xml, ".xml")
+    # <install>/<layer>/Ja2Set.dat.xml → grandparent == install root.
+    install_root = xml_path.resolve().parent.parent
+    loose_dirs, slf_paths = _tileset_paths_for(xml_path)
+    from mercwizard_core.mapforge_engine import building_library as bl
+
+    sources = bl.list_map_sources(install_root)
+    fp = bl.fingerprint(install_root, tileset, xml_path, sources)
+    cache_file = _BUILDING_LIB_CACHE_DIR / f"{fp}.json"
+
+    def _from_cache() -> Optional[dict]:
+        if rebuild or not cache_file.is_file():
+            return None
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        payload["from_cache"] = True
+        return payload
+
+    cached = _from_cache()
+    if cached is not None:
+        return cached
+
+    with _building_lib_lock:
+        # Re-check under the lock — a concurrent request may have just
+        # finished the same build.
+        cached = _from_cache()
+        if cached is not None:
+            return cached
+        try:
+            payload = bl.build_library(
+                xml_path, tileset, install_root,
+                loose_dirs=loose_dirs, slf_paths=slf_paths,
+                sources=sources,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, {
+                "error": "LIBRARY_BUILD_FAILED",
+                "message": f"{type(e).__name__}: {e}",
+            })
+        payload["from_cache"] = False
+        try:
+            _BUILDING_LIB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps(payload, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            # Prune stale fingerprints for this install+tileset family —
+            # cheap hygiene so edits don't accumulate dead multi-MB blobs.
+            for old in _BUILDING_LIB_CACHE_DIR.glob("*.json"):
+                if old.name != cache_file.name:
+                    try:
+                        meta = json.loads(old.read_text(encoding="utf-8"))
+                        if (meta.get("install_root") == str(install_root)
+                                and meta.get("tileset") == tileset):
+                            old.unlink()
+                    except (OSError, ValueError):
+                        continue
+        except OSError:
+            pass  # cache write failure is non-fatal — just slower next time
+        return payload
+
+
 @router.post("/sessions/{session_id}/run-generator")
 def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBody = RunGeneratorBody()):
     """Stream a generator's op output into the session.

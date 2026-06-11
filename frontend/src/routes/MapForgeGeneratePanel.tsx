@@ -23,13 +23,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import {
-  type BuildingCatalogEntry,
+  type BuildingLibraryEntry,
   type GeneratorInfo,
   type GeneratorParamSchema,
-  listBuildings,
+  applyEdits,
+  getSessionParsed,
+  listBuildingLibrary,
   listGenerators,
   runGenerator,
 } from "../lib/mapforge";
+import {
+  CLIP_LAYERS,
+  pasteEdits,
+  stripBuddyShadows,
+  type ClipboardRegion,
+  type ClipTile,
+} from "../lib/mapClipboard";
+import { isShadowOnlySlot } from "../lib/jaSlotPairs";
 import type { IsoRenderer } from "../lib/IsoRenderer";
 import { useMapForgeLog } from "./MapForgeLog";
 import type { ActiveBrush } from "./MapForgePalette";
@@ -40,6 +50,10 @@ export interface GeneratePanelProps {
   sessionId: string | null;
   renderer: IsoRenderer | null;
   readOnly: boolean;
+  /** Ja2Set.dat.xml path + tileset of the open sector — keys the canon
+   * building library (per install + tileset). */
+  xmlPath: string;
+  tileset: number;
   /** The editor's active paint brush. Generators with slot/sub params
    * INHERIT it on selection (hunting slot numbers when the brush
    * already holds the right tree was the #1 usability complaint). */
@@ -55,12 +69,16 @@ export interface GeneratePanelProps {
   clearGhost(): void;
   ghostActive: boolean;
   /** Arm (or disarm with null) StarCraft-style building placement on the
-   * canvas: the w×h footprint ghosts at the cursor; every left click
+   * canvas: the w×h footprint tints at the cursor; every left click
    * calls run(x, y) with the footprint's top-left tile and STAYS armed
-   * for repeat stamps. ESC / tool change disarms (parent-side). */
+   * for repeat stamps. ESC / tool change disarms (parent-side).
+   * When `region` is set (canon building library), the parent ALSO
+   * ghosts the real sprites at the cursor; a Promise-returning run()
+   * lets the parent suppress the ghost while a stamp is in flight. */
   setPlacement(req: {
     w: number; h: number; label: string;
-    run(x: number, y: number): void;
+    region?: ClipboardRegion;
+    run(x: number, y: number): void | Promise<void>;
   } | null): void;
   /** True while placement mode is armed on the canvas. */
   placementActive: boolean;
@@ -194,7 +212,7 @@ function hiddenParams(scheme: RegionScheme | null): Set<string> {
 }
 
 export function MapForgeGeneratePanel({
-  sessionId, renderer, readOnly, activeBrush,
+  sessionId, renderer, readOnly, xmlPath, tileset, activeBrush,
   pickRegion, applyGhostOps, clearGhost, ghostActive,
   setPlacement, placementActive,
   onOp, onComplete,
@@ -463,12 +481,15 @@ export function MapForgeGeneratePanel({
 
   return (
     <div className="flex h-full flex-col gap-2 p-2 text-xs">
-      {/* StarCraft-style building placement — the promoted path for
-          buildings. Pick a kind visually, set a size, then click-stamp
-          on the canvas with a footprint ghost at the cursor. */}
-      <PlaceBuildingSection
+      {/* Canon building library — the headline building flow. Real
+          buildings grafted verbatim from this tileset's actual maps:
+          click a thumbnail card → placement arms with a real sprite
+          ghost at the cursor → click stamps it. */}
+      <BuildingLibrarySection
         sessionId={sessionId}
         renderer={renderer}
+        xmlPath={xmlPath}
+        tileset={tileset}
         running={running}
         clearGhost={() => {
           previewAbortRef.current?.abort();
@@ -477,7 +498,6 @@ export function MapForgeGeneratePanel({
         }}
         setPlacement={setPlacement}
         placementActive={placementActive}
-        onOp={onOp}
         onComplete={onComplete}
       />
       {/* Generator picker */}
@@ -685,113 +705,227 @@ export function MapForgeGeneratePanel({
 }
 
 // ──────────────────────────────────────────────────────────────────────
-//  PlaceBuildingSection — StarCraft-style building placement
+//  BuildingLibrarySection — the canon building library
 // ──────────────────────────────────────────────────────────────────────
 //
-// The owner's directive, verbatim intent: "browse by some metric that is
-// identifiable beyond a number, and once selected it knows and displays
-// the size and preview like how you make buildings in games like
-// StarCraft."
+// Real buildings grafted verbatim from real maps of the open sector's
+// tileset (backend: GET /mapforge/building-library — every layer of
+// every building, structure/contents split, context labels, rendered
+// thumbnails). This REPLACES the procedural building stamp as the
+// placement path; the building generator survives only in the generic
+// generator dropdown below.
 //
-// Flow: pick a building KIND from rendered thumbnail cards (wall + roof
-// pieces drawn from the live atlas — identifiable, not a slot number) →
-// set width × height with steppers → "Place on map" arms placement mode
-// on the canvas: the footprint rect ghosts at the cursor, every left
-// click stamps a real building there (the corpus-driven generator,
-// room_id=0 = backend auto-assigns a fresh room id per stamp), and the
-// mode STAYS armed for repeat stamping until ESC / tool change.
+// Flow: click a thumbnail card → placement ARMS IMMEDIATELY (no size
+// steppers, no extra button) → the canvas shows the footprint tint AND
+// a real sprite ghost of the building at the cursor → click stamps it
+// verbatim with automatic room renumbering and STAYS armed for repeat
+// stamps → ESC / tool change disarms.
 //
-// v1 ghosts the FOOTPRINT only (rect at cursor). The upgrade path is a
-// full-building live ghost: dry-run the generator at the hovered tile
-// (debounced) and applyGhostOps the result — the plumbing exists, it's
-// just per-mousemove cost that needs care.
+// "Include contents" ON (default) stamps everything inside (furniture,
+// debris, objects); OFF stamps the structure only (walls + roofs +
+// floors + doors). Cards can be renamed (pencil icon) — names persist
+// client-side in localStorage keyed by library entry id.
 
-function PlaceBuildingSection({
-  sessionId, renderer, running, clearGhost, setPlacement, placementActive,
-  onOp, onComplete,
+const BUILDING_NAMES_LS_KEY = "mapforge-building-library-names";
+
+function loadCustomNames(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(BUILDING_NAMES_LS_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Compose the stampable region from a library entry: structure tiles
+ * always; contents merged in when the toggle is ON. Buddy-eligible
+ * shadow entries are stripped (the engine auto-re-adds them at load via
+ * HAS_SHADOW_BUDDY — same rule as clipboard copy). */
+function composeBuildingRegion(
+  entry: BuildingLibraryEntry,
+  includeContents: boolean,
+): ClipboardRegion {
+  const byKey = new Map<string, ClipTile>();
+  const cloneLayers = (src: Record<string, number[][]>) => {
+    const out = {} as ClipTile["layers"];
+    for (const l of CLIP_LAYERS) {
+      out[l] = (src[l] ?? []).map((p) => [p[0] ?? 0, p[1] ?? 0]);
+    }
+    return out;
+  };
+  for (const t of entry.tiles) {
+    byKey.set(`${t.dx},${t.dy}`, {
+      dx: t.dx, dy: t.dy, layers: cloneLayers(t.layers),
+      room: t.room, height: t.height,
+    });
+  }
+  if (includeContents) {
+    for (const c of entry.contents_tiles) {
+      const k = `${c.dx},${c.dy}`;
+      const ex = byKey.get(k);
+      if (!ex) {
+        byKey.set(k, {
+          dx: c.dx, dy: c.dy, layers: cloneLayers(c.layers),
+          room: c.room, height: c.height,
+        });
+        continue;
+      }
+      // Structure entries first, contents appended after — matches the
+      // dominant authored order (walls precede furniture in the stored
+      // entry lists).
+      for (const l of CLIP_LAYERS) {
+        const extra = c.layers[l] ?? [];
+        if (extra.length) {
+          ex.layers[l] = [...ex.layers[l], ...extra.map((p) => [p[0] ?? 0, p[1] ?? 0])];
+        }
+      }
+    }
+  }
+  const raw: ClipboardRegion = {
+    sourceTileset: entry.tileset,
+    sourceSector: entry.source_map,
+    w: entry.w,
+    h: entry.h,
+    tiles: Array.from(byKey.values()),
+  };
+  return stripBuddyShadows(raw, (slot) => isShadowOnlySlot(slot));
+}
+
+function BuildingLibrarySection({
+  sessionId, renderer, xmlPath, tileset, running, clearGhost,
+  setPlacement, placementActive, onComplete,
 }: {
   sessionId: string | null;
   renderer: IsoRenderer | null;
+  xmlPath: string;
+  tileset: number;
   running: boolean;
   clearGhost(): void;
   setPlacement: GeneratePanelProps["setPlacement"];
   placementActive: boolean;
-  onOp(op: unknown): void;
   onComplete(applied: number, ok: boolean): void;
 }) {
   const log = useMapForgeLog();
-  const catalog = useQuery({
-    queryKey: ["mapforge-buildings"],
-    queryFn: listBuildings,
-    staleTime: Infinity,
+  const library = useQuery({
+    queryKey: ["mapforge-building-library", xmlPath, tileset],
+    queryFn: () => listBuildingLibrary(xmlPath, tileset),
+    enabled: !!sessionId && !!xmlPath,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
   });
 
   const [open, setOpen] = useState(true);
+  const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [w, setW] = useState(7);
-  const [h, setH] = useState(6);
+  const [includeContents, setIncludeContents] = useState(true);
+  const [customNames, setCustomNames] = useState<Record<string, string>>(
+    loadCustomNames,
+  );
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
-  const entries = catalog.data ?? [];
+  const entries = useMemo(() => library.data?.entries ?? [], [library.data]);
   const selected = entries.find((e) => e.id === selectedId) ?? null;
 
-  // Latest-state ref for the run() closure handed to the canvas — it
-  // lives in MapForgeSector state, so it must read CURRENT panel state
-  // (session, size, entry) at click time, not arm time.
+  const displayName = useCallback(
+    (e: BuildingLibraryEntry) => customNames[e.id] ?? e.label,
+    [customNames],
+  );
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter((e) =>
+      `${displayName(e)} ${e.label} ${e.town} ${e.sector} ${e.function} ${e.source_map}`
+        .toLowerCase().includes(q));
+  }, [entries, search, displayName]);
+
+  // Latest-state refs for the stamp closure handed to the canvas.
   const stampStateRef = useRef<{
     sessionId: string | null;
     renderer: IsoRenderer | null;
-    entry: BuildingCatalogEntry | null;
-    w: number;
-    h: number;
-  }>({ sessionId: null, renderer: null, entry: null, w, h });
-  stampStateRef.current = { sessionId, renderer, entry: selected, w, h };
+  }>({ sessionId: null, renderer: null });
+  stampStateRef.current = { sessionId, renderer };
   const logRef = useRef(log);
   logRef.current = log;
-  const onOpRef = useRef(onOp);
-  onOpRef.current = onOp;
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
-  // Re-entrancy latch: a stamp is a real backend run; ignore clicks
-  // while one is in flight (double-click = one building, not two
-  // interleaved op streams).
+  // Re-entrancy latch (double-click = one stamp, not two interleaved
+  // pastes with divergent room-id ranges).
   const stampBusyRef = useRef(false);
 
-  const stampAt = useCallback(async (x: number, y: number) => {
+  /** Stamp = a pasteEdits-style transactional batch through the
+   * standard stroke path: set_entries per tile + set_room with fresh
+   * room ids ABOVE the target's current max. One stamp = one undo. */
+  const stampAt = useCallback(async (
+    region: ClipboardRegion, label: string, x: number, y: number,
+  ) => {
     const s = stampStateRef.current;
-    if (!s.sessionId || !s.renderer || !s.entry || stampBusyRef.current) return;
+    if (!s.sessionId || !s.renderer || stampBusyRef.current) return;
     stampBusyRef.current = true;
     const start = performance.now();
-    s.renderer.beginStroke(`Place building ${s.w}×${s.h} (${s.entry.label})`);
+    let strokeCommitted = false;
+    const renderer_ = s.renderer;
     try {
-      const final = await runGenerator(s.sessionId, "building", {
-        x, y,
-        width: s.w,
-        height: s.h,
-        corpus_source: s.entry.corpus_source,
-        biome: s.entry.biome,
-        // AUTO room id — the backend assigns max(existing)+1 per stamp,
-        // so repeated placements never merge rooms and the user never
-        // touches a room number.
-        room_id: 0,
-        // Fresh seed per stamp: identical-twin buildings on every click
-        // read as a bug; the corpus look is preserved, only the variant
-        // picks + door edge vary.
-        seed: Math.floor(Math.random() * 1_000_000),
-      }, (e) => {
-        if ("op" in e) onOpRef.current((e as { op: unknown }).op);
-      });
-      s.renderer.endStroke();
+      // The target's CURRENT room ids drive the remap to fresh ids —
+      // repeat stamps never merge rooms.
+      const parsed = await getSessionParsed(s.sessionId);
+      const { edits, targetTiles, droppedTiles } = pasteEdits(
+        region, { x, y }, parsed.cols, parsed.rows,
+        // Heights are not part of a building graft — never flatten the
+        // target's terrain elevation under the stamp.
+        { existingRoomIds: parsed.rooms, includeHeights: false },
+      );
+      if (edits.length === 0) {
+        logRef.current?.append({
+          severity: "warn",
+          message: "Nothing stamped — the building fell entirely outside the map.",
+        });
+        return;
+      }
+      renderer_.beginStroke(`Stamp ${label} (${targetTiles} tiles)`);
+      for (const ed of edits) {
+        if (ed.op === "set_entries" && ed.layer) {
+          renderer_.recordSnapshot(ed.x, ed.y, ed.layer);
+        } else if (ed.op === "set_room") {
+          renderer_.recordRoomSnapshot(ed.x, ed.y);
+        }
+        renderer_.applyLocalEdit({
+          x: ed.x, y: ed.y, op: ed.op,
+          layer: ed.layer, entries: ed.entries, roomId: ed.room_id,
+        });
+      }
+      renderer_.endStroke();
+      strokeCommitted = true;
+      await applyEdits(s.sessionId, edits);
       const ms = Math.round(performance.now() - start);
       logRef.current?.append({
-        severity: final.ok ? "success" : "error",
-        message: final.ok
-          ? `Building stamped at (${x},${y}) — ${final.applied.toLocaleString()} ops in ${ms} ms `
-            + "(Ctrl+Z undoes it; click again to place another)"
-          : `Building stamp failed: ${final.message ?? final.error ?? "unknown"}`,
+        severity: "success",
+        message: `${label} stamped at (${x},${y}) — ${targetTiles} tiles in ${ms} ms`
+          + (droppedTiles > 0 ? ` (${droppedTiles} clipped at the map edge)` : "")
+          + " (Ctrl+Z undoes it; click again to place another)",
       });
-      onCompleteRef.current(final.applied, final.ok);
+      onCompleteRef.current(edits.length, true);
     } catch (err) {
-      s.renderer.endStroke();
+      // Backend applyEdits is transactional — on rejection the live
+      // session is untouched; revert the optimistic local mirror and
+      // drop the dangling undo stroke (mirrors doPaste's rollback).
+      if (strokeCommitted) {
+        const entry = renderer_.discardLastUndo();
+        if (entry) {
+          for (const sn of entry.snapshots) {
+            renderer_.applyLocalEdit({
+              x: sn.x, y: sn.y, op: "set_entries",
+              layer: sn.layer, entries: sn.entries,
+            });
+          }
+          for (const r of entry.roomSnapshots) {
+            renderer_.applyLocalEdit({ x: r.x, y: r.y, op: "set_room", roomId: r.roomId });
+          }
+        }
+      }
       logRef.current?.append({
         severity: "error",
         message: `Building stamp failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -802,36 +936,43 @@ function PlaceBuildingSection({
     }
   }, []);
 
-  const arm = useCallback((width: number, height: number, label: string) => {
-    clearGhost();   // a live generic-generator ghost would block clicks
+  /** Click a card = placement is ARMED immediately: footprint tint +
+   * real sprite ghost at the cursor (the parent ghosts `region`). */
+  const arm = useCallback((entry: BuildingLibraryEntry, contents: boolean) => {
+    clearGhost();   // a live generator-preview ghost would block clicks
+    const region = composeBuildingRegion(entry, contents);
+    const label = customNames[entry.id] ?? `${entry.function} (${entry.sector})`;
     setPlacement({
-      w: width, h: height, label,
-      run: (x, y) => { void stampAt(x, y); },
+      w: entry.w, h: entry.h, label, region,
+      run: (x, y) => stampAt(region, label, x, y),
     });
-  }, [clearGhost, setPlacement, stampAt]);
+  }, [clearGhost, setPlacement, stampAt, customNames]);
 
-  // Stepper change: clamp 3..40 (the generator's hard bounds; the
-  // corpus range is shown as a hint, not a cage) and, when placement is
-  // already armed, re-arm live so the cursor footprint tracks the size.
-  const setSize = (dim: "w" | "h", raw: number) => {
-    const v = Math.max(3, Math.min(40, Math.round(raw)));
-    if (dim === "w") setW(v); else setH(v);
-    if (placementActive && selected) {
-      arm(dim === "w" ? v : w, dim === "h" ? v : h, selected.label);
-    }
-  };
-
-  const pick = (e: BuildingCatalogEntry) => {
+  const pick = (e: BuildingLibraryEntry) => {
     setSelectedId(e.id);
-    setW(e.default_w);
-    setH(e.default_h);
-    if (placementActive) {
-      arm(e.default_w, e.default_h, e.label);
-    }
+    arm(e, includeContents);
   };
 
-  // No corpus shipped / nothing to offer → no section at all.
-  if (!sessionId || entries.length === 0) return null;
+  const toggleContents = (on: boolean) => {
+    setIncludeContents(on);
+    // Re-arm live so the ghost + stamp reflect the new composition.
+    if (placementActive && selected) arm(selected, on);
+  };
+
+  const commitRename = (id: string) => {
+    const name = renameDraft.trim();
+    setCustomNames((prev) => {
+      const next = { ...prev };
+      if (name) next[id] = name; else delete next[id];
+      try {
+        localStorage.setItem(BUILDING_NAMES_LS_KEY, JSON.stringify(next));
+      } catch { /* storage full/blocked — name still applies this session */ }
+      return next;
+    });
+    setRenamingId(null);
+  };
+
+  if (!sessionId) return null;
 
   return (
     <div className="rounded border border-sky-800/60 bg-sky-950/20">
@@ -841,71 +982,137 @@ function PlaceBuildingSection({
         className="flex w-full items-center justify-between px-2 py-1.5 text-left"
       >
         <span className="text-[10px] font-semibold uppercase tracking-wide text-sky-300">
-          {open ? "▼" : "▶"} Place building
+          {open ? "▼" : "▶"} Building library
         </span>
         <span className="text-[10px] text-gray-500">
-          {selected ? `${selected.label} · ${w}×${h}` : `${entries.length} kinds`}
+          {library.isLoading
+            ? "scanning…"
+            : selected
+              ? displayName(selected)
+              : `${entries.length} buildings`}
         </span>
       </button>
       {open && (
         <div className="space-y-2 px-2 pb-2">
-          {/* Visual picker: one card per catalog entry, thumbnail =
-              dominant wall + roof pieces rendered from the live atlas. */}
-          <div className="grid max-h-56 grid-cols-2 gap-1 overflow-y-auto pr-1">
-            {entries.map((e) => (
-              <button
-                key={e.id}
-                type="button"
-                onClick={() => pick(e)}
-                className={`flex flex-col items-center gap-1 rounded border p-1.5 text-center ${
-                  e.id === selectedId
-                    ? "border-sky-400 bg-sky-900/50"
-                    : "border-gray-700 bg-gray-900/60 hover:border-gray-500"
-                }`}
-                title={`${e.label} — wall slot ${e.wall_slot}, roof slot ${e.roof_slot}, `
-                  + `${e.n_buildings} real buildings in the corpus`}
-              >
-                {renderer && (
-                  <BuildingThumb
-                    renderer={renderer}
-                    wallSlot={e.wall_slot}
-                    wallSub={e.wall_sub}
-                    roofSlot={e.roof_slot}
-                    roofSub={e.roof_sub}
-                  />
-                )}
-                <span className="line-clamp-2 text-[10px] leading-tight text-gray-200">
-                  {e.label}
-                </span>
-                <span className="text-[9px] text-gray-500">
-                  {e.n_buildings} in corpus{e.has_door ? "" : " · no door data"}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          {selected && (
+          {library.isLoading && (
+            <p className="text-[10px] italic leading-snug text-gray-500">
+              Scanning this tileset's maps for buildings… first time only
+              — afterwards the library loads instantly.
+            </p>
+          )}
+          {library.isError && (
+            <p className="text-[10px] leading-snug text-red-300">
+              Library scan failed: {library.error instanceof Error
+                ? library.error.message : String(library.error)}
+            </p>
+          )}
+          {library.isSuccess && entries.length === 0 && (
+            <p className="text-[10px] italic leading-snug text-gray-500">
+              No buildings found in this install's tileset-{tileset} maps.
+            </p>
+          )}
+          {entries.length > 0 && (
             <>
-              {/* Size steppers + live W×H readout. NOT a region drag —
-                  the size is chosen here, the POSITION on the canvas. */}
-              <div className="flex items-center justify-between gap-2">
-                <SizeStepper
-                  label="W"
-                  value={w}
-                  onChange={(v) => setSize("w", v)}
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={`Search ${entries.length} buildings…`}
+                  className="min-w-0 flex-1 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-[11px] text-gray-100 placeholder:text-gray-600"
                 />
-                <SizeStepper
-                  label="H"
-                  value={h}
-                  onChange={(v) => setSize("h", v)}
-                />
-                <span className="font-mono text-sm text-sky-200">{w}×{h}</span>
+                <label
+                  className="flex shrink-0 items-center gap-1 text-[10px] text-gray-400"
+                  title="ON: stamp everything inside (furniture, debris, objects). OFF: structure only (walls + roofs + floors + doors)."
+                >
+                  <input
+                    type="checkbox"
+                    checked={includeContents}
+                    onChange={(e) => toggleContents(e.target.checked)}
+                    className="h-3 w-3"
+                  />
+                  Include contents
+                </label>
               </div>
-              <div className="text-[9px] text-gray-500">
-                Corpus range {selected.min_w}–{selected.max_w} ×{" "}
-                {selected.min_h}–{selected.max_h} tiles · room id auto-assigned
+              <div className="grid max-h-64 grid-cols-2 gap-1 overflow-y-auto pr-1">
+                {filtered.map((e) => (
+                  <div
+                    key={e.id}
+                    className={`relative flex flex-col items-center gap-1 rounded border p-1.5 text-center ${
+                      e.id === selectedId && placementActive
+                        ? "border-sky-400 bg-sky-900/50"
+                        : "border-gray-700 bg-gray-900/60 hover:border-gray-500"
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => pick(e)}
+                      disabled={running}
+                      className="flex w-full flex-col items-center gap-1 disabled:opacity-40"
+                      title={`${e.label}\nfrom ${e.source_map}`
+                        + (e.seen_in > 1 ? ` (seen in ${e.seen_in} maps)` : "")
+                        + "\nClick to arm placement — then click the map to stamp."}
+                    >
+                      {e.thumb_png_b64 ? (
+                        <img
+                          src={`data:image/png;base64,${e.thumb_png_b64}`}
+                          alt=""
+                          className="h-20 w-full rounded border border-gray-800 bg-gray-950 object-contain"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="flex h-20 w-full items-center justify-center rounded border border-gray-800 bg-gray-950 text-[9px] text-gray-600">
+                          no preview
+                        </div>
+                      )}
+                      {renamingId !== e.id && (
+                        <span className="line-clamp-2 text-[10px] leading-tight text-gray-200">
+                          {displayName(e)}
+                        </span>
+                      )}
+                      <span className="text-[9px] text-gray-500">
+                        {e.w}×{e.h} · {e.room_count} room{e.room_count !== 1 ? "s" : ""}
+                        {e.seen_in > 1 ? ` · ×${e.seen_in}` : ""}
+                      </span>
+                    </button>
+                    {renamingId === e.id ? (
+                      <input
+                        autoFocus
+                        type="text"
+                        value={renameDraft}
+                        onChange={(ev) => setRenameDraft(ev.target.value)}
+                        onBlur={() => commitRename(e.id)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === "Enter") commitRename(e.id);
+                          if (ev.key === "Escape") setRenamingId(null);
+                          ev.stopPropagation();
+                        }}
+                        className="w-full rounded border border-sky-600 bg-gray-950 px-1 py-0.5 text-center text-[10px] text-gray-100"
+                        placeholder={e.label}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          setRenamingId(e.id);
+                          setRenameDraft(customNames[e.id] ?? "");
+                        }}
+                        className="absolute right-1 top-1 rounded bg-gray-950/70 px-1 text-[10px] text-gray-500 hover:text-gray-200"
+                        title="Rename this building (saved on this machine)"
+                      >
+                        ✎
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {filtered.length === 0 && (
+                  <p className="col-span-2 py-2 text-center text-[10px] italic text-gray-600">
+                    No buildings match “{search}”.
+                  </p>
+                )}
               </div>
-              {placementActive ? (
+              {placementActive && selected && (
                 <button
                   type="button"
                   onClick={() => setPlacement(null)}
@@ -913,105 +1120,12 @@ function PlaceBuildingSection({
                 >
                   ⏹ Done placing (or ESC)
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => arm(w, h, selected.label)}
-                  disabled={running}
-                  className="w-full rounded border border-sky-600/60 bg-sky-600/20 px-3 py-2 text-sm font-medium text-sky-100 hover:bg-sky-600/40 disabled:cursor-not-allowed disabled:opacity-40"
-                  title="The footprint follows your cursor on the map — every click stamps a building there"
-                >
-                  ⌖ Place on map
-                </button>
               )}
             </>
           )}
         </div>
       )}
     </div>
-  );
-}
-
-function SizeStepper({
-  label, value, onChange,
-}: {
-  label: string;
-  value: number;
-  onChange(v: number): void;
-}) {
-  return (
-    <div className="flex items-center gap-1">
-      <span className="text-[10px] text-gray-400">{label}</span>
-      <button
-        type="button"
-        onClick={() => onChange(value - 1)}
-        className="h-6 w-6 rounded border border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-500"
-      >
-        −
-      </button>
-      <input
-        type="number"
-        min={3}
-        max={40}
-        value={value}
-        onChange={(e) => {
-          const n = parseInt(e.target.value, 10);
-          if (Number.isFinite(n)) onChange(n);
-        }}
-        className="w-12 rounded border border-gray-700 bg-gray-900 px-1 py-0.5 text-center font-mono text-sm text-gray-100"
-      />
-      <button
-        type="button"
-        onClick={() => onChange(value + 1)}
-        className="h-6 w-6 rounded border border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-500"
-      >
-        +
-      </button>
-    </div>
-  );
-}
-
-/** Card thumbnail: the cell's dominant wall piece (left) + roof piece
- * (right), drawn from the live atlas via the same drawCellInto the
- * SlotSubPreview uses — what lands on the map is what you see. Falls
- * back to sub 1 when the dominant sub isn't in this tileset's atlas. */
-function BuildingThumb({
-  renderer, wallSlot, wallSub, roofSlot, roofSub,
-}: {
-  renderer: IsoRenderer;
-  wallSlot: number;
-  wallSub: number;
-  roofSlot: number;
-  roofSub: number;
-}) {
-  const ref = useRef<HTMLCanvasElement | null>(null);
-  useEffect(() => {
-    const c = ref.current;
-    if (!c) return;
-    const ctx = c.getContext("2d");
-    if (!ctx) return;
-    const half = c.width / 2;
-    // drawCellInto clears its own (translated) region, so each half is
-    // drawn under its own translate.
-    ctx.save();
-    if (!renderer.drawCellInto(ctx, wallSlot, wallSub, half, c.height)) {
-      renderer.drawCellInto(ctx, wallSlot, 1, half, c.height);
-    }
-    ctx.restore();
-    ctx.save();
-    ctx.translate(half, 0);
-    if (!renderer.drawCellInto(ctx, roofSlot, roofSub, half, c.height)) {
-      renderer.drawCellInto(ctx, roofSlot, 1, half, c.height);
-    }
-    ctx.restore();
-  }, [renderer, wallSlot, wallSub, roofSlot, roofSub]);
-  return (
-    <canvas
-      ref={ref}
-      width={72}
-      height={40}
-      className="rounded border border-gray-800 bg-gray-950"
-    />
   );
 }
 

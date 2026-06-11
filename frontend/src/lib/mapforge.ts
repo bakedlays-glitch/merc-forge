@@ -875,6 +875,72 @@ export function listBuildings(): Promise<BuildingCatalogEntry[]> {
   return jsonGet<BuildingCatalogEntry[]>("/mapforge/buildings");
 }
 
+// ────────────────────────────────────────────────────────────────────────
+//  Canon building library — verbatim building grafts from real maps
+// ────────────────────────────────────────────────────────────────────────
+
+/** One tile of a library building — shape-compatible with
+ *  mapClipboard's ClipTile (dx/dy/layers/room/height) so pasteEdits
+ *  works on a composed region without translation. */
+export interface BuildingLibraryTile {
+  dx: number;
+  dy: number;
+  layers: Record<LayerName, number[][]>;
+  /** Normalized source room id (1..N within the building; 0 = none). */
+  room: number;
+  height: number;
+}
+
+/** One building extracted verbatim from a real map of this tileset. */
+export interface BuildingLibraryEntry {
+  id: string;
+  /** "Bar — C5 (The Den) · 9×7 · 2 rooms" */
+  label: string;
+  /** Contents-heuristic function ("Bar", "House", … or "Building"). */
+  function: string;
+  town: string;
+  sector: string;
+  source_map: string;
+  tileset: number;
+  w: number;
+  h: number;
+  room_count: number;
+  /** How many maps carry this exact building (dedupe count). */
+  seen_in: number;
+  thumb_png_b64: string;
+  /** STRUCTURE: land/floors, walls+doors+windows+decals, roofs,
+   *  onroofs, wall drop shadows. */
+  tiles: BuildingLibraryTile[];
+  /** CONTENTS: objs layer, furniture structs, furniture shadows. */
+  contents_tiles: BuildingLibraryTile[];
+}
+
+export interface BuildingLibraryResponse {
+  tileset: number;
+  install_root: string;
+  entries: BuildingLibraryEntry[];
+  scanned_maps: number;
+  matching_maps: number;
+  skipped_clusters: number;
+  build_ms: number;
+  from_cache?: boolean;
+}
+
+/** Fetch the canon building library for (install, tileset). The first
+ *  call per pair scans + renders thumbnails server-side (can take tens
+ *  of seconds); afterwards it's served from a fingerprinted cache. */
+export function listBuildingLibrary(
+  xmlPath: string,
+  tileset: number,
+): Promise<BuildingLibraryResponse> {
+  const qs = new URLSearchParams({
+    xml: xmlPath, tileset: String(tileset),
+  });
+  return jsonGet<BuildingLibraryResponse>(
+    `/mapforge/building-library?${qs.toString()}`,
+  );
+}
+
 /**
  * Run a generator against a session, streaming each emitted op (+ each
  * phase event) to `onEvent` as it arrives.
