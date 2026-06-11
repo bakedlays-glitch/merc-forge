@@ -192,23 +192,46 @@ def validate_parsed(parsed: Dict[str, Any]) -> List[Finding]:
         ))
     ep = parsed.get("appendix_edgepoint_count")
     if not present.get("edgepoints") or ep == 0:
-        warns.append(Finding(
-            SEVERITY_WARN, "NO_EDGEPOINTS",
-            "No edge points — arriving mercs have no deployment tiles. The "
-            "engine needs N/S/E/W edge entry data to place squads when the "
-            "player walks into the sector.",
+        # INFO, not WARN: when MAP_EDGEPOINTS_SAVED is absent the engine
+        # sets fGenerateEdgePoints and AUTO-REGENERATES edgepoints at
+        # load (worlddef.cpp:3256-3276 → GenerateMapEdgepoints). The
+        # real deployment dependency is the ENTRY POINTS (previous
+        # check) + reachability — not stored edgepoints.
+        infos.append(Finding(
+            SEVERITY_INFO, "NO_EDGEPOINTS",
+            "No stored edge points — the engine will auto-generate them "
+            "at load from the entry points. Fine as long as the entry "
+            "points are set and reachable.",
         ))
 
     # ── 5. High object-count tiles (WARN) — the "Object Count" save bug ─
+    # Threshold matches the ENGINE's own editor: it warns at >10 and
+    # REFUSES the save at >15 entries on one tile (worlddef.cpp:1932-47).
+    # The old >=4 threshold false-positived on perfectly legal dense
+    # vanilla road/cliff tiles.
     obj_counts = n_per_tile.get("obj") or []
-    hot = [i for i, c in enumerate(obj_counts) if c >= 4]
+    hot = [i for i, c in enumerate(obj_counts) if c > 10]
     if hot:
         warns.append(Finding(
             SEVERITY_WARN, "HIGH_OBJECT_COUNT",
-            f"{len(hot)} tile(s) carry >=4 object-layer entries. Dense roads "
-            f"and cliffs are the classic trigger for the editor's 'Object "
-            f"Count' save corruption — verify these tiles save cleanly.",
+            f"{len(hot)} tile(s) carry more than 10 object-layer entries — "
+            f"the in-game editor warns at this density and refuses to save "
+            f"at all above 15 entries on one tile.",
             tiles=hot[:_TILE_SAMPLE_CAP], count=len(hot),
+        ))
+
+    # ── 5c. Room-ID upper bound (ERROR) ───────────────────────────────
+    # Room IDs index gubWorldRoomHidden[MAX_ROOMS] with MAX_ROOMS=65530
+    # (Render Fun.h:9, indexed unchecked at Render Fun.cpp:72) — an ID
+    # above 65529 is an out-of-bounds global array access in-game.
+    over = [i for i, r in enumerate(rooms) if r > 65529]
+    if over:
+        errors.append(Finding(
+            SEVERITY_ERROR, "ROOM_ID_OVER_CAP",
+            f"{len(over)} tile(s) have a room ID above 65529 — the engine "
+            f"indexes a fixed 65530-entry room array without bounds checks, "
+            f"so these read/write out of bounds in-game.",
+            tiles=over[:_TILE_SAMPLE_CAP], count=len(over),
         ))
 
     # ── 5b. Terrain heights (WARN + INFO) ─────────────────────────────

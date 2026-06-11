@@ -109,8 +109,11 @@ def test_no_exit_grids_warns():
     assert f.severity == SEVERITY_WARN
 
 
-def test_no_edgepoints_warns():
-    assert "NO_EDGEPOINTS" in _codes(validate_parsed(_mk()))
+def test_no_edgepoints_is_info():
+    # INFO, not WARN: the engine auto-regenerates edgepoints at load
+    # when MAP_EDGEPOINTS_SAVED is absent (worlddef.cpp:3256-3276).
+    f = _by_code(validate_parsed(_mk()), "NO_EDGEPOINTS")
+    assert f.severity == SEVERITY_INFO
 
 
 def test_exit_grid_count_zero_warns_even_when_flag_present():
@@ -141,13 +144,27 @@ def test_missing_edge_entry_warns():
     assert f.count == 1
 
 
-def test_high_object_count_warns():
+def test_high_object_count_warns_above_engine_threshold():
+    # Engine's editor warns at >10 (and refuses the save >15). A legal
+    # dense tile (e.g. 4 road entries) must NOT warn.
     d = _mk()
-    d["objs"][0] = [(1, 1)] * 4
-    d["n_per_tile"]["obj"][0] = 4
+    d["objs"][0] = [(1, 1)] * 11
+    d["n_per_tile"]["obj"][0] = 11
     f = _by_code(validate_parsed(d), "HIGH_OBJECT_COUNT")
     assert f.severity == SEVERITY_WARN
     assert 0 in f.tiles
+    d2 = _mk()
+    d2["objs"][0] = [(1, 1)] * 4
+    d2["n_per_tile"]["obj"][0] = 4
+    assert "HIGH_OBJECT_COUNT" not in _codes(validate_parsed(d2))
+
+
+def test_room_id_over_cap_is_error():
+    d = _mk(playable=True)
+    d["rooms"] = [1, 65530, 0, 0]
+    f = _by_code(validate_parsed(d), "ROOM_ID_OVER_CAP")
+    assert f.severity == SEVERITY_ERROR
+    assert f.tiles == [1]
 
 
 def test_parse_incomplete_is_info():

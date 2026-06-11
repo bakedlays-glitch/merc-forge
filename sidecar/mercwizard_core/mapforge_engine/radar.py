@@ -66,25 +66,35 @@ def _dither_to_enough_colors(img: Image.Image) -> Image.Image:
     """Inject an imperceptible, deterministic +/-3 dither so a near-uniform
     render reaches >=255 distinct colors — `write_static_sti`'s quantizer
     reserves index 0 and demands 255 colors, which a flat/blank sector
-    wouldn't otherwise have. 7^3 = 343 offset combinations guarantees the
-    255 needed even from a single base color; +/-3 is invisible at 88x44.
+    wouldn't otherwise have. 7^3 = 343 offset combinations guarantee the
+    255 needed from ANY base color (see window-slide below); the ±9
+    spread is still invisible at 88x44.
     """
+    # Two traps the naive clamp-around-the-value version fell into
+    # (reproduced empirically in the Slice-0 review):
+    # - A flat BLACK or WHITE base clamps half the offsets away (only 4
+    #   distinct values per channel = 64 colors, under the 255 floor).
+    #   Fix: slide each channel's 7-step window fully inside [0, 255]
+    #   (anchor = clamp(v, 9, 246)) so all 7^3 = 343 combos survive at
+    #   any base color.
+    # - A fully TRANSPARENT render had its RGB dither discarded by the
+    #   encoder's composite-over-black (alpha 0 → 1 color → 500 on
+    #   blank sectors). Fix: force alpha opaque; the encoder composites
+    #   over black anyway, so a blank sector becomes a near-black map.
     img = img.convert("RGBA")
     px = img.load()
     w, h = img.size
     for y in range(h):
         for x in range(w):
-            r, g, b, a = px[x, y]
+            r, g, b, _a = px[x, y]
             k = x * 13 + y * 7
             dr = (k % 7) - 3
             dg = ((k // 7) % 7) - 3
             db = ((k // 49) % 7) - 3
-            px[x, y] = (
-                min(255, max(0, r + dr)),
-                min(255, max(0, g + dg)),
-                min(255, max(0, b + db)),
-                a,
-            )
+            ar = min(max(r, 9), 246)
+            ag = min(max(g, 9), 246)
+            ab = min(max(b, 9), 246)
+            px[x, y] = (ar + dr * 3, ag + dg * 3, ab + db * 3, 255)
     return img
 
 

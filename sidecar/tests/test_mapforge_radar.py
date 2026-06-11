@@ -55,3 +55,24 @@ def test_write_radar_sti_leaves_no_tmp(tmp_path):
     out = tmp_path / "A1.STI"
     write_radar_sti(_multicolor(), out)
     assert not (tmp_path / "A1.STI.tmp").exists()
+
+
+def test_dither_survives_gamut_edges_and_transparency(tmp_path):
+    """The review reproduced three bases where the old clamp-style dither
+    collapsed under the 255-color floor: flat black (64 colors), flat
+    white (64), and fully transparent (1 — the composite-over-black
+    discarded the RGB dither). All three must now encode cleanly."""
+    cases = {
+        "BLACK.STI": (0, 0, 0, 255),
+        "WHITE.STI": (255, 255, 255, 255),
+        "CLEAR.STI": (0, 0, 0, 0),       # blank/new sector render
+    }
+    for name, rgba in cases.items():
+        im = Image.new("RGBA", (RADAR_W, RADAR_H), rgba)
+        dithered = _dither_to_enough_colors(im)
+        colors = dithered.convert("RGB").getcolors(maxcolors=100000)
+        assert colors is not None and len(colors) >= 255, name
+        out = tmp_path / name
+        write_radar_sti(im, out)          # must not raise
+        png = decode_sti_frame_to_png(out.read_bytes(), 0)
+        assert png is not None, name
