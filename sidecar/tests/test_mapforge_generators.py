@@ -402,6 +402,7 @@ def test_bank_uniform_plateau_in_80_steps():
     ctx = _bank_ctx(20, 20)
     heights, faces = _bank_split(ctx, {
         "x1": 2, "y1": 2, "x2": 6, "y2": 6, "levels": 2,
+        "bank_mode": "plateau",
     })
     assert len(heights) == 25
     for o in heights:
@@ -418,7 +419,7 @@ def test_bank_uniform_plateau_in_80_steps():
 def test_bank_default_is_one_cliff_level():
     ctx = _bank_ctx(10, 10)
     heights, _faces = _bank_split(ctx, {
-        "x1": 0, "y1": 0, "x2": 1, "y2": 1,
+        "x1": 0, "y1": 0, "x2": 1, "y2": 1, "bank_mode": "plateau",
     })
     assert heights and all(o["height"] == 80 for o in heights)
 
@@ -427,6 +428,7 @@ def test_bank_levels_zero_flattens():
     ctx = _bank_ctx(10, 10)
     ops = [e for e in BankGenerator().iter_ops(ctx, {
         "x1": 0, "y1": 0, "x2": 1, "y2": 1, "levels": 0,
+        "bank_mode": "plateau",
     }) if "op" in e]
     assert ops and all(o["height"] == 0 for o in ops)
 
@@ -434,9 +436,11 @@ def test_bank_levels_zero_flattens():
 def test_bank_normalizes_corners():
     ctx = _bank_ctx(30, 30)
     a = {(e["x"], e["y"]) for e in BankGenerator().iter_ops(ctx, {
-        "x1": 10, "y1": 10, "x2": 4, "y2": 4, "levels": 1}) if "op" in e}
+        "x1": 10, "y1": 10, "x2": 4, "y2": 4, "levels": 1,
+        "bank_mode": "plateau"}) if "op" in e}
     b = {(e["x"], e["y"]) for e in BankGenerator().iter_ops(ctx, {
-        "x1": 4, "y1": 4, "x2": 10, "y2": 10, "levels": 1}) if "op" in e}
+        "x1": 4, "y1": 4, "x2": 10, "y2": 10, "levels": 1,
+        "bank_mode": "plateau"}) if "op" in e}
     assert a == b
 
 
@@ -444,6 +448,7 @@ def test_bank_clamps_oob_region_and_levels():
     ctx = _bank_ctx(10, 10)
     heights, _faces = _bank_split(ctx, {
         "x1": 0, "y1": 0, "x2": 999, "y2": 999, "levels": 999,
+        "bank_mode": "plateau",
     })
     assert len(heights) == 100           # region clamped to the 10×10 grid
     # levels clamp to the engine max of 3 raises → 240, never 255-ish junk.
@@ -455,7 +460,8 @@ def test_bank_phase_start_has_total():
     actually emitted (heights + cliff-face entries)."""
     ctx = _bank_ctx(20, 20)
     events = list(BankGenerator().iter_ops(ctx, {
-        "x1": 1, "y1": 1, "x2": 5, "y2": 8, "levels": 1}))
+        "x1": 1, "y1": 1, "x2": 5, "y2": 8, "levels": 1,
+        "bank_mode": "plateau"}))
     start = next(e for e in events if e.get("status") == "start")
     n_ops = sum(1 for e in events if "op" in e)
     assert start["total"] == n_ops
@@ -477,7 +483,8 @@ def test_bank_phase_start_has_total():
 #   S face (y=11): _face_chain(13, 6)  → x ∈ [13, 9, 6]   (Δ4, Δ3)
 #   + SW sub-8 taper at (2, 11). The SE corner tile (13,11) carries TWO
 #   anchors (E bottom piece + S sub 7) — vanilla multi-anchors gridnos.
-_R2_RECT = {"x1": 2, "y1": 2, "x2": 13, "y2": 11, "levels": 1}
+_R2_RECT = {"x1": 2, "y1": 2, "x2": 13, "y2": 11, "levels": 1,
+            "bank_mode": "plateau"}
 _R2_E_ANCHORS = [(13, 11), (13, 8), (13, 6)]
 _R2_S_ANCHORS = [(13, 11), (9, 11), (6, 11)]
 _R2_SW = (2, 11)
@@ -1708,3 +1715,58 @@ def test_cluster_respects_region():
     for o in ops:
         assert 20 - radius <= o["x"] <= 40 + radius
         assert 30 - radius <= o["y"] <= 50 + radius
+
+
+# ── Escarpment mode (the DEFAULT) — edge-to-edge cliff line ─────────────
+
+
+def test_bank_default_mode_is_escarpment_edge_to_edge():
+    """Default (no bank_mode) = escarpment: the drag's south edge becomes
+    a full-width cliff line and EVERYTHING north of it rises — vanilla's
+    idiom (a floating island plateau reads odd in iso view)."""
+    ctx = _bank_ctx(40, 40)
+    heights, faces = _bank_split(ctx, {
+        "x1": 10, "y1": 10, "x2": 20, "y2": 15, "levels": 1,
+    })
+    # Raised region = rows 0..15 across the FULL width.
+    assert {(o["x"], o["y"]) for o in heights} == {
+        (x, y) for y in range(0, 16) for x in range(40)
+    }
+    # Faces sit on row 15 only, spanning edge to edge: westmost piece
+    # covers cols 0..3 (anchor at 4), easternmost anchor at col 39.
+    face_xy = {(o["x"], o["y"]) for o in faces}
+    assert all(y == 15 for _, y in face_xy)
+    xs = sorted(x for x, _ in face_xy)
+    assert xs[0] == 4 and xs[-1] == 39
+    # Chain invariant: joints never wider than the vanilla stride 4.
+    assert all(b - a <= 4 for a, b in zip(xs, xs[1:]))
+    # Dual entries per anchor.
+    assert len(faces) == 2 * len(face_xy)
+
+
+def test_bank_escarpment_high_side_west():
+    ctx = _bank_ctx(30, 30)
+    heights, faces = _bank_split(ctx, {
+        "x1": 5, "y1": 5, "x2": 12, "y2": 9, "levels": 1,
+        "high_side": "W",
+    })
+    assert {(o["x"], o["y"]) for o in heights} == {
+        (x, y) for y in range(30) for x in range(0, 13)
+    }
+    face_xy = {(o["x"], o["y"]) for o in faces}
+    assert all(x == 12 for x, _ in face_xy)
+    ys = sorted(y for _, y in face_xy)
+    assert ys[0] == 4 and ys[-1] == 29
+    assert all(b - a <= 4 for a, b in zip(ys, ys[1:]))
+
+
+def test_bank_escarpment_faces_use_only_straight_run_subs():
+    """Edge-to-edge lines have no corners: S lines use only subs 7/8,
+    E lines only subs 5/6 (the straight-run pools)."""
+    ctx = _bank_ctx(40, 40)
+    _h, faces_n = _bank_split(ctx, {"x1": 0, "y1": 0, "x2": 5, "y2": 20,
+                                    "levels": 1, "high_side": "N"})
+    assert {o["sub"] for o in faces_n} <= {7, 8}
+    _h, faces_w = _bank_split(ctx, {"x1": 0, "y1": 0, "x2": 20, "y2": 5,
+                                    "levels": 1, "high_side": "W"})
+    assert {o["sub"] for o in faces_w} <= {5, 6}

@@ -821,6 +821,40 @@ export function ParamRow({
     );
   }
 
+  // bank generator: escarpment-vs-plateau + which side rises
+  if (param.name === "bank_mode" && param.type === "str") {
+    return (
+      <div>
+        {labelEl}
+        <select
+          id={`gen-wiz-${param.name}`}
+          value={(value as string) ?? "escarpment"}
+          onChange={(e) => onChange(e.target.value)}
+          className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100"
+        >
+          <option value="escarpment">escarpment — cliff line runs edge to edge (vanilla)</option>
+          <option value="plateau">plateau — raise only the dragged rectangle</option>
+        </select>
+      </div>
+    );
+  }
+  if (param.name === "high_side" && param.type === "str") {
+    return (
+      <div>
+        {labelEl}
+        <select
+          id={`gen-wiz-${param.name}`}
+          value={(value as string) ?? "N"}
+          onChange={(e) => onChange(e.target.value)}
+          className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100"
+        >
+          <option value="N">North — high ground above the drag's bottom edge</option>
+          <option value="W">West — high ground left of the drag's right edge</option>
+        </select>
+      </div>
+    );
+  }
+
   // int/float with both min and max → slider + number input combo
   // (so the user can drag for rough exploration OR type for precision)
   if ((param.type === "int" || param.type === "float")

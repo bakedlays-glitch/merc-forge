@@ -1803,12 +1803,25 @@ class BankGenerator(Generator):
         Param(name="y1", type="int", default=0, description="One corner Y", min=0, max=255),
         Param(name="x2", type="int", default=0, description="Other corner X", min=0, max=255),
         Param(name="y2", type="int", default=0, description="Other corner Y", min=0, max=255),
+        Param(name="bank_mode", type="str", default="escarpment",
+              description="escarpment = the cliff line runs EDGE TO EDGE "
+                          "across the whole map (vanilla's idiom — a floating "
+                          "island plateau reads odd in iso view; user feedback "
+                          "2026-06-11) and everything on the high side is "
+                          "raised. plateau = raise only the dragged rectangle "
+                          "(a freestanding mesa)."),
+        Param(name="high_side", type="str", default="N",
+              description="Escarpment only: which side of the line is the "
+                          "high ground. N = everything north of the drag's "
+                          "south edge rises (cliff faces look south — the "
+                          "iso-visible direction). W = everything west of the "
+                          "drag's east edge rises (faces look east)."),
         Param(name="levels", type="int", default=1,
               description="Cliff raises (×80 height units each, the engine's "
                           "native step). 0 = flatten back to ground level.",
               min=0, max=3),
         Param(name="place_cliff_faces", type="bool", default=True,
-              description="Dress the plateau border with visible cliff-face "
+              description="Dress the cliff line with visible cliff-face "
                           "sprites (vanilla FIRSTCLIFF/FIRSTCLIFFHANG pairs). "
                           "Off = heights only (invisible ledge)."),
         Param(name="seed", type="int", default=42,
@@ -1859,6 +1872,31 @@ class BankGenerator(Generator):
         # SW corner taper (also the only piece covering col x1's face).
         yield x1, y2, 8
 
+    def _iter_escarpment_anchors(
+        self, ctx: GeneratorContext, x2: int, y2: int, high_side: str,
+        rng: random.Random,
+    ) -> Iterator[tuple[int, int, int]]:
+        """Face anchors for an EDGE-TO-EDGE cliff line (escarpment mode).
+        No corners exist — the run terminates at the map border, where the
+        iso diamond clips it (vanilla edge-to-edge runs end the same way,
+        e.g. A6's 112-tile row-38 line). Same chaining grammar as the
+        plateau faces (stride ≤4, 1-tile overlaps)."""
+        def pick(role: str) -> int:
+            pool = CLIFF_FACE_LUT[role]["subs"]
+            return rng.choices([s for s, _ in pool],
+                               weights=[w for _, w in pool], k=1)[0]
+
+        if high_side == "W":
+            # East-looking face down the FULL height of col x2. Pieces
+            # cover rows y-4..y; cap 4 so the top piece covers rows 0..4.
+            for y in _face_chain(ctx.rows - 1, 4):
+                yield x2, y, pick("edge_E")
+        else:
+            # South-looking face across the FULL width of row y2. Pieces
+            # cover cols x-4..x-1; cap 4 so the west piece covers 0..3.
+            for x in _face_chain(ctx.cols - 1, 4):
+                yield x, y2, pick("edge_S")
+
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
         levels = max(0, min(3, int(params.get("levels", 1))))
         target = levels * WORLD_CLIFF_HEIGHT
@@ -1876,34 +1914,60 @@ class BankGenerator(Generator):
         if y1 > y2:
             y1, y2 = y2, y1
 
+        mode = str(params.get("bank_mode", "escarpment")).strip().lower()
+        high_side = str(params.get("high_side", "N")).strip().upper()
+        if mode not in ("plateau", "escarpment"):
+            mode = "escarpment"
+        if high_side not in ("N", "W"):
+            high_side = "N"
+
+        # Raised region + cliff line per mode. ESCARPMENT (default) is
+        # vanilla's idiom: the line runs EDGE TO EDGE across the map and
+        # everything on the high side rises — a floating island plateau
+        # reads odd in iso view (user feedback 2026-06-11; A6's main
+        # escarpment is a 112-tile edge-to-edge run).
+        if mode == "escarpment":
+            if high_side == "W":
+                # High ground = everything west of the drag's EAST edge.
+                raised = [(x, y) for y in range(ctx.rows)
+                          for x in range(0, x2 + 1)]
+            else:
+                # High ground = everything north of the drag's SOUTH edge.
+                raised = [(x, y) for y in range(0, y2 + 1)
+                          for x in range(ctx.cols)]
+        else:
+            raised = [(x, y) for y in range(y1, y2 + 1)
+                      for x in range(x1, x2 + 1)]
         # Honest progress total: count the tiles that will actually emit
-        # (clip_to_playable can skip part of the rect).
-        coords = [
-            (x, y)
-            for y in range(y1, y2 + 1)
-            for x in range(x1, x2 + 1)
-            if playable is None or playable(x, y)
-        ]
-        total = len(coords)
+        # (clip_to_playable can skip part of the region).
+        coords = [(x, y) for (x, y) in raised
+                  if playable is None or playable(x, y)]
 
         # Cliff-face anchors (computed up front for the honest total).
         # levels=0 is a FLATTEN — no faces; the smallest vanilla face
         # pieces span 5 tiles (CLIFF_FOOTPRINT subs 5/6/7/8), so a rect
         # under 5×5 can't carry a coherent ring — no art, like vanilla.
         anchors: list[tuple[int, int, int]] = []
-        if place_faces and levels > 0 and x2 - x1 >= 4 and y2 - y1 >= 4:
-            anchors = [
-                (x, y, sub)
-                for (x, y, sub) in self._iter_face_anchors(x1, y1, x2, y2, rng)
-                if playable is None or playable(x, y)
-            ]
-        total += 2 * len(anchors)   # each anchor = structs + objs entry
+        if place_faces and levels > 0:
+            if mode == "escarpment":
+                anchors = list(self._iter_escarpment_anchors(
+                    ctx, x2, y2, high_side, rng))
+            elif x2 - x1 >= 4 and y2 - y1 >= 4:
+                anchors = list(self._iter_face_anchors(x1, y1, x2, y2, rng))
+            anchors = [(x, y, sub) for (x, y, sub) in anchors
+                       if playable is None or playable(x, y)]
+        total = len(coords) + 2 * len(anchors)   # anchor = structs + objs
 
+        where = (
+            f"({x1},{y1})→({x2},{y2})" if mode == "plateau"
+            else (f"everything north of row {y2}" if high_side == "N"
+                  else f"everything west of col {x2}")
+        )
         yield {
             "phase": "bank",
             "status": "start",
             "label": (
-                f"Raising ({x1},{y1})→({x2},{y2}) to height {target} "
+                f"Raising {where} to height {target} "
                 f"({levels} cliff level{'s' if levels != 1 else ''}) — "
                 f"{len(coords)} tiles, {len(anchors)} cliff-face anchors…"
             ),
@@ -1932,7 +1996,8 @@ class BankGenerator(Generator):
                          "the smallest vanilla cliff piece).")
         yield {"phase": "bank", "status": "done",
                "label": (
-                   f"Plateau done — {len(coords)} tiles at height {target}; "
+                   f"{'Escarpment' if mode == 'escarpment' else 'Plateau'} "
+                   f"done — {len(coords)} tiles at height {target}; "
                    f"{face_note} "
                    "Raised terrain is impassable scenery (no engine climb). "
                    "Oracle: heights+faces must survive an in-game-editor "
