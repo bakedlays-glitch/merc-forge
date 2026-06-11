@@ -1600,100 +1600,137 @@ class BuildingStampGenerator(Generator):
 # heights are exclusively multiples of this, max 3 raises (0/80/160/240).
 WORLD_CLIFF_HEIGHT = 80
 
-# ── Cliff-face sprites (R2) ────────────────────────────────────────────────
+# ── Cliff-face sprites (R2, reworked R3 against vanilla run-walks) ─────────
 #
-# PROVENANCE — empirical corpus scan, cross-checked against the editor C++:
+# PROVENANCE — empirical corpus scan + per-run walk, cross-checked against
+# the editor C++:
 #
 #   Scan: sidecar/.venv/Scripts/python.exe tools/scan_cliff_faces.py \
 #             --installs-dir "C:/Jagged Alliance 2" --top 12
-#   (2026-06-10; 5,193 unique maps across 30 installs, 661 with heights —
-#    ALL 661 carry cliff art. The canonical-install slice [287 maps, 33
-#    with heights] shows the identical shape.)
+#   Run-walk: scratch/clifftest/analyze_runs.py A6 F5 G5 A8 (2026-06-10) —
+#   walks every cliff RUN in those vanilla maps in gridno order and prints
+#   anchor→anchor deltas, per-sub chains, base companions, land textures.
 #
 #   * LAYER + PAIRING: every cliff anchor in real maps is a DUAL entry —
 #     structs (slot 10, FIRSTCLIFF) + objs (slot 9, FIRSTCLIFFHANG), SAME
-#     sub, SAME gridno (51.2% / 48.7% layer split; on the canonical
-#     install 1059/1059 perfectly paired). This is exactly what the
-#     in-game editor does: PasteBanks (Editor/edit_sys.cpp:672) calls
-#     AddStructToHead(FIRSTCLIFF…) then AddObjectToHead(FIRSTCLIFFHANG…).
-#     The FIRSTCLIFFSHADOW (slot 11) add there is commented OUT and slot
-#     11 is 0.1% corpus-wide (57 of ~52k entries, mod-map noise) → no
-#     shadow entry is placed.
+#     sub, SAME gridno (on the canonical install 1059/1059 perfectly
+#     paired). This is exactly what the in-game editor does: PasteBanks
+#     (Editor/edit_sys.cpp:672) calls AddStructToHead(FIRSTCLIFF…) then
+#     AddObjectToHead(FIRSTCLIFFHANG…). The FIRSTCLIFFSHADOW (slot 11) add
+#     there is commented OUT (0.1% corpus-wide noise) → no shadow entry.
 #   * ADD vs PLACE: AddStructToHead/AddObjectToHead are additive and the
 #     corpus tiles keep their land texture under the cliff → op = "add".
-#   * RAISED vs LOWER: 89-91% of anchors sit ON the raised tile (the tile
-#     whose 4-neighbor height drops define the face direction); the rest
-#     are diagonal-escarpment spill. We place on the raised border tile.
-#   * ROLE → SUB (corpus role histogram, raised-tile anchors, down-sides =
-#     face direction; full-sweep counts):
-#       E  → 6 (x1811) / 5 (x1663) / 4      S  → 7 (x919) / 1 / 12
-#       SE → 7 (x1682) / 9                  SW → 8 (x1192) / 11
-#       NE → 13 (x479)                      N  → 13 (x834)
-#       W  → 11 (x1284)
-#     Pools below keep the dominant subs whose multi-tile footprint
-#     (CliffOffsetData, edit_sys.cpp:1210) fits a straight axis-aligned
-#     border run — the 10-11-tile diagonals (subs 1/2/15/16) are for
-#     diagonal escarpments and are excluded.
+#     Vanilla even stacks multiple cliff anchors on ONE gridno (A6 has 12
+#     such tiles), so a corner sharing a tile with a face piece is fine.
+#   * CHAINING (the run-walk truth that fixed the clumpy v1 ring):
+#     straight faces chain with a ONE-TILE OVERLAP, not butt-jointed.
+#       E face: subs 5/6 alternate down the column at Δ(0,+4) — each piece
+#         covers 5 rows (CliffOffsetData (0,-4)..(0,0)), so consecutive
+#         pieces overlap one row. Observed: every E-run in A6/F5/G5/A8.
+#       S face: subs 7/8 chain east along the row at Δ(+4,0) — each covers
+#         cols x-4..x-1 (rows y-1,y), 1-col overlap via the anchor walk.
+#         Observed: F5 (47,35)→(51,35)→(55,35)→(59,35) = 8,8,8,7.
+#       Runs that jog use the elbows (3/4 at Δ(-3,+3)) and diagonals
+#         (1/2/15/16 at Δ(+6,+6)) — those are for escarpment mode, not the
+#         axis-aligned plateau ring.
+#   * CORNER ROLES (corpus role histogram, down-sides = face direction):
+#       SE (down=ES) → sub 7 anchored AT the corner: art covers the 4 cols
+#         west of it; the corner column's own face comes from the E-face
+#         bottom piece anchored on the same tile (vanilla multi-anchor).
+#       SW (down=SW/ESW) → sub 8 anchored AT the corner: its footprint
+#         (-4..-1,-1),(-4,0) lies WEST of the plateau on low ground — the
+#         vanilla run-end taper wrapping around the corner (F5 47,35).
+#       NE (down=NE) → sub 13 anchored AT the corner — doubles as the
+#         N-face chain start.
+#       NW: ZERO anchors corpus-wide (hidden behind the raised terrain in
+#         iso view) → deliberately no NW piece, exactly like vanilla.
+#   * BACK LIPS (mostly hidden in iso view, but vanilla places them):
+#       N face → sub 13 (covers x-2..x on the edge row, plus an off-edge
+#         wrap NW that hangs over the back lip), exact-tiled at stride 3.
+#       W face → sub 11 (covers y-3..y on the edge column plus an off-edge
+#         wrap), exact-tiled at stride 4.
+#   * BASE DEBRIS: measured object density on ground tiles within 2 of a
+#     cliff run vs the rest of the map — NO consistent enrichment (ratios
+#     0.3-2.3, sign flips per map). The rubble seen at vanilla cliff bases
+#     is BAKED INTO the cliff sprites. → no debris pass; don't invent one.
+#   * LAND: raised/ground tiles share the same texture families (TEX4/TEX3
+#     dominate both in A6) → no land retexture under or atop the plateau.
 #   * ENGINE CROSS-CHECK: the in-game editor's RaiseWorldLand
-#     (edit_sys.cpp:1363) WIPES all heights and recomputes them from these
-#     sprites' per-tile RAISE flags (CliffRaiseData, edit_sys.cpp:1265):
-#     east-face runs (subs 5/6) are all RAISE_LAND_START, the west-face
-#     run (sub 11) all RAISE_LAND_END, and the SW piece (sub 8) carries
-#     the row-end END — matching the corpus role assignment (heights rise
-#     between an END and a START in the engine's row scan). The C++ names
-#     no explicit role→sub table (only LAND_DROP_1..5 = subs 1/11/12/15/8),
-#     so the corpus histogram is the authority for role→sub.
-#   * NW CORNER: ZERO anchors corpus-wide (in iso view the N/W faces sit
-#     BEHIND the raised terrain) → deliberately no NW piece; the N and W
-#     runs reach the corner's neighboring cells, the corner cell itself
-#     carries no art — exactly like vanilla.
-#
-# Cliff pieces are MULTI-TILE sprites anchored at one gridno (corpus anchor
-# density on raised-edge tiles: ~6%), so edges get strided anchors, not one
-# per border tile. `cover` is the span of border cells the piece's art
-# occupies along its edge axis, relative to the anchor (from its
-# CliffOffsetData footprint); the walk in `_cliff_run_anchors` strides by
-# that span and clamps so art never overshoots off the plateau.
+#     (edit_sys.cpp:1363) recomputes heights from these sprites' RAISE
+#     flags (CliffRaiseData, edit_sys.cpp:1265): E-face subs 5/6 are
+#     RAISE_LAND_START, W-face sub 11 RAISE_LAND_END, SW sub 8 carries the
+#     row-end END — matching the role assignment.
 
 CLIFF_STRUCT_SLOT = 10   # FIRSTCLIFF      → structs layer
 CLIFF_HANG_SLOT = 9      # FIRSTCLIFFHANG  → objs layer (paired entry)
 
+# Per-sub multi-tile footprints, verbatim from CliffOffsetData
+# (Editor/edit_sys.cpp:1210). (dx, dy) offsets relative to the anchor.
+# The ring grammar's strides derive from these spans; tests assert against
+# them so a stride can never drift from the engine's footprint table.
+CLIFF_FOOTPRINT: dict[int, list[tuple[int, int]]] = {
+    1:  [(-6, -7), (-5, -7), (-6, -6), (-4, -6), (-3, -5), (-2, -4),
+         (-1, -3), (-1, -2), (-1, -1), (-1, 0), (0, 0)],
+    2:  [(-7, -6), (-7, -5), (-6, -4), (-5, -3), (-4, -2), (-3, -1),
+         (-2, -1), (-1, -1), (0, -1), (0, 0)],
+    3:  [(3, -3), (2, -2), (0, -1), (1, -1), (2, -1), (0, 0)],
+    4:  [(2, -3), (3, -3), (0, -2), (1, -2), (0, -1), (0, 0)],
+    5:  [(0, -4), (0, -3), (0, -2), (0, -1), (0, 0)],
+    6:  [(0, -4), (1, -3), (1, -2), (0, -1), (1, -1), (0, 0), (1, 0)],
+    7:  [(-4, -1), (-3, -1), (-2, -1), (-1, -1),
+         (-4, 0), (-3, 0), (-2, 0), (-1, 0)],
+    8:  [(-4, -1), (-3, -1), (-2, -1), (-1, -1), (-4, 0), (0, 0)],
+    9:  [(2, -3), (3, -3), (1, -2), (2, -2), (0, -1), (1, -1), (0, 0)],
+    10: [(-4, 0), (-3, 0), (-2, 0), (-1, 0), (0, 0)],
+    11: [(-2, -5), (-2, -4), (-1, -4), (0, -3), (0, -2), (0, -1), (0, 0)],
+    12: [(-2, -2), (-2, -1), (-1, 0), (0, 0)],
+    13: [(-5, -2), (-4, -2), (-3, -1), (-2, 0), (-1, 0), (0, 0)],
+    14: [(-2, -2), (-1, -2), (0, -1), (0, 0)],
+    15: [(-6, -7), (-5, -7), (-6, -6), (-4, -6), (-3, -5), (-2, -4),
+         (-1, -3), (-1, -2), (-1, -1), (-1, 0)],
+    16: [(-7, -6), (-7, -5), (-6, -4), (-5, -3), (-4, -2), (-3, -1),
+         (-2, -1), (-1, -1), (0, -1), (0, 0)],
+    17: [(0, -4), (0, -3), (0, -2), (0, -1), (0, 0)],
+}
+
 CLIFF_FACE_LUT: dict[str, dict] = {
     # subs: [(sub, corpus weight), …] — seeded weighted pick per anchor.
-    # cover: (off_lo, off_hi) border cells covered along the edge axis.
-    "edge_E":    {"subs": [(6, 1811), (5, 1663)], "cover": (-4, 0)},
-    "edge_W":    {"subs": [(11, 1284)],           "cover": (-3, 0)},
-    "edge_S":    {"subs": [(7, 919)],             "cover": (-4, -1)},
-    "edge_N":    {"subs": [(13, 834)],            "cover": (-2, 0)},
+    # stride: anchor-to-anchor distance along the edge axis, from the
+    #   vanilla run-walk (pieces span 5 → 1-tile overlap per joint).
+    "edge_E":    {"subs": [(6, 1811), (5, 1663)], "stride": 4},
+    "edge_S":    {"subs": [(7, 919), (8, 609)],   "stride": 4},
     "corner_SE": {"subs": [(7, 1682)]},
     "corner_SW": {"subs": [(8, 1192)]},
-    "corner_NE": {"subs": [(13, 479)]},
-    # corner_NW: intentionally absent (see provenance above).
+    # edge_N / edge_W / corner_NE / corner_NW: intentionally ABSENT.
+    # Measured on A6/F5/G5/A8: vanilla leaves down=N boundary tiles
+    # 76-98% bare and down=W tiles 62-84% bare (vs E faces ~85-89%
+    # covered) — the N/W sides face away from the iso camera. The
+    # corpus sub-11/13 entries live in diagonal zigzag SEQUENCES
+    # (15→11→12, 16→13→14), not straight runs; chained straight they
+    # render as disjoint pillars/claws (verified on iter_1b render).
 }
 
 
-def _cliff_run_anchors(lo: int, hi: int, cover: tuple[int, int]) -> list[int]:
-    """Anchor coordinates along one edge whose piece art (covering
-    [a+off_lo, a+off_hi] border cells) tiles the segment [lo, hi]
-    gap-free WITHOUT overshooting either end. Walks from the hi end in
-    piece-span strides; the final anchor is clamped (pieces may overlap —
-    vanilla overlaps too). Returns [] when the segment is shorter than
-    one piece (vanilla has no cliff art that small)."""
-    off_lo, off_hi = cover
-    a_max = hi - off_hi          # largest anchor that doesn't overshoot hi
-    a_min = lo - off_lo          # smallest anchor that doesn't overshoot lo
-    if a_max < a_min:
-        return []
-    span = off_hi - off_lo + 1
-    anchors: list[int] = []
-    a = a_max
-    while True:
-        a = max(a, a_min)
-        anchors.append(a)
-        if a + off_lo <= lo:
-            break
-        a -= span
-    return anchors
+def _face_chain(hi: int, cap: int) -> list[int]:
+    """Anchor positions for one straight face run, walking from the
+    corner end `hi` toward the far end: first anchor AT `hi`, last AT
+    `cap` (flush — art never overshoots the plateau), joints as close
+    to the vanilla stride 4 as possible and NEVER wider. Every joint in
+    every vanilla run is Δ4 (pieces span 5 → 1-tile overlap): the piece
+    art has ragged ends DESIGNED to tuck under the neighbor, so a Δ5
+    butt joint reads as a visible crack (seen on iteration 2). When the
+    span doesn't divide by 4 the slack is spread evenly across joints
+    (Δ3/Δ2 overdraw is harmless — vanilla multi-anchors tiles too)."""
+    if cap >= hi:
+        return [hi]
+    span = hi - cap
+    njoints = -(-span // 4)          # ceil — max Δ4 per joint
+    base, extra = divmod(span, njoints)
+    ys, y = [hi], hi
+    for i in range(njoints):
+        y -= base + (1 if i < extra else 0)
+        ys.append(y)
+    return ys
 
 
 class BankGenerator(Generator):
@@ -1730,11 +1767,13 @@ class BankGenerator(Generator):
     (provenance comment above it): each anchor is the vanilla dual entry
     — structs (slot 10 FIRSTCLIFF) + objs (slot 9 FIRSTCLIFFHANG), same
     sub, same tile, op "add" — placed ON the raised border tile. Cliff
-    pieces are multi-tile sprites, so edge anchors are STRIDED by the
-    piece's span (`_cliff_run_anchors`), not stamped per tile; the NW
+    pieces are multi-tile sprites (CLIFF_FOOTPRINT) CHAINED the way the
+    vanilla run-walks show (see `_iter_face_anchors`): E/S faces overlap
+    one tile per joint, corners anchor AT the corner tiles (SE sub 7,
+    SW sub 8 taper, NE sub 13), N/W back lips exact-tile, and the NW
     corner gets no piece (vanilla places none — it's hidden behind the
-    raised terrain in iso view). Edges shorter than one piece get no run
-    art (vanilla has no cliff art that small). `place_cliff_faces=false`
+    raised terrain in iso view). Rects under 5×5 get no face art (smaller
+    than the smallest vanilla cliff piece). `place_cliff_faces=false`
     restores the old heights-only behavior; `levels=0` (flatten) never
     emits faces.
 
@@ -1781,37 +1820,44 @@ class BankGenerator(Generator):
         self, x1: int, y1: int, x2: int, y2: int, rng: random.Random,
     ) -> Iterator[tuple[int, int, int]]:
         """Yield (x, y, sub) cliff-face anchors around the border of the
-        raised rect, per CLIFF_FACE_LUT. Corners first, then the four
-        edge runs (strided per piece span, clamped on-rect). A run
-        anchor that lands on a corner-anchor tile is skipped — its
-        coverage duplicates the corner piece's."""
+        raised rect — the vanilla CHAIN grammar from the A6/F5/G5/A8
+        run-walks (see CLIFF_FACE_LUT provenance):
+
+          E face: bottom piece anchored AT the SE corner, chained north
+            via `_face_chain` (stride 4 = 1-row overlap, top piece flush
+            at y1 — pieces cover rows y-4..y).
+          S face: sub 7 anchored AT the SE corner (covers the 4 cols west;
+            the corner column's face comes from the E-face bottom piece on
+            the same tile — vanilla multi-anchors gridnos), chained west
+            via `_face_chain`; sub 8 anchored AT the SW corner wraps the
+            face onto the low ground west (the vanilla run-end taper) and
+            covers col x1.
+          N + W edges and both their corners: NOTHING — vanilla leaves the
+            away-facing edges bare (see CLIFF_FACE_LUT provenance).
+        """
         def pick(role: str) -> int:
             pool = CLIFF_FACE_LUT[role]["subs"]
             return rng.choices([s for s, _ in pool],
                                weights=[w for _, w in pool], k=1)[0]
 
-        corner_tiles = set()
-        for role, (cx, cy) in (("corner_SE", (x2, y2)),
-                               ("corner_SW", (x1, y2)),
-                               ("corner_NE", (x2, y1))):
-            corner_tiles.add((cx, cy))
-            yield cx, cy, pick(role)
+        # ── E face (x2 column, the visually dominant right side) ──
+        # Pieces cover rows y-4..y: corner anchor y2, flush cap y1+4.
+        # (A sub-14 NE top cap per the vanilla 16→13→14 sequence was
+        # A/B-rendered on 2026-06-11 and looked WORSE — it notches the
+        # face top; that piece only blends on a diagonal step. The flush
+        # 5/6 ending matches how vanilla straight runs terminate.)
+        for y in _face_chain(y2, y1 + 4):
+            yield x2, y, pick("edge_E")
 
-        # Open edge segments (border ring minus the corner cells).
-        # (role, axis lo, axis hi, anchor → (x, y))
-        edges = (
-            ("edge_E", y1 + 1, y2 - 1, lambda a: (x2, a)),
-            ("edge_W", y1 + 1, y2 - 1, lambda a: (x1, a)),
-            ("edge_S", x1 + 1, x2 - 1, lambda a: (a, y2)),
-            ("edge_N", x1 + 1, x2 - 1, lambda a: (a, y1)),
-        )
-        for role, lo, hi, to_xy in edges:
-            cover = CLIFF_FACE_LUT[role]["cover"]
-            for a in _cliff_run_anchors(lo, hi, cover):
-                xy = to_xy(a)
-                if xy in corner_tiles:
-                    continue
-                yield xy[0], xy[1], pick(role)
+        # ── S face (y2 row, the visually dominant left side) ──
+        # Pieces cover cols x-4..x-1 on rows y2-1..y2: corner anchor x2
+        # (forced sub 7 per the corpus SE role), flush cap x1+4 (whose
+        # piece covers x1..x1+3, reaching the corner column — vanilla
+        # F5 run 3 anchors exactly so: sub8@47 corner, next piece @51).
+        for x in _face_chain(x2, min(x1 + 4, x2)):
+            yield x, y2, 7 if x == x2 else pick("edge_S")
+        # SW corner taper (also the only piece covering col x1's face).
+        yield x1, y2, 8
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
         levels = max(0, min(3, int(params.get("levels", 1))))
@@ -1841,10 +1887,11 @@ class BankGenerator(Generator):
         total = len(coords)
 
         # Cliff-face anchors (computed up front for the honest total).
-        # levels=0 is a FLATTEN — no faces; a 1-wide/1-tall rect has no
-        # well-defined edge roles (vanilla has no cliff art that small).
+        # levels=0 is a FLATTEN — no faces; the smallest vanilla face
+        # pieces span 5 tiles (CLIFF_FOOTPRINT subs 5/6/7/8), so a rect
+        # under 5×5 can't carry a coherent ring — no art, like vanilla.
         anchors: list[tuple[int, int, int]] = []
-        if place_faces and levels > 0 and x2 > x1 and y2 > y1:
+        if place_faces and levels > 0 and x2 - x1 >= 4 and y2 - y1 >= 4:
             anchors = [
                 (x, y, sub)
                 for (x, y, sub) in self._iter_face_anchors(x1, y1, x2, y2, rng)
@@ -1881,7 +1928,8 @@ class BankGenerator(Generator):
         elif not place_faces:
             face_note = "no cliff faces (disabled)."
         else:
-            face_note = "no cliff faces (rect too small for cliff art)."
+            face_note = ("no cliff faces (rect under 5×5 — smaller than "
+                         "the smallest vanilla cliff piece).")
         yield {"phase": "bank", "status": "done",
                "label": (
                    f"Plateau done — {len(coords)} tiles at height {target}; "

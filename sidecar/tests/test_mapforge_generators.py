@@ -409,10 +409,10 @@ def test_bank_uniform_plateau_in_80_steps():
     assert {(o["x"], o["y"]) for o in heights} == {
         (x, y) for x in range(2, 7) for y in range(2, 7)
     }
-    # R2: the border now carries cliff-face art. A 5×5 rect fits no E/W/S
-    # runs (shorter than one piece) — 3 corners + 1 N-run anchor, each a
-    # structs+objs dual entry.
-    assert len(faces) == 2 * 4
+    # R3: the border carries cliff-face art on the two camera-facing
+    # sides. A 5×5 rect = one E piece (flush, single), one S sub-7 at the
+    # SE corner, one SW sub-8 taper — each a structs+objs dual entry.
+    assert len(faces) == 2 * 3
 
 
 def test_bank_default_is_one_cliff_level():
@@ -462,60 +462,113 @@ def test_bank_phase_start_has_total():
     assert n_ops > 5 * 8                 # heights plus at least the corners
 
 
-# ── R2: cliff-face sprites around the plateau border ────────────────────
+# ── R3: cliff-face sprites — the vanilla chain grammar ──────────────────
+#
+# Spacing/chaining truth from the A6/F5/G5/A8 run-walks
+# (scratch/clifftest/analyze_runs.py): straight faces chain at stride 4
+# with a 1-tile overlap per joint (pieces span 5 — a Δ5 butt joint reads
+# as a crack); corners anchor AT the corner tiles (SE sub 7 + the E-face
+# bottom piece on the same gridno, SW sub 8 taper); N/W back edges and
+# both their corners get NOTHING.
 
 
-# Known 12×10 rect — anchor positions hand-derived from CLIFF_FACE_LUT's
-# covers + the `_cliff_run_anchors` walk (see generators.py provenance).
+# Known 12×10 rect — anchors hand-derived from `_face_chain`:
+#   E face (x=13): _face_chain(11, 6)  → y ∈ [11, 8, 6]   (Δ3, Δ2)
+#   S face (y=11): _face_chain(13, 6)  → x ∈ [13, 9, 6]   (Δ4, Δ3)
+#   + SW sub-8 taper at (2, 11). The SE corner tile (13,11) carries TWO
+#   anchors (E bottom piece + S sub 7) — vanilla multi-anchors gridnos.
 _R2_RECT = {"x1": 2, "y1": 2, "x2": 13, "y2": 11, "levels": 1}
-_R2_EXPECTED = {
-    (13, 11): "corner_SE",   # sub 7
-    (2, 11):  "corner_SW",   # sub 8
-    (13, 2):  "corner_NE",   # sub 13
-    (13, 10): "edge_E", (13, 7): "edge_E",
-    (2, 10):  "edge_W", (2, 6): "edge_W",
-    (9, 11):  "edge_S", (7, 11): "edge_S",   # a=13 dropped (SE corner tile)
-    (12, 2):  "edge_N", (9, 2): "edge_N", (6, 2): "edge_N", (5, 2): "edge_N",
-}
+_R2_E_ANCHORS = [(13, 11), (13, 8), (13, 6)]
+_R2_S_ANCHORS = [(13, 11), (9, 11), (6, 11)]
+_R2_SW = (2, 11)
 
 
-def test_bank_faces_exactly_on_border_ring():
-    """Every cliff-face op sits on the border ring, at exactly the
-    hand-derived anchor positions, as a structs(10)+objs(9) dual entry
-    with the same sub. The NW corner (2,2) gets NO art (vanilla places
-    zero NW anchors corpus-wide)."""
+def test_bank_faces_exactly_on_visible_edges():
+    """Every cliff-face op sits on the S/E border (the camera-facing
+    sides), at exactly the hand-derived chain anchors, as a
+    structs(10)+objs(9) dual entry with the same sub. The N and W edges
+    and the NW corner get NO art (vanilla leaves the away-facing edges
+    of interior plateaus to diagonal escarpments; its only long straight
+    N edge, A6 row 38, is bare)."""
     ctx = _bank_ctx(40, 40)
     _heights, faces = _bank_split(ctx, dict(_R2_RECT))
-    assert len(faces) == 2 * len(_R2_EXPECTED)
+    expected_tiles = set(_R2_E_ANCHORS) | set(_R2_S_ANCHORS) | {_R2_SW}
+    # 3 E + 3 S + 1 SW anchors, each a structs+objs pair.
+    assert len(faces) == 2 * 7
 
     by_tile: dict = {}
     for o in faces:
-        by_tile.setdefault((o["x"], o["y"]), {})[o["layer"]] = o
-    assert set(by_tile) == set(_R2_EXPECTED)
+        by_tile.setdefault((o["x"], o["y"]), []).append(o)
+    assert set(by_tile) == expected_tiles
+    for (x, y) in by_tile:
+        assert x == 13 or y == 11        # S/E borders only
     assert (2, 2) not in by_tile         # NW corner stays bare
 
-    for (x, y), per_layer in by_tile.items():
-        # On the ring…
-        assert x in (2, 13) or y in (2, 11)
-        # …and the vanilla dual entry: same sub on both layers.
+    for (x, y), ops in by_tile.items():
+        per_layer: dict = {}
+        for o in ops:
+            per_layer.setdefault(o["layer"], []).append(o)
+        # The vanilla dual entry: every struct has its hang, same sub.
         assert set(per_layer) == {"structs", "objs"}
-        assert per_layer["structs"]["slot"] == 10   # FIRSTCLIFF
-        assert per_layer["objs"]["slot"] == 9       # FIRSTCLIFFHANG
-        assert per_layer["structs"]["sub"] == per_layer["objs"]["sub"]
+        s_subs = sorted(o["sub"] for o in per_layer["structs"])
+        o_subs = sorted(o["sub"] for o in per_layer["objs"])
+        assert s_subs == o_subs
+        assert all(o["slot"] == 10 for o in per_layer["structs"])
+        assert all(o["slot"] == 9 for o in per_layer["objs"])
 
 
-def test_bank_corners_get_corner_subs():
+def test_bank_chain_spacing_and_corner_subs():
+    """The new grammar: E/S chains never butt-joint (every joint Δ≤4 =
+    overlap, per the vanilla run-walks), chains land flush at both ends,
+    corner subs are forced (SE 7, SW 8), edge picks stay in pool."""
     from mercwizard_core.mapforge.generators import CLIFF_FACE_LUT
     ctx = _bank_ctx(40, 40)
     _heights, faces = _bank_split(ctx, dict(_R2_RECT))
-    subs = {(o["x"], o["y"]): o["sub"] for o in faces if o["layer"] == "structs"}
-    assert subs[(13, 11)] == 7           # corner_SE
-    assert subs[(2, 11)] == 8            # corner_SW
-    assert subs[(13, 2)] == 13           # corner_NE
-    # Edge anchors draw from their LUT pools.
-    for (x, y), role in _R2_EXPECTED.items():
-        pool = {s for s, _ in CLIFF_FACE_LUT[role]["subs"]}
-        assert subs[(x, y)] in pool, (x, y, role)
+    subs: dict = {}
+    for o in faces:
+        if o["layer"] == "structs":
+            subs.setdefault((o["x"], o["y"]), set()).add(o["sub"])
+
+    e_pool = {s for s, _ in CLIFF_FACE_LUT["edge_E"]["subs"]}
+    s_pool = {s for s, _ in CLIFF_FACE_LUT["edge_S"]["subs"]}
+
+    # E chain: exact anchors, Δ≤4 joints, subs from the E pool.
+    e_ys = sorted(y for (x, y) in subs if x == 13 and (13, y) in subs)
+    assert [(13, y) for y in sorted(e_ys, reverse=True)] == _R2_E_ANCHORS
+    for a, b in zip(e_ys, e_ys[1:]):
+        assert 1 <= b - a <= 4           # never a Δ5 butt joint
+    for y in e_ys:
+        if (13, y) == (13, 11):
+            continue                     # corner tile checked below
+        assert subs[(13, y)] <= e_pool
+
+    # S chain: sub 7 forced at the SE corner; mid anchors from the pool.
+    assert 7 in subs[(13, 11)]           # corner_SE
+    assert subs[(13, 11)] - {7} <= e_pool  # plus the E-face bottom piece
+    assert subs[(9, 11)] <= s_pool and subs[(6, 11)] <= s_pool
+    assert subs[_R2_SW] == {8}           # corner_SW taper
+
+
+def test_bank_face_chain_covers_flush_no_butt_joints():
+    """_face_chain invariants against the engine footprint table: pieces
+    span 5 cells (CLIFF_FOOTPRINT subs 5/6: offsets (0,-4)..(0,0)); the
+    chain must cover [cap-4, hi] completely, start AT hi, end AT cap,
+    and never leave a Δ5 butt joint."""
+    from mercwizard_core.mapforge.generators import (
+        CLIFF_FOOTPRINT, _face_chain,
+    )
+    span_lo = min(dy for _, dy in CLIFF_FOOTPRINT[5])
+    assert span_lo == -4                 # piece covers a-4..a
+    for hi in (20,):
+        for cap in range(8, 21):
+            ys = _face_chain(hi, cap)
+            assert ys[0] == hi and ys[-1] == min(cap, hi)
+            covered = set()
+            for a in ys:
+                covered |= set(range(a - 4, a + 1))
+            assert covered >= set(range(cap - 4, hi + 1))
+            for a, b in zip(ys, ys[1:]):
+                assert 1 <= a - b <= 4   # vanilla stride, never butt
 
 
 def test_bank_levels_zero_emits_no_faces():
