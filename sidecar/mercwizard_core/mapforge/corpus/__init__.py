@@ -177,6 +177,59 @@ def building_doors(table: Optional[dict]) -> dict:
     return table.get("doors", {}) or {}
 
 
+def list_building_cells() -> list[tuple[str, str]]:
+    """Every (source, biome) cell that carries its OWN non-empty building
+    table — no combined fallback, so each cell appears exactly once.
+    Sorted (source, biome). Drives the /buildings catalog endpoint."""
+    out: list[tuple[str, str]] = []
+    for source, biomes in (_data().get("buildings") or {}).items():
+        if not isinstance(biomes, dict):
+            continue
+        for biome, tbl in biomes.items():
+            if isinstance(tbl, dict) and tbl.get("positions"):
+                out.append((str(source), str(biome)))
+    return sorted(out)
+
+
+def building_dominant_sub(table: Optional[dict], slot: int,
+                          kind: str = "structs") -> Optional[int]:
+    """The most-weighted sub for `slot` aggregated across all of a building
+    table's positions. Used for catalog thumbnails — the single subframe
+    that best represents what this cell's walls/roofs look like. None when
+    the slot has no data."""
+    if not table:
+        return None
+    agg: dict[int, int] = {}
+    for pos_data in table.get("positions", {}).values():
+        for s, w in (pos_data.get(kind, {}).get(str(slot)) or {}).items():
+            try:
+                si, wi = int(s), int(w)
+            except (TypeError, ValueError):
+                continue
+            if si >= 1 and wi > 0:
+                agg[si] = agg.get(si, 0) + wi
+    if not agg:
+        return None
+    return max(agg, key=lambda k: agg[k])
+
+
+def building_size_range(table: Optional[dict]) -> Optional[dict]:
+    """Min/max footprint from a building table's empirical size histograms
+    (`size_w`/`size_h` = {size: count}). None when either histogram is
+    absent/empty — the caller falls back to its own defaults."""
+    if not table:
+        return None
+    try:
+        ws = [int(k) for k in (table.get("size_w") or {})]
+        hs = [int(k) for k in (table.get("size_h") or {})]
+    except (TypeError, ValueError):
+        return None
+    if not ws or not hs:
+        return None
+    return {"min_w": min(ws), "max_w": max(ws),
+            "min_h": min(hs), "max_h": max(hs)}
+
+
 # ── coverage ─────────────────────────────────────────────────────────────────
 
 def coverage(source: Optional[str] = None, biome: Optional[str] = None) -> Any:

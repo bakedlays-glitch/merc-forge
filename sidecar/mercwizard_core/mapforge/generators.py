@@ -1479,8 +1479,12 @@ class BuildingStampGenerator(Generator):
               description="Corpus source: stock/redux/combined — drives wall/roof/door slot + subframe per biome."),
         Param(name="biome", type="str", default="urban",
               description=f"Biome ({_BIOME_CHOICES}). Building patterns differ a lot by biome."),
-        Param(name="room_id", type="int", default=1,
-              description="Room id assigned to interior tiles", min=0, max=255),
+        Param(name="room_id", type="int", default=0,
+              description=("Room id assigned to interior tiles. 0 = AUTO "
+                           "(assign the next unused id — max existing + 1). "
+                           "Room ids are engine bookkeeping; users should "
+                           "never have to pick one by hand."),
+              min=0, max=255),
         Param(name="seed", type="int", default=42,
               description="RNG seed — same seed + params = same building"),
         _PLAYABLE_PARAM,
@@ -1501,7 +1505,18 @@ class BuildingStampGenerator(Generator):
 
         source = str(params.get("corpus_source", "combined") or "combined").strip().lower()
         biome = str(params.get("biome", "urban") or "urban").strip().lower()
-        room_id = int(params.get("room_id", 1))
+        room_id = int(params.get("room_id", 0))
+        if room_id == 0:
+            # AUTO sentinel: next unused room id = max existing + 1, read
+            # from the live parsed grid. Deterministic for a given session
+            # state, so a dry-run ghost and the Apply that follows agree;
+            # each subsequent stamp (after the previous applied) gets a
+            # fresh id — repeated placement clicks never merge rooms.
+            # Bare/test contexts without a rooms grid start at 1. Clamped
+            # to the engine's 255 cap (a 255-room sector is already wrong).
+            rooms = ctx.parsed.get("rooms") if isinstance(ctx.parsed, dict) else None
+            highest = max(rooms) if rooms else 0
+            room_id = min(int(highest) + 1, 255)
         rng = random.Random(int(params.get("seed", 42)))
 
         try:

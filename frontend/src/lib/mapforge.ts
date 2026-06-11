@@ -847,6 +847,34 @@ export function getCorpusCoverage(): Promise<CorpusCoverage> {
   return jsonGet<CorpusCoverage>("/mapforge/corpus/coverage");
 }
 
+/** One pickable building kind for the StarCraft-style placement flow — a
+ *  (corpus_source, biome) cell with building data. wall/roof (slot, sub)
+ *  are the dominant pieces (thumbnail representatives); the size range is
+ *  empirical from the corpus. */
+export interface BuildingCatalogEntry {
+  id: string;
+  label: string;
+  corpus_source: string;
+  biome: string;
+  wall_slot: number;
+  wall_sub: number;
+  roof_slot: number;
+  roof_sub: number;
+  has_door: boolean;
+  n_buildings: number;
+  min_w: number;
+  max_w: number;
+  min_h: number;
+  max_h: number;
+  default_w: number;
+  default_h: number;
+}
+
+/** List the building catalog (empty when the corpus isn't shipped). */
+export function listBuildings(): Promise<BuildingCatalogEntry[]> {
+  return jsonGet<BuildingCatalogEntry[]>("/mapforge/buildings");
+}
+
 /**
  * Run a generator against a session, streaming each emitted op (+ each
  * phase event) to `onEvent` as it arrives.

@@ -180,6 +180,96 @@ def test_building_stamp_missing_biome_errors_cleanly(synth_corpus):
     assert ops and ops[-1].get("phase") == "error"
 
 
+# ── auto room id (room_id=0 sentinel) ────────────────────────────────────────
+
+def _room_ids(ops):
+    return {o["room_id"] for o in ops if o.get("op") == "set_room"}
+
+
+def test_building_stamp_auto_room_assigns_max_plus_one(synth_corpus):
+    """room_id=0 = AUTO: the backend assigns max(existing rooms) + 1."""
+    rooms = [0] * (30 * 30)
+    rooms[123] = 7   # highest existing room id in the sector
+    rooms[200] = 3
+    ctx = GeneratorContext(rows=30, cols=30, parsed={"rooms": rooms})
+    ops = list(G.REGISTRY["building"].iter_ops(ctx, {
+        "x": 5, "y": 5, "width": 6, "height": 6,
+        "corpus_source": "stock", "biome": "urban", "room_id": 0, "seed": 2,
+        "clip_to_playable": False,
+    }))
+    assert _room_ids(ops) == {8}
+
+
+def test_building_stamp_auto_room_is_the_default(synth_corpus):
+    """No room_id param at all → AUTO; empty/missing rooms grid starts at 1."""
+    assert next(p for p in G.REGISTRY["building"].params
+                if p.name == "room_id").default == 0
+    ops = list(G.REGISTRY["building"].iter_ops(
+        GeneratorContext(rows=30, cols=30, parsed={}), {
+            "x": 5, "y": 5, "width": 6, "height": 6,
+            "corpus_source": "stock", "biome": "urban", "seed": 2,
+            "clip_to_playable": False,
+        }))
+    assert _room_ids(ops) == {1}
+
+
+def test_building_stamp_explicit_room_id_respected(synth_corpus):
+    """A non-zero room_id is used verbatim (no auto-assignment)."""
+    rooms = [0] * (30 * 30)
+    rooms[0] = 9
+    ctx = GeneratorContext(rows=30, cols=30, parsed={"rooms": rooms})
+    ops = list(G.REGISTRY["building"].iter_ops(ctx, {
+        "x": 5, "y": 5, "width": 6, "height": 6,
+        "corpus_source": "stock", "biome": "urban", "room_id": 5, "seed": 2,
+        "clip_to_playable": False,
+    }))
+    assert _room_ids(ops) == {5}
+
+
+def test_building_stamp_auto_room_clamps_at_255(synth_corpus):
+    """Engine room ids are a byte — AUTO never overflows past 255."""
+    rooms = [0] * (30 * 30)
+    rooms[0] = 255
+    ctx = GeneratorContext(rows=30, cols=30, parsed={"rooms": rooms})
+    ops = list(G.REGISTRY["building"].iter_ops(ctx, {
+        "x": 5, "y": 5, "width": 6, "height": 6,
+        "corpus_source": "stock", "biome": "urban", "room_id": 0, "seed": 2,
+        "clip_to_playable": False,
+    }))
+    assert _room_ids(ops) == {255}
+
+
+# ── /buildings catalog endpoint ──────────────────────────────────────────────
+
+def test_buildings_catalog_lists_cells_with_building_data(synth_corpus):
+    from routes.mapforge import list_buildings
+    entries = list_buildings()
+    # Only stock:urban has a non-empty positions table in SYNTH.
+    assert [e.id for e in entries] == ["stock:urban"]
+    e = entries[0]
+    assert e.label == "Urban — Stock corpus"
+    assert e.corpus_source == "stock" and e.biome == "urban"
+    assert e.wall_slot == 36 and e.roof_slot == 66
+    # Dominant subs: wall 13 (SE weight 9 > N's 10@7), roof 11 (Interior 20).
+    assert e.wall_sub == 13 and e.roof_sub == 11
+    assert e.has_door is True
+    assert e.n_buildings == 5
+    # size_w={'7':3}, size_h={'6':2} → degenerate min=max ranges.
+    assert (e.min_w, e.max_w, e.min_h, e.max_h) == (7, 7, 6, 6)
+    # defaults clamp into the empirical range
+    assert (e.default_w, e.default_h) == (7, 6)
+
+
+def test_buildings_catalog_empty_without_corpus(synth_corpus, monkeypatch, tmp_path):
+    from routes.mapforge import list_buildings
+    monkeypatch.setattr(gc, "_CORPUS_PATH", tmp_path / "nope.json")
+    gc._data.cache_clear()
+    try:
+        assert list_buildings() == []
+    finally:
+        gc._data.cache_clear()
+
+
 # ── integration: the real shipped corpus ────────────────────────────────────
 
 def test_shipped_corpus_available_and_resolves():

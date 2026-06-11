@@ -2992,6 +2992,83 @@ def corpus_coverage():
     )
 
 
+class BuildingCatalogEntry(BaseModel):
+    """One pickable building 'kind' for the StarCraft-style placement UI —
+    a (corpus_source, biome) cell of the distilled corpus with building
+    data. The frontend renders the wall/roof (slot, sub) pair as a card
+    thumbnail; width/height are user-chosen within the suggested range and
+    everything else (per-position subframes, door edge) stays corpus-driven
+    inside BuildingStampGenerator."""
+    id: str                  # "source:biome" — stable key
+    label: str               # humanized, e.g. "Urban — Combined corpus"
+    corpus_source: str
+    biome: str
+    wall_slot: int
+    wall_sub: int            # dominant wall sub — thumbnail representative
+    roof_slot: int
+    roof_sub: int            # dominant roof sub — thumbnail representative
+    has_door: bool
+    n_buildings: int         # how many real buildings back this cell
+    min_w: int
+    max_w: int
+    min_h: int
+    max_h: int
+    default_w: int
+    default_h: int
+
+
+_BUILDING_SOURCE_LABEL = {
+    "stock": "Stock corpus",
+    "redux": "Redux corpus",
+    "combined": "Combined corpus",
+}
+
+# Fallback footprint range when a cell ships no size histograms.
+_BUILDING_FALLBACK_RANGE = {"min_w": 4, "max_w": 12, "min_h": 4, "max_h": 10}
+
+
+@router.get("/buildings", response_model=list[BuildingCatalogEntry])
+def list_buildings():
+    """Catalog every (corpus_source, biome) cell with building data — the
+    'building kinds' menu for the visual placement flow. Cheap: reads the
+    cached corpus JSON only (no STI decoding; the frontend renders
+    thumbnails from its own atlas). Empty list when the corpus isn't
+    shipped — the UI hides the section."""
+    from mercwizard_core.mapforge import corpus as gc
+
+    out: list[BuildingCatalogEntry] = []
+    for source, biome in gc.list_building_cells():
+        table = gc.get_building_table(source, biome)
+        if not table:
+            continue
+        wall_slot = gc.building_dominant_slot(table, 36, 39) or 36
+        roof_slot = gc.building_dominant_slot(table, 64, 67, kind="roofs") or 64
+        sizes = gc.building_size_range(table) or _BUILDING_FALLBACK_RANGE
+        # BuildingStampGenerator needs ≥3×3; its width/height params cap at 40.
+        min_w = max(3, int(sizes["min_w"]))
+        max_w = min(40, max(min_w, int(sizes["max_w"])))
+        min_h = max(3, int(sizes["min_h"]))
+        max_h = min(40, max(min_h, int(sizes["max_h"])))
+        out.append(BuildingCatalogEntry(
+            id=f"{source}:{biome}",
+            label=f"{biome.title()} — {_BUILDING_SOURCE_LABEL.get(source, source.title())}",
+            corpus_source=source,
+            biome=biome,
+            wall_slot=wall_slot,
+            wall_sub=gc.building_dominant_sub(table, wall_slot) or 1,
+            roof_slot=roof_slot,
+            roof_sub=gc.building_dominant_sub(table, roof_slot, kind="roofs") or 1,
+            has_door=bool(gc.building_doors(table).get("by_slot")),
+            n_buildings=int(table.get("n_buildings") or 0),
+            min_w=min_w, max_w=max_w, min_h=min_h, max_h=max_h,
+            # 7×6 is the generator's long-standing default footprint;
+            # clamp into the cell's empirical range.
+            default_w=min(max(7, min_w), max_w),
+            default_h=min(max(6, min_h), max_h),
+        ))
+    return out
+
+
 @router.post("/sessions/{session_id}/run-generator")
 def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBody = RunGeneratorBody()):
     """Stream a generator's op output into the session.

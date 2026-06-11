@@ -922,6 +922,40 @@ function MapForgeSectorInner() {
   // so it can't pin the inspector).
   const pickJustAnchoredRef = useRef(false);
   const pickSuppressClickRef = useRef(false);
+  // ─── StarCraft-style building placement mode ────────────────────────
+  // Armed by the Generate panel's "Place building" flow. While set, the
+  // canvas shows the building's w×h FOOTPRINT rect at the cursor (the
+  // hovered tile = footprint top-left); LEFT CLICK calls run(x, y) —
+  // the panel fires the building generator anchored there — and STAYS
+  // armed so repeated clicks stamp more buildings (each gets a fresh
+  // auto room id from the backend's room_id=0 sentinel). ESC or a tool
+  // change exits. `label` feeds the canvas banner. The full-building
+  // live ghost (dry-run at every hovered tile) is the v2 upgrade path;
+  // the footprint rect + instant real stamp is the v1 StarCraft feel.
+  const [placingBuilding, setPlacingBuilding] = useState<{
+    w: number;
+    h: number;
+    label: string;
+    run: (x: number, y: number) => void;
+  } | null>(null);
+  // Exit placement mode when the user switches tools, sectors, tilesets
+  // or the sidecar restarts — a stale run() closure must never fire
+  // against a different session.
+  useEffect(() => {
+    setPlacingBuilding(null);
+  }, [tool, datPath, tilesetParam, sessionRestartEpoch]);
+  // ESC exits placement mode (mirrors the region picker's ESC effect).
+  useEffect(() => {
+    if (!placingBuilding) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setPlacingBuilding(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [placingBuilding]);
   // Bumped on every local mutation that should re-paint the canvas.
   // The render effect depends on this so React schedules a paint after
   // each edit. (Mutating `renderer.parsed` doesn't itself trigger React.)
@@ -2096,6 +2130,16 @@ function MapForgeSectorInner() {
       }
       return;
     }
+    // Building placement mode (StarCraft-style): left click stamps the
+    // building anchored at the hovered tile — the same top-left the
+    // footprint ghost shows — and STAYS in placement mode so repeated
+    // clicks stamp more buildings. The panel's run() guards re-entrancy
+    // while a stamp is in flight.
+    if (placingBuilding) {
+      const tile = hovered ?? pixelToTile(e);
+      if (tile) placingBuilding.run(tile.x, tile.y);
+      return;
+    }
     // A generator ghost is being previewed — painting now would tangle
     // user edits with ghost state that's about to be reverted/applied.
     if (ghostActive) return;
@@ -2183,6 +2227,9 @@ function MapForgeSectorInner() {
       }
       return;
     }
+    // Building placement: the mousedown already stamped — the click
+    // that follows must not pin the inspector.
+    if (placingBuilding) return;
     // Ghost preview live — block tool actions (see onCanvasMouseDown).
     if (ghostActive) return;
     // Inspect mode only. Pencil + shape act via mousedown/move/up above;
@@ -3086,6 +3133,19 @@ function MapForgeSectorInner() {
         (t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows,
       );
     }
+    // Building placement (StarCraft-style): the building's w×h footprint
+    // rect anchored top-left at the hovered tile — exactly where a click
+    // will stamp it. Mirrors the paste-mode ghost-at-cursor mechanics.
+    if (placingBuilding && hovered) {
+      return shapeTiles(
+        "rect-fill",
+        { x: hovered.x, y: hovered.y },
+        {
+          x: hovered.x + placingBuilding.w - 1,
+          y: hovered.y + placingBuilding.h - 1,
+        },
+      ).filter((t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows);
+    }
     // Select tool: marquee (active drag, else the committed rect) and,
     // in paste mode, a ghost of the clipboard footprint at the cursor.
     if (tool === "select") {
@@ -3124,7 +3184,7 @@ function MapForgeSectorInner() {
     );
   }, [tool, shapeAnchor, shapeCursor, shapeKind, info.data,
       selectAnchor, selectCursor, selectRect, pasteMode, clipboard, hovered,
-      pickingRect]);
+      pickingRect, placingBuilding]);
 
   // Dimensions readout for the status bar while a shape drag is active.
   // Count is computed analytically (not from previewTiles, which is
@@ -3137,6 +3197,15 @@ function MapForgeSectorInner() {
       const w = Math.abs(hovered.x - pickingRect.corner1.x) + 1;
       const h = Math.abs(hovered.y - pickingRect.corner1.y) + 1;
       return { w, h, count: w * h, label: "Region" };
+    }
+    // Building placement: the armed footprint's dims.
+    if (placingBuilding) {
+      return {
+        w: placingBuilding.w,
+        h: placingBuilding.h,
+        count: placingBuilding.w * placingBuilding.h,
+        label: "Building",
+      };
     }
     // Select tool: dims of the paste footprint, else the marquee rect.
     if (tool === "select") {
@@ -3167,7 +3236,7 @@ function MapForgeSectorInner() {
     return { w, h, count, label: "Shape" };
   }, [tool, shapeAnchor, shapeCursor, shapeKind,
       selectAnchor, selectCursor, selectRect, pasteMode, clipboard,
-      pickingRect, hovered]);
+      pickingRect, hovered, placingBuilding]);
 
   // ─── Height overlay ─────────────────────────────────────────────────
   // Per-tile heights are invisible in the iso render (neither renderer
@@ -3314,7 +3383,7 @@ function MapForgeSectorInner() {
   const renderCanvasPanel = () => (
     <div
       className="relative h-full w-full overflow-hidden bg-gray-950"
-      style={{ cursor: pickingRect ? "crosshair" : undefined }}
+      style={{ cursor: pickingRect || placingBuilding ? "crosshair" : undefined }}
       onWheel={onWheel}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMoveDrag}
@@ -3336,7 +3405,17 @@ function MapForgeSectorInner() {
           <span className="text-xs text-rust-200">ESC to cancel</span>
         </div>
       )}
-      {!pickingRect && ghostActive && (
+      {!pickingRect && placingBuilding && (
+        <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-sky-800/95 text-sky-50 px-3 py-2 text-sm border-b border-sky-500 shadow-md pointer-events-none">
+          <span>
+            Placing {placingBuilding.w}×{placingBuilding.h} building
+            ({placingBuilding.label}) — click to stamp, click again for
+            another (each gets its own room)
+          </span>
+          <span className="text-xs text-sky-200">ESC to cancel</span>
+        </div>
+      )}
+      {!pickingRect && !placingBuilding && ghostActive && (
         <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-between border-b border-emerald-600 bg-emerald-800/95 px-3 py-2 text-sm text-emerald-50 shadow-md">
           <span>
             Previewing generator output — nothing is applied yet. Adjust
@@ -3605,6 +3684,8 @@ function MapForgeSectorInner() {
         applyGhostOps={applyGhostOps}
         clearGhost={clearGhost}
         ghostActive={ghostActive}
+        setPlacement={setPlacingBuilding}
+        placementActive={placingBuilding !== null}
         onOp={mirrorGeneratorOpThrottled}
         onComplete={genRunComplete}
       />
