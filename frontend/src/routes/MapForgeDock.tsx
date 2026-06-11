@@ -60,9 +60,10 @@ const PANEL_TITLE: Record<DockPanelId, string> = {
   view: "View",
   log: "Log",
   validate: "Validation",
+  generate: "Generate",
 };
 const PANEL_ORDER: DockPanelId[] = [
-  "canvas", "palette", "assets", "tilesetViewer", "inspector", "tool", "variants", "layers", "view", "log", "validate",
+  "canvas", "palette", "assets", "tilesetViewer", "inspector", "tool", "variants", "layers", "view", "log", "validate", "generate",
 ];
 
 /** Lay out (or re-lay-out) the default arrangement, mirroring the legacy

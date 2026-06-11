@@ -30,7 +30,8 @@ export type DockPanelId =
   | "layers"
   | "view"
   | "log"
-  | "validate";
+  | "validate"
+  | "generate";
 
 export interface MapForgeDockValue {
   /** Panel id → render function (a closure over MapForgeSector state).

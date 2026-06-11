@@ -805,6 +805,10 @@ export interface GeneratorDoneEvent {
   error?: string;
   message?: string;
   generator?: string;
+  /** Present (true) when this was a dry-run preview — nothing applied. */
+  dry_run?: boolean;
+  /** Dry-run only: how many in-bounds ops the generator emitted. */
+  op_count?: number;
 }
 
 export type GeneratorEvent =
@@ -858,12 +862,21 @@ export async function runGenerator(
   name: string,
   params: Record<string, unknown>,
   onEvent: (e: GeneratorEvent) => void,
+  opts?: {
+    /** Stream the ops WITHOUT applying anything (live-preview ghosting).
+     * Generators are seeded-deterministic, so a dry run with the same
+     * params is exactly what a real run would apply. */
+    dryRun?: boolean;
+    /** Abort the stream early (e.g. params changed mid-preview). */
+    signal?: AbortSignal;
+  },
 ): Promise<GeneratorDoneEvent> {
   const url = `/mapforge/sessions/${sessionId}/run-generator?name=${encodeURIComponent(name)}`;
   const res = await authedFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ params }),
+    body: JSON.stringify({ params, dry_run: opts?.dryRun === true }),
+    signal: opts?.signal,
   });
   if (!res.ok || !res.body) {
     let detail: unknown = null;

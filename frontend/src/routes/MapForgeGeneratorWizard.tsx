@@ -624,7 +624,7 @@ function ConfigureForm({
 // to a red "no sprite" placeholder so the user can see the misconfiguration
 // BEFORE running the generator and discovering 25,600 invisible ops.
 
-function SlotSubPreview({
+export function SlotSubPreview({
   renderer, slot, sub,
 }: {
   renderer: IsoRenderer;
@@ -716,9 +716,9 @@ function SlotSubPreview({
 
 /** Layer dropdown — special-cased instead of free-text because the
  *  set is fixed at six values and a typo would 400 the request. */
-const LAYER_NAMES = ["land", "objs", "shadows", "structs", "roofs", "onroofs"] as const;
+export const LAYER_NAMES = ["land", "objs", "shadows", "structs", "roofs", "onroofs"] as const;
 
-function ParamRow({
+export function ParamRow({
   param, value, onChange,
 }: {
   param: GeneratorParamSchema;

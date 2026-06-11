@@ -270,3 +270,34 @@ def test_generator_editoperror_midrun_rolls_back_session(monkeypatch):
     assert final["done"] is True and final["ok"] is False
     assert final["error"] == "EDIT_OP_ERROR"
     assert final["applied"] == 0
+
+
+def test_generator_dry_run_streams_ops_but_applies_nothing(monkeypatch):
+    """dry_run=True must stream the same op events while leaving the
+    session byte-identical: no mutation, no dirty, no edit_count."""
+    from routes.mapforge import RunGeneratorBody
+
+    parsed = _mk_parsed(2, 2)
+    before = copy.deepcopy(parsed)
+    sess = _fake_session(parsed)
+    _session_store._sessions[sess.id] = sess
+    gen = _TwoOpGenerator()
+    monkeypatch.setattr(gen_mod, "get", lambda name: gen)
+    try:
+        resp = run_generator(sess.id, name=gen.name,
+                             body=RunGeneratorBody(dry_run=True))
+        chunks = _drain(resp)
+    finally:
+        _session_store._sessions.pop(sess.id, None)
+    events = [json.loads(c) for c in chunks if c.strip()]
+
+    assert sess.parsed == before          # untouched
+    assert sess.dirty is False
+    assert sess.edit_count == 0
+    final = events[-1]
+    assert final["done"] is True and final["ok"] is True
+    assert final["dry_run"] is True
+    assert final["applied"] == 0
+    assert final["op_count"] == 2
+    # The op events still stream (the frontend ghosts them).
+    assert len([e for e in events if "op" in e]) == 2

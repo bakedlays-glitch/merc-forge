@@ -79,6 +79,7 @@ import {
 import { MapForgeSettingsModal } from "./MapForgeSettingsModal";
 import MapForgeConsole, { type CommandSpec } from "./MapForgeConsole";
 import MapForgeGeneratorWizard from "./MapForgeGeneratorWizard";
+import { MapForgeGeneratePanel } from "./MapForgeGeneratePanel";
 import { MapForgeValidateBody, MapForgeValidatePanel } from "./MapForgeValidatePanel";
 import ConfirmModal from "../components/ConfirmModal";
 import { FloatingPanel } from "../components/FloatingPanel";
@@ -947,6 +948,128 @@ function MapForgeSectorInner() {
   // The render effect depends on this so React schedules a paint after
   // each edit. (Mutating `renderer.parsed` doesn't itself trigger React.)
   const [renderEpoch, setRenderEpoch] = useState(0);
+  // ─── Generator ghost preview (UX Phase 2) ───────────────────────────
+  // A dry-run's ops applied to the LOCAL renderer only — completely
+  // outside the undo/dirty machinery. First-touch pre-state per axis is
+  // kept here and restored on clear, so the backend session never sees
+  // the ghost and Ctrl+Z history is untouched. While a ghost is live
+  // the canvas paint tools are blocked (banner below) so user edits
+  // can't interleave with ghost state.
+  const ghostSnapsRef = useRef<{
+    layers: Map<string, { x: number; y: number; layer: LayerName; entries: number[][] }>;
+    rooms: Map<string, { x: number; y: number; roomId: number }>;
+    heights: Map<string, { x: number; y: number; height: number }>;
+  } | null>(null);
+  const [ghostActive, setGhostActive] = useState(false);
+
+  const clearGhost = useCallback(() => {
+    const g = ghostSnapsRef.current;
+    ghostSnapsRef.current = null;
+    if (g && renderer) {
+      for (const s of g.layers.values()) {
+        renderer.applyLocalEdit({
+          x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries,
+        });
+      }
+      for (const r of g.rooms.values()) {
+        renderer.applyLocalEdit({ x: r.x, y: r.y, op: "set_room", roomId: r.roomId });
+      }
+      for (const h of g.heights.values()) {
+        renderer.applyLocalEdit({ x: h.x, y: h.y, op: "set_height", height: h.height });
+      }
+      setRenderEpoch((e) => e + 1);
+    }
+    setGhostActive(false);
+  }, [renderer]);
+
+  const applyGhostOps = useCallback((ops: unknown[]) => {
+    if (!renderer) return;
+    clearGhost();
+    const parsed = renderer.getParsed();
+    if (!parsed) return;
+    const g: NonNullable<typeof ghostSnapsRef.current> = {
+      layers: new Map(), rooms: new Map(), heights: new Map(),
+    };
+    for (const op of ops) {
+      if (op === null || typeof op !== "object") continue;
+      const o = op as Record<string, unknown>;
+      const opName = o.op as string;
+      const x = o.x as number;
+      const y = o.y as number;
+      const layer = o.layer as LayerName | undefined;
+      const gn = y * parsed.cols + x;
+      if (opName === "set_room") {
+        const k = `${x},${y}`;
+        if (!g.rooms.has(k)) {
+          g.rooms.set(k, { x, y, roomId: parsed.rooms[gn] ?? 0 });
+        }
+      } else if (opName === "set_height") {
+        const k = `${x},${y}`;
+        if (!g.heights.has(k)) {
+          g.heights.set(k, { x, y, height: parsed.heights[gn] ?? 0 });
+        }
+      } else if (layer) {
+        const k = `${x},${y},${layer}`;
+        if (!g.layers.has(k)) {
+          const cur = parsed[layer][gn] ?? [];
+          g.layers.set(k, {
+            x, y, layer,
+            entries: cur.map((e) => [e[0] as number, e[1] as number]),
+          });
+        }
+      }
+      renderer.applyLocalEdit({
+        x, y,
+        op: opName as "place" | "add" | "remove" | "replace" | "set_entries"
+          | "set_room" | "set_height",
+        layer,
+        slot: o.slot as number | undefined,
+        sub: o.sub as number | undefined,
+        entryIndex: o.entry_index as number | undefined,
+        entries: o.entries as number[][] | undefined,
+        roomId: o.room_id as number | undefined,
+        height: o.height as number | undefined,
+      });
+    }
+    ghostSnapsRef.current = g;
+    setGhostActive(true);
+    setRenderEpoch((e) => e + 1);
+  }, [renderer, clearGhost]);
+
+  // Region pick for the Generate panel — same canvas picker the wizard
+  // uses, but the panel stays docked (no modal close/reopen dance).
+  const pickRegionForPanel = useCallback(
+    (cb: (c1: { x: number; y: number }, c2: { x: number; y: number }) => void) => {
+      setPickingRect({
+        stage: 0,
+        onComplete: (c1, c2) => cb(c1, c2),
+        onCancel: () => { /* ESC — keep the previous region */ },
+      });
+    }, [],
+  );
+
+  // "Generate" opener: dock mode focuses/re-adds the Generate panel;
+  // legacy layout falls back to the modal wizard.
+  const openGeneratePanel = useCallback(() => {
+    const api = dockApiRef.current;
+    if (dockMode && api) {
+      const existing = api.getPanel("generate");
+      if (existing) {
+        existing.api.setActive();
+      } else {
+        api.addPanel({
+          id: "generate",
+          component: "default",
+          title: "Generate",
+          position: api.getPanel("inspector")
+            ? { referencePanel: "inspector", direction: "within" }
+            : undefined,
+        });
+      }
+      return;
+    }
+    setWizardOpen(true);
+  }, [dockMode]);
   // requestAnimationFrame-coalesced epoch bump for the paint hot path.
   // A held-and-drag pencil-paint fires one paintBrush() per mousemove
   // (potentially 60+/sec on a fast drag); each previously called
@@ -1773,6 +1896,9 @@ function MapForgeSectorInner() {
    * (backend + local in lock-step). */
   async function undo() {
     if (!session || !renderer || session.read_only) return;
+    // Ghost preview live — undoing under a ghost would interleave with
+    // snapshots the ghost is about to restore. Clear/Apply first.
+    if (ghostActive) return;
     const entry = renderer.popUndo();
     if (!entry) return;
     setEditsInFlight((n) => n + 1);
@@ -1830,11 +1956,56 @@ function MapForgeSectorInner() {
     setHistGen(renderer.generation());
   }
 
+  /** Mirror one streamed generator op into the local IsoRenderer so the
+   * canvas reflects output incrementally — shared by the modal wizard
+   * and the Generate dock panel. Throttled paint trigger: bump
+   * renderEpoch every 1000 ops so the canvas updates ~10× during a
+   * 10k-op stream without choking React on 25k re-renders
+   * (mirror-only-no-bump was "canvas frozen for the whole stream"). */
+  function mirrorGeneratorOpThrottled(op: unknown) {
+    if (!renderer) return;
+    _mirrorGeneratorOp(renderer, op);
+    wizardOpCount.current += 1;
+    if (wizardOpCount.current % 1000 === 0) {
+      setRenderEpoch((e) => e + 1);
+    }
+  }
+
+  /** Post-generator-run resync — shared by the wizard and the Generate
+   * panel. Always paint regardless of `ok`: the per-op mirror already
+   * mutated renderer.parsed, so the canvas MUST repaint to reflect
+   * client state (an `ok`-gated repaint left partial-fail mirror
+   * mutations invisible — code-review finding). On success, a
+   * kitchen-sink getSessionParsed resync guarantees client == server
+   * even if an op raced the React state machine. */
+  function genRunComplete(applied: number, ok: boolean) {
+    void ok;
+    wizardOpCount.current = 0;
+    if (renderer && session && applied > 0) {
+      getSessionParsed(session.session_id).then((parsed) => {
+        renderer.setParsed(parsed);
+        setRenderEpoch((e) => e + 1);
+        bumpHistory();
+      }).catch((e) => {
+        log?.append({
+          severity: "warn",
+          message: `Canvas resync failed: ${e instanceof Error ? e.message : String(e)}. Click any tile to force refresh.`,
+        });
+        setRenderEpoch((e2) => e2 + 1);
+        bumpHistory();
+      });
+    } else {
+      setRenderEpoch((e) => e + 1);
+      if (renderer) bumpHistory();
+    }
+  }
+
   /** Re-apply the last undone stroke. Mirror of `undo()` but pulls from the
    * renderer's redo stack (popRedo also pushes the inverse back onto the
    * undo stack, so a redo can itself be undone). */
   async function redo() {
     if (!session || !renderer || session.read_only) return;
+    if (ghostActive) return;   // same guard as undo()
     const entry = renderer.popRedo();
     if (!entry) return;
     setEditsInFlight((n) => n + 1);
@@ -1904,6 +2075,9 @@ function MapForgeSectorInner() {
       }
       return;
     }
+    // A generator ghost is being previewed — painting now would tangle
+    // user edits with ghost state that's about to be reverted/applied.
+    if (ghostActive) return;
     if (!renderer) return;
     // Prefer the HOVERED tile (what the user visually sees) over the
     // re-resolved mousedown coords. The physical button press often
@@ -1988,6 +2162,8 @@ function MapForgeSectorInner() {
       }
       return;
     }
+    // Ghost preview live — block tool actions (see onCanvasMouseDown).
+    if (ghostActive) return;
     // Inspect mode only. Pencil + shape act via mousedown/move/up above;
     // their click event fires AFTER mouseup and must not pin a tile.
     if (tool !== "inspect") return;
@@ -3123,6 +3299,17 @@ function MapForgeSectorInner() {
           <span className="text-xs text-rust-200">ESC to cancel</span>
         </div>
       )}
+      {!pickingRect && ghostActive && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-between border-b border-emerald-600 bg-emerald-800/95 px-3 py-2 text-sm text-emerald-50 shadow-md">
+          <span>
+            Previewing generator output — nothing is applied yet. Adjust
+            the sliders to update the ghost.
+          </span>
+          <span className="text-xs text-emerald-200">
+            ✓ Apply or ✕ Clear in the Generate panel
+          </span>
+        </div>
+      )}
       {!info.data && info.isLoading && (
         <p className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">
           Parsing .dat...
@@ -3466,11 +3653,11 @@ function MapForgeSectorInner() {
       {session && !session.read_only && (
         <button
           type="button"
-          onClick={() => setWizardOpen(true)}
-          title="Open the map-generation wizard (pick a generator + configure params)"
+          onClick={openGeneratePanel}
+          title="Open the Generate panel — pick a generator, drag its region on the map, watch the live preview, Apply"
           className="text-xs px-3 py-1.5 rounded border border-rust-500/60 bg-rust-500/15 text-rust-100 hover:bg-rust-500/30 font-medium"
         >
-          ✨ Generate…
+          ✨ Generate
         </button>
       )}
       {datPath && (
@@ -3597,6 +3784,19 @@ function MapForgeSectorInner() {
         sessionId={session?.session_id ?? null}
       />
     ) : null),
+    generate: () => (
+      <MapForgeGeneratePanel
+        sessionId={session?.session_id ?? null}
+        renderer={renderer}
+        readOnly={session?.read_only ?? false}
+        pickRegion={pickRegionForPanel}
+        applyGhostOps={applyGhostOps}
+        clearGhost={clearGhost}
+        ghostActive={ghostActive}
+        onOp={mirrorGeneratorOpThrottled}
+        onComplete={genRunComplete}
+      />
+    ),
   };
 
   return (
@@ -4336,61 +4536,8 @@ function MapForgeSectorInner() {
             },
           });
         }}
-        onOp={(op) => {
-          // Mirror each streamed op into the local IsoRenderer so the
-          // canvas reflects the generator's output incrementally —
-          // same mechanism as the console's `:gen` handler. Without
-          // this the backend's session updates but the renderer
-          // shows pre-generator state.
-          //
-          // Throttled paint trigger: bump renderEpoch every 1000 ops
-          // so the canvas updates ~10x during a 10k-op stream without
-          // choking React on 25k re-renders. Mirror-only-no-bump was
-          // the cause of "canvas frozen for the entire stream
-          // duration".
-          if (renderer) {
-            _mirrorGeneratorOp(renderer, op);
-            wizardOpCount.current += 1;
-            if (wizardOpCount.current % 1000 === 0) {
-              setRenderEpoch((e) => e + 1);
-            }
-          }
-        }}
-        onComplete={(applied, ok) => {
-          // Always paint regardless of `ok` — the per-op mirror has
-          // already mutated renderer.parsed for `applied` ops, so the
-          // canvas MUST repaint to reflect client state. The earlier
-          // `if (ok && applied > 0)` guard was a foot-gun: a partial-
-          // fail generator left mirror mutations invisible.
-          // (code review finding)
-          wizardOpCount.current = 0;
-          if (renderer && session && applied > 0) {
-            // Kitchen-sink resync — guarantees client == server state
-            // after the stream even if any op raced the React state
-            // machine. setUndoDepth syncs from renderer.undoDepth()
-            // INSIDE the .then() so it reads the post-endStroke value
-            // (the wizard calls endStroke before invoking onComplete).
-            getSessionParsed(session.session_id).then((parsed) => {
-              renderer.setParsed(parsed);
-              setRenderEpoch((e) => e + 1);
-              bumpHistory();
-            }).catch((e) => {
-              log?.append({
-                severity: "warn",
-                message: `Canvas resync failed: ${e instanceof Error ? e.message : String(e)}. Click any tile to force refresh.`,
-              });
-              setRenderEpoch((e2) => e2 + 1);
-              bumpHistory();
-            });
-          } else {
-            // No renderer / no session / no ops applied — still paint
-            // in case anything is half-mirrored. Sync undoDepth from
-            // renderer if available (it may have a partial stroke
-            // committed even when applied==0 for weird race cases).
-            setRenderEpoch((e) => e + 1);
-            if (renderer) bumpHistory();
-          }
-        }}
+        onOp={mirrorGeneratorOpThrottled}
+        onComplete={genRunComplete}
       />
 
       {/* Browse Assets pop-out — legacy (non-dock) layout only. The full

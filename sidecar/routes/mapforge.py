@@ -2944,8 +2944,14 @@ class GeneratorInfo(BaseModel):
 class RunGeneratorBody(BaseModel):
     """Params for one generator invocation. Keys are generator-defined;
     the route validates against the registered Param schema before
-    invoking iter_ops."""
+    invoking iter_ops.
+
+    `dry_run=True` streams the SAME op events without applying anything
+    — the session is untouched (no lock-held mutation, no dirty, no
+    edit_count). The frontend uses it to ghost a generator's full
+    result on the canvas before the user commits (live preview)."""
     params: dict[str, Any] = {}
+    dry_run: bool = False
 
 
 @router.get("/generators", response_model=list[GeneratorInfo])
@@ -3065,6 +3071,48 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
 
     ctx = GeneratorContext(rows=rows, cols=cols, parsed=sess.parsed,
                            slot_map=slot_map, frame_count=frame_count)
+
+    def dry_run_stream():
+        """Preview mode: iterate + shape-validate the generator's ops,
+        apply NOTHING. Holds the lock only to give iter_ops a stable
+        read of `parsed` (GeneratorContext is read-only by contract)."""
+        try:
+            buffered: list[dict] = []
+            op_count = 0
+            with sess._lock:
+                for event in gen.iter_ops(ctx, body.params):
+                    if "phase" in event:
+                        buffered.append(event)
+                        continue
+                    op_obj = EditOp(**event)   # shape-validate only
+                    g = op_obj.y * cols + op_obj.x
+                    if not (0 <= g < rows * cols):
+                        continue               # preview drops OOB ops
+                    op_count += 1
+                    buffered.append({"op": event})
+            for ev in buffered:
+                yield json.dumps(ev) + "\n"
+            yield json.dumps({
+                "done": True,
+                "ok": True,
+                "applied": 0,
+                "dry_run": True,
+                "op_count": op_count,
+                "generator": name,
+            }) + "\n"
+        except Exception as e:  # noqa: BLE001
+            yield json.dumps({
+                "done": True,
+                "ok": False,
+                "error": "GENERATOR_FAILED",
+                "message": f"{type(e).__name__}: {e}",
+                "applied": 0,
+                "dry_run": True,
+            }) + "\n"
+
+    if body.dry_run:
+        return StreamingResponse(dry_run_stream(),
+                                 media_type="application/x-ndjson")
 
     def event_stream():
         applied = 0
