@@ -146,14 +146,27 @@ def make_house(
 
 def _write_tileset_xml(path: Path, tileset: int,
                        slot_files: dict[int, str]) -> None:
+    _write_multi_tileset_xml(path, {tileset: (None, slot_files)})
+
+
+def _write_multi_tileset_xml(
+    path: Path,
+    tilesets: dict[int, tuple[str | None, dict[int, str]]],
+) -> None:
+    """Ja2Set.dat.xml with several tileset blocks: index → (Name | None,
+    slot → filename). Name is omitted when None (legacy single-tileset
+    fixtures don't carry one)."""
     root = ET.Element("Ja2Set")
-    ts = ET.SubElement(root, "Tileset")
-    ts.set("index", str(tileset))
-    files = ET.SubElement(ts, "Files")
-    for slot, name in sorted(slot_files.items()):
-        f = ET.SubElement(files, "file")
-        f.set("index", str(slot))
-        f.text = name
+    for tileset, (name, slot_files) in sorted(tilesets.items()):
+        ts = ET.SubElement(root, "Tileset")
+        ts.set("index", str(tileset))
+        if name is not None:
+            ET.SubElement(ts, "Name").text = name
+        files = ET.SubElement(ts, "Files")
+        for slot, fname in sorted(slot_files.items()):
+            f = ET.SubElement(files, "file")
+            f.set("index", str(slot))
+            f.text = fname
     path.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
 
@@ -193,10 +206,10 @@ def _make_install(
 
 
 def _build(install: Path, xml_path: Path, tileset: int = 7,
-           thumbs: bool = False) -> dict:
+           thumbs: bool = False, **kwargs) -> dict:
     return bl.build_library(
         xml_path, tileset, install, loose_dirs=[], slf_paths=[],
-        thumbs=thumbs,
+        thumbs=thumbs, **kwargs,
     )
 
 
@@ -383,6 +396,167 @@ def test_endpoint_cache_invalidates_on_map_change(
                          map_path.stat().st_mtime + 10))
     third = mf.building_library(xml=str(xml), tileset=7)
     assert third["from_cache"] is False
+
+
+# ─── Tileset families ───────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name,expected", [
+    ("LAWLESS 1 (San Mona-d5)", "LAWLESS"),
+    ("LAWLESS 2 (burnt-c5)", "LAWLESS"),
+    ("LAWLESS 3 (burnt-c6)", "LAWLESS"),
+    ("GRUMM g2,h2", "GRUMM"),
+    ("GRUMM g1,h1", "GRUMM"),
+    ("FARM 1", "FARM"),
+    ("FARM 2 (ruined walls)", "FARM"),
+    ("LUSH 1 (dirt roads)", "LUSH"),
+    ("LUSH2 (different trees)", "LUSH"),     # missing-space variant number
+    ("GENERIC 2 (Dirtroads)", "GENERIC"),
+    ("DESERT 1", "DESERT"),
+    ("DESERT SAM", "DESERT SAM"),            # word suffixes NOT stripped
+    ("TROPICAL SAM", "TROPICAL SAM"),
+    ("JA25", "JA25"),                        # multi-digit glue kept intact
+    ("CAMBRIA STRIP", "CAMBRIA"),            # explicit multi-word alias
+    ("CAMBRIA HOMES", "CAMBRIA"),
+    ('"DEAD AIRSTRIP(Drassen-c13)', "DEAD AIRSTRIP"),  # stray quote, unspaced paren
+    ("ACTIVE DRASSEN (d13)", "ACTIVE DRASSEN"),
+    ("QUEEN'S PRISON", "QUEEN'S PRISON"),
+    ("", ""),
+])
+def test_normalize_family_name(name: str, expected: str) -> None:
+    assert bl.normalize_family_name(name) == expected
+
+
+def test_tileset_family_grouping(tmp_path: Path) -> None:
+    """Grouping over a representative slice of the real install's
+    tileset names (LAWLESS ×3, LUSH incl. the LUSH2 missing-space case,
+    CAMBRIA via alias, DESERT vs DESERT SAM kept apart, unnamed block
+    = its own family)."""
+    xml = tmp_path / "Ja2Set.dat.xml"
+    _write_multi_tileset_xml(xml, {
+        0: ("GENERIC 1", {}),
+        2: ("DESERT 1", {}),
+        3: ("LUSH 1 (dirt roads)", {}),
+        7: (None, {}),
+        16: ("LAWLESS 1 (San Mona-d5)", {}),
+        18: ("LAWLESS 2 (burnt-c5)", {}),
+        21: ("LAWLESS 3 (burnt-c6)", {}),
+        25: ("LUSH2 (different trees)", {}),
+        31: ("CAMBRIA STRIP", {}),
+        32: ("CAMBRIA HOMES", {}),
+        35: ("GRUMM g2,h2", {}),
+        36: ("GRUMM g1,h1", {}),
+        39: ("DESERT SAM", {}),
+    })
+    assert bl.tileset_family(xml, 16) == [16, 18, 21]
+    assert bl.tileset_family(xml, 18) == [16, 18, 21]
+    assert bl.tileset_family(xml, 3) == [3, 25]
+    assert bl.tileset_family(xml, 25) == [3, 25]
+    assert bl.tileset_family(xml, 35) == [35, 36]
+    assert bl.tileset_family(xml, 31) == [31, 32]
+    assert bl.tileset_family(xml, 2) == [2]      # DESERT SAM ≠ DESERT 1
+    assert bl.tileset_family(xml, 7) == [7]      # unnamed → own family
+
+
+_DEFAULT_SLOTS = {
+    0: "earth.sti", 36: "build_01.sti", 40: "door1.sti",
+    60: "floor_1.sti", 64: "flat_r1.sti", 70: "roofvent.sti",
+    73: "furn_6.sti", 79: "debrocks.sti", 24: "drum1shd.sti",
+}
+
+
+def _make_family_install(
+    tmp_path: Path,
+    target_slots: dict[int, str],
+    sibling_furniture: int = 78,
+) -> tuple[Path, Path]:
+    """Install with two LAWLESS-family tilesets: target 7 ("LAWLESS 1",
+    C5.dat) and sibling 8 ("LAWLESS 2", D6.dat). The sibling's house uses
+    `sibling_furniture` as its furniture slot — pass 73 (the target
+    house's slot) to make the two buildings byte-identical (dedupe)."""
+    dat_target = build_full_dat(tileset=7, **make_house())
+    dat_sibling = build_full_dat(
+        tileset=8, **make_house(furniture_slot=sibling_furniture))
+    install = tmp_path / "install"
+    layer = install / "Data-1.13"
+    maps_dir = layer / "Maps"
+    maps_dir.mkdir(parents=True)
+    (maps_dir / "C5.dat").write_bytes(dat_target)
+    (maps_dir / "D6.dat").write_bytes(dat_sibling)
+    xml_path = layer / "Ja2Set.dat.xml"
+    _write_multi_tileset_xml(xml_path, {
+        7: ("LAWLESS 1 (San Mona-d5)", target_slots),
+        8: ("LAWLESS 2 (burnt-c5)", dict(_DEFAULT_SLOTS)),
+    })
+    return install, xml_path
+
+
+def test_family_sibling_building_included(tmp_path: Path) -> None:
+    """A building from a family-sibling tileset is included when every
+    (slot, sub) it uses resolves in the TARGET tileset's slot map with
+    enough sub-frames — and carries source-tileset provenance."""
+    target_slots = dict(_DEFAULT_SLOTS)
+    target_slots[78] = "crate_a.sti"     # the sibling house's furniture
+    install, xml = _make_family_install(tmp_path, target_slots)
+    lib = _build(install, xml, tileset=7, frame_count_fn=lambda s: 99)
+    assert lib["family_tilesets"] == [7, 8]
+    assert lib["family_name"] == "LAWLESS"
+    assert lib["matching_maps"] == 2
+    assert lib["matched_by_tileset"] == {7: 1, 8: 1}
+    assert lib["excluded_incompatible"] == 0
+    assert len(lib["entries"]) == 2
+    by_src = {e["source_tileset"]: e for e in lib["entries"]}
+    assert by_src[7]["source_map"] == "C5.dat"
+    assert by_src[8]["source_map"] == "D6.dat"
+    # Grafts stamp/render as the TARGET tileset; provenance is separate.
+    assert by_src[8]["tileset"] == 7
+    assert by_src[8]["source_tileset_name"] == "LAWLESS 2 (burnt-c5)"
+
+
+def test_family_sibling_excluded_when_slot_missing(tmp_path: Path) -> None:
+    """The sibling house's furniture slot (78) is NOT registered in the
+    target tileset → the graft would render a hole → excluded, counted,
+    noted. The target's own building is untouched."""
+    install, xml = _make_family_install(tmp_path, dict(_DEFAULT_SLOTS))
+    lib = _build(install, xml, tileset=7, frame_count_fn=lambda s: 99)
+    assert len(lib["entries"]) == 1
+    assert lib["entries"][0]["source_tileset"] == 7
+    assert lib["excluded_incompatible"] == 1
+    note = lib["excluded_notes"][0]
+    assert note["source_map"] == "D6.dat"
+    assert note["source_tileset"] == 8
+    assert any("slot 78" in m for m in note["missing"])
+
+
+def test_family_sibling_excluded_when_sub_count_short(tmp_path: Path) -> None:
+    """Slot registered but the target's STI has fewer sub-frames than the
+    sibling building uses (roof slot 64 sub 9 vs 5 frames) → excluded.
+    The target's OWN building skips the guard (verbatim canon)."""
+    target_slots = dict(_DEFAULT_SLOTS)
+    target_slots[78] = "crate_a.sti"
+    install, xml = _make_family_install(tmp_path, target_slots)
+    lib = _build(install, xml, tileset=7,
+                 frame_count_fn=lambda s: 5 if s == 64 else 99)
+    assert len(lib["entries"]) == 1
+    assert lib["entries"][0]["source_tileset"] == 7
+    assert lib["excluded_incompatible"] == 1
+    note = lib["excluded_notes"][0]
+    assert note["source_tileset"] == 8
+    assert any("slot 64" in m and "sub 9" in m for m in note["missing"])
+
+
+def test_family_dedupe_prefers_target_provenance(tmp_path: Path) -> None:
+    """The SAME building in a target map and a sibling map → ONE entry
+    with seen_in 2, attributed to the TARGET tileset (target maps are
+    processed first)."""
+    install, xml = _make_family_install(
+        tmp_path, dict(_DEFAULT_SLOTS), sibling_furniture=73)
+    lib = _build(install, xml, tileset=7, frame_count_fn=lambda s: 99)
+    assert len(lib["entries"]) == 1
+    e = lib["entries"][0]
+    assert e["seen_in"] == 2
+    assert e["source_tileset"] == 7
+    assert e["source_map"] == "C5.dat"
+    assert lib["excluded_incompatible"] == 0
 
 
 def test_entry_shape_matches_frontend_cliptile(tmp_path: Path) -> None:

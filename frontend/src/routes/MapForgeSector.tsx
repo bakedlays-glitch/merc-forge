@@ -115,7 +115,6 @@ import {
   type Tile,
 } from "../lib/mapShapes";
 import {
-  CLIP_LAYERS,
   sliceRegion,
   pasteEdits,
   stripBuddyShadows,
@@ -925,16 +924,16 @@ function MapForgeSectorInner() {
   const pickSuppressClickRef = useRef(false);
   // ─── StarCraft-style building placement mode ────────────────────────
   // Armed by the Generate panel's building-library flow. While set, the
-  // canvas shows the building's w×h FOOTPRINT rect at the cursor (the
+  // canvas shows the building's w×h FOOTPRINT outline at the cursor (the
   // hovered tile = footprint top-left) PLUS — when `region` carries the
-  // building's verbatim tiles — a REAL SPRITE GHOST of the building
-  // (ghost-engine ops at the hovered anchor; see the placement-ghost
-  // effect below). LEFT CLICK calls run(x, y) — the panel stamps the
-  // building there via the pasteEdits batch path — and STAYS armed so
-  // repeated clicks stamp more buildings (room ids are renumbered per
-  // stamp). ESC or a tool change exits. `label` feeds the canvas
-  // banner. A Promise-returning run() gates the ghost + further clicks
-  // while a stamp is in flight.
+  // building's verbatim tiles — a REAL SPRITE GHOST of the building on a
+  // dedicated overlay canvas stacked above the grid SVG (see the
+  // placement-ghost effect below). LEFT CLICK calls run(x, y) — the
+  // panel stamps the building there via the pasteEdits batch path — and
+  // STAYS armed so repeated clicks stamp more buildings (room ids are
+  // renumbered per stamp). ESC or a tool change exits. `label` feeds the
+  // canvas banner. A Promise-returning run() gates the ghost + further
+  // clicks while a stamp is in flight.
   const [placingBuilding, setPlacingBuilding] = useState<{
     w: number;
     h: number;
@@ -943,12 +942,9 @@ function MapForgeSectorInner() {
     run: (x: number, y: number) => void | Promise<void>;
   } | null>(null);
   // True while a placement stamp's backend round-trip is in flight —
-  // suppresses the sprite ghost (its snapshots would interleave with
-  // the stamp's local edits) and further stamp clicks.
+  // hides the sprite ghost overlay (so the freshly-stamped tiles are
+  // visible, not double-drawn under it) and blocks further stamp clicks.
   const [placementStampBusy, setPlacementStampBusy] = useState(false);
-  // True when the CURRENT ghost belongs to placement mode (vs a
-  // generator preview) — placement owns clearing only its own ghost.
-  const placementGhostRef = useRef(false);
   // Exit placement mode when the user switches tools, sectors, tilesets
   // or the sidecar restarts — a stale run() closure must never fire
   // against a different session.
@@ -1067,43 +1063,61 @@ function MapForgeSectorInner() {
   }, [renderer, clearGhost]);
 
   // ─── Placement sprite ghost (canon building library) ────────────────
-  // While placement mode carries a verbatim building `region`, ghost
-  // the REAL sprites at the hovered anchor — on top of the footprint
-  // tint the previewTiles overlay already draws. The hover state only
-  // changes per TILE (onCanvasMove dedupes), so this re-ghosts at most
-  // once per tile change; the repaint itself is the ghost engine's
-  // single epoch bump. The ops are local set_entries translated to the
-  // anchor — no backend dry-run. Suppressed while a stamp is in flight
-  // (ghost snapshots must not interleave with the stamp's local
-  // edits + the post-stamp resync). Owns ONLY its own ghost via
-  // placementGhostRef so it can't clobber a generator preview.
-  useEffect(() => {
+  // While placement mode carries a verbatim building `region`, show its
+  // REAL sprites at the hovered anchor on a DEDICATED OVERLAY CANVAS
+  // stacked ABOVE the grid SVG (the grid must render BELOW the building
+  // ghost — owner feedback; the old path applied ghost ops into the MAIN
+  // canvas via the ghost engine, so the grid mesh + footprint tint drew
+  // over the sprites and washed them out).
+  //
+  // The building is rendered ONCE per armed region into a tight
+  // offscreen canvas (IsoRenderer.renderRegionToCanvas — same cell
+  // lookup / offset math / draw order as the main render, ~70% alpha);
+  // per hovered-tile change we only retranslate the overlay canvas via
+  // CSS transform. The generator previews in the Generate panel keep
+  // using the ghost engine (applyGhostOps) — this overlay is placement-
+  // only, so ghost-engine snapshots can no longer interleave with the
+  // stamp's local edits at all.
+  const ghostCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const placementGhost = useMemo(() => {
     const region = placingBuilding?.region;
-    if (!region || !renderer || placementStampBusy || !hovered) {
-      if (placementGhostRef.current) {
-        placementGhostRef.current = false;
-        clearGhost();
-      }
+    if (!region || !renderer) return null;
+    return renderer.renderRegionToCanvas(region.tiles, 0.7);
+    // renderEpoch: re-render after an atlas hot-swap (replaceAtlas keeps
+    // the renderer identity but changes the cellMap).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placingBuilding, renderer, renderEpoch]);
+  useEffect(() => {
+    const cv = ghostCanvasRef.current;
+    if (!cv) return;
+    // Hidden while: no armed region, cursor off-canvas, a stamp is in
+    // flight (the stamped tiles should be visible, not double-drawn),
+    // or no meta yet. ESC / tool change clears placingBuilding which
+    // lands here too.
+    if (!placementGhost || !hovered || placementStampBusy || !renderMeta) {
+      cv.style.display = "none";
       return;
     }
-    const parsed = renderer.getParsed();
-    const cols = parsed?.cols ?? 0;
-    const rows = parsed?.rows ?? 0;
-    const ops: unknown[] = [];
-    for (const t of region.tiles) {
-      const x = hovered.x + t.dx;
-      const y = hovered.y + t.dy;
-      if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
-      for (const l of CLIP_LAYERS) {
-        ops.push({ x, y, op: "set_entries", layer: l, entries: t.layers[l] });
-      }
+    if (cv.width !== placementGhost.canvas.width
+        || cv.height !== placementGhost.canvas.height) {
+      cv.width = placementGhost.canvas.width;
+      cv.height = placementGhost.canvas.height;
     }
-    // applyGhostOps clears the previous ghost itself (restoring the
-    // previous anchor's tiles) before applying the new one.
-    applyGhostOps(ops);
-    placementGhostRef.current = ops.length > 0;
-  }, [placingBuilding, hovered, placementStampBusy, renderer,
-      applyGhostOps, clearGhost]);
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(placementGhost.canvas, 0, 0);
+    // Anchor alignment: the offscreen render's (0,0) tile must land on
+    // the hovered tile — same tileToCanvasPixel math as the SVG overlay,
+    // plus the region render's own bbox origin. Zoom needs no special
+    // handling: the overlay canvas lives inside the same CSS-transformed
+    // wrapper as the main canvas + SVG.
+    const p = tileToCanvasPixel(hovered.x, hovered.y, renderMeta);
+    cv.style.transform =
+      `translate(${p.x + placementGhost.originX}px, `
+      + `${p.y + placementGhost.originY}px)`;
+    cv.style.display = "block";
+  }, [placementGhost, hovered, placementStampBusy, renderMeta]);
 
   // Region pick for the Generate panel — drag/click two corners on the
   // canvas while the panel stays docked.
@@ -2190,13 +2204,9 @@ function MapForgeSectorInner() {
       if (placementStampBusy) return;
       const tile = hovered ?? pixelToTile(e);
       if (!tile) return;
-      // Clear the placement sprite ghost SYNCHRONOUSLY before stamping —
-      // the stamp's snapshots must capture the real pre-stamp tiles,
-      // not ghosted ones.
-      if (placementGhostRef.current) {
-        placementGhostRef.current = false;
-        clearGhost();
-      }
+      // The placement sprite ghost lives on its own overlay canvas (it
+      // never touches the parsed dict), so the stamp's snapshots always
+      // capture the real pre-stamp tiles — no ghost clearing needed.
       const r = placingBuilding.run(tile.x, tile.y);
       if (r instanceof Promise) {
         setPlacementStampBusy(true);
@@ -3199,10 +3209,13 @@ function MapForgeSectorInner() {
     }
     // Building placement (StarCraft-style): the building's w×h footprint
     // rect anchored top-left at the hovered tile — exactly where a click
-    // will stamp it. Mirrors the paste-mode ghost-at-cursor mechanics.
+    // will stamp it. OUTLINE only (not fill): the real sprite ghost on
+    // the overlay canvas sits above this, and a fill tint would wash the
+    // sprites out (owner feedback — the footprint indicator must not sit
+    // on the building art).
     if (placingBuilding && hovered) {
       return shapeTiles(
-        "rect-fill",
+        "rect-outline",
         { x: hovered.x, y: hovered.y },
         {
           x: hovered.x + placingBuilding.w - 1,
@@ -3538,9 +3551,15 @@ function MapForgeSectorInner() {
           }}
         >
           <div className="relative" style={{ width: renderMeta.canvasW, height: renderMeta.canvasH }}>
+            {/* Stacking inside this wrapper (explicit z-indexes):
+                  z-0  main canvas (sector render)
+                  z-10 SVG overlay (grid / footprint outline / markers)
+                  z-20 placement ghost canvas — the building's real
+                       sprites must render ABOVE the grid mesh.
+                All three share the wrapper's CSS pan/zoom transform. */}
             <canvas
               ref={canvasRef}
-              className="block cursor-crosshair select-none"
+              className="relative z-0 block cursor-crosshair select-none"
               style={{
                 imageRendering: "pixelated",
                 width: renderMeta.canvasW,
@@ -3623,6 +3642,16 @@ function MapForgeSectorInner() {
                 return tiles;
               })()}
               heightOverlay={heightOverlay}
+            />
+            {/* Building-placement sprite ghost — drawn + positioned
+                imperatively by the placement-ghost effect. Above the
+                grid SVG (z-20 vs z-10) so the building's sprites read
+                clearly over the grid mesh; pointer-events pass through
+                to the main canvas for hover + the stamp click. */}
+            <canvas
+              ref={ghostCanvasRef}
+              className="pointer-events-none absolute left-0 top-0 z-20"
+              style={{ imageRendering: "pixelated", display: "none" }}
             />
           </div>
         </div>
@@ -4339,8 +4368,10 @@ function IsoOverlay({
   }, [showRoomLabels, info, meta]);
 
   return (
+    // z-10: above the main canvas (z-0), BELOW the placement ghost
+    // canvas (z-20) — the building ghost's sprites must beat the grid.
     <svg
-      className="pointer-events-none absolute inset-0"
+      className="pointer-events-none absolute inset-0 z-10"
       width={meta.canvasW}
       height={meta.canvasH}
       viewBox={`0 0 ${meta.canvasW} ${meta.canvasH}`}

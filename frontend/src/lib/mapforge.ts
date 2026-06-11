@@ -901,7 +901,14 @@ export interface BuildingLibraryEntry {
   town: string;
   sector: string;
   source_map: string;
+  /** The TARGET tileset the library was built for (grafts render/stamp
+   *  with this tileset's art). */
   tileset: number;
+  /** Provenance: the family tileset the building was scanned from.
+   *  Differs from `tileset` for family-sibling grafts (the card shows a
+   *  "from #N" badge then). Optional: older cached payloads lack it. */
+  source_tileset?: number;
+  source_tileset_name?: string;
   w: number;
   h: number;
   room_count: number;
@@ -921,6 +928,20 @@ export interface BuildingLibraryResponse {
   entries: BuildingLibraryEntry[];
   scanned_maps: number;
   matching_maps: number;
+  /** Maps matched per family tileset id (JSON keys are strings). */
+  matched_by_tileset?: Record<string, number>;
+  /** All tileset ids in the target's name family (incl. itself). */
+  family_tilesets?: number[];
+  family_name?: string;
+  /** Family-sibling buildings dropped by the slot-compatibility guard. */
+  excluded_incompatible?: number;
+  excluded_notes?: Array<{
+    source_map: string;
+    source_tileset: number;
+    w: number;
+    h: number;
+    missing: string[];
+  }>;
   skipped_clusters: number;
   build_ms: number;
   from_cache?: boolean;

@@ -206,6 +206,27 @@ export const ALL_LAYERS: LayerName[] = [
   "land", "objs", "shadows", "structs", "roofs", "onroofs",
 ];
 
+/** Region-tile shape accepted by `renderRegionToCanvas`. Structurally
+ * compatible with BOTH mapClipboard's ClipTile and the building
+ * library's BuildingLibraryTile (dx/dy offsets from the region's
+ * top-left + per-layer [slot, sub] entry lists). */
+export interface GhostRegionTile {
+  dx: number;
+  dy: number;
+  layers: Record<LayerName, number[][]>;
+}
+
+/** Result of `renderRegionToCanvas`: the rendered sprite canvas plus
+ * the raw-pixel offset of its top-left corner RELATIVE to tile (0,0)'s
+ * `tileToPixRaw` position. To place the ghost so its (0,0) tile lands
+ * exactly on an anchor tile, position the canvas at
+ * `tileToCanvasPixel(anchor) + (originX, originY)`. */
+export interface RegionRender {
+  canvas: HTMLCanvasElement;
+  originX: number;
+  originY: number;
+}
+
 /** Iso-projection metadata shared with the SVG overlay so the existing
  * grid/highlight/label code keeps working unchanged. */
 export interface RenderMeta {
@@ -992,10 +1013,26 @@ export class IsoRenderer {
       ? effectiveShadowEntries(this.parsed, gn, this.cellMap)
       : this.parsed[layer][gn];
     if (!entries || entries.length === 0) return;
-    const yLift = LAYER_Y_LIFT[layer];
     const [rawX, rawY] = this.tileToPixRaw(tx, ty);
     const px = rawX - this.meta.ixMin;
     const py = rawY - this.meta.iyMin;
+    this.drawEntriesAt(ctx, entries, px, py, layer, shadow);
+  }
+
+  /** The per-entry sprite blit shared by the main render and the region
+   * ghost render: cellMap lookup + per-cell ox/oy offsets + the layer's
+   * WALL_HEIGHT yLift. (px, py) is the tile's raw iso projection point
+   * already translated into the destination canvas's pixel space. Keeping
+   * this in ONE place is what guarantees the placement ghost is pixel-
+   * aligned with what stamping will produce. */
+  private drawEntriesAt(
+    ctx: CanvasRenderingContext2D,
+    entries: number[][],
+    px: number, py: number,
+    layer: LayerName,
+    shadow: boolean,
+  ): void {
+    const yLift = LAYER_Y_LIFT[layer];
     const src = shadow ? this.darkenAtlas : this.atlas;
     for (const entry of entries) {
       if (entry.length < 2) continue;
@@ -1014,6 +1051,135 @@ export class IsoRenderer {
         pasteX, pasteY, cell.w, cell.h,
       );
     }
+  }
+
+  /**
+   * Render a standalone tile REGION (a clipboard/building-library tile
+   * list) into a tight transparent offscreen canvas at `alpha` opacity.
+   * Used by the building-placement ghost overlay: the region is rendered
+   * ONCE per armed building, then merely repositioned per hovered tile.
+   *
+   * Engine fidelity: reuses the exact same code paths as `render()` —
+   * `tileToPixRaw` for the iso projection, `drawEntriesAt` for the
+   * cellMap lookup + per-cell ox/oy + WALL_HEIGHT yLift, and the same
+   * pass structure (land → objs → shadows(darken) → struct/roof/onroof
+   * level-major within each iso row). No constants are forked, so the
+   * ghost is pixel-identical to what stamping the region will paint.
+   *
+   * Differences vs the main render (intentional):
+   *   - transparent background (it's an overlay);
+   *   - shadows draw only the region's STORED shadow entries (no buddy-
+   *     shadow synthesis — that needs the surrounding parsed sector, and
+   *     the engine re-adds buddies at load anyway);
+   *   - uniform `alpha` applied to the FINISHED composite (not per-draw,
+   *     so internal sprite overlaps don't double-blend).
+   *
+   * Returns null when the region has nothing drawable (no known cells).
+   */
+  renderRegionToCanvas(
+    tiles: GhostRegionTile[],
+    alpha = 0.7,
+  ): RegionRender | null {
+    // Tight bbox over every drawable cell, in raw iso-pixel space where
+    // tile (0,0)'s tileToPixRaw point is the origin.
+    let x0 = Infinity; let y0 = Infinity;
+    let x1 = -Infinity; let y1 = -Infinity;
+    let drawable = 0;
+    let unknownCells = 0;
+    for (const t of tiles) {
+      const [rawX, rawY] = this.tileToPixRaw(t.dx, t.dy);
+      for (const layer of ALL_LAYERS) {
+        const entries = t.layers[layer];
+        if (!entries) continue;
+        const yLift = LAYER_Y_LIFT[layer];
+        for (const e of entries) {
+          if (e.length < 2) continue;
+          const cell = this.cellMap.get(
+            ((e[0] as number) << 16) | ((e[1] as number) & 0xffff));
+          if (!cell) { unknownCells++; continue; }
+          drawable++;
+          const cx = rawX + cell.ox;
+          const cy = rawY + cell.oy - yLift;
+          if (cx < x0) x0 = cx;
+          if (cy < y0) y0 = cy;
+          if (cx + cell.w > x1) x1 = cx + cell.w;
+          if (cy + cell.h > y1) y1 = cy + cell.h;
+        }
+      }
+    }
+    // Dev-only visibility: a region whose entries mostly miss the
+    // cellMap means the atlas/manifest doesn't carry its slots (e.g. a
+    // stale atlas after add-to-tileset) — the ghost would silently show
+    // holes that the stamp won't have.
+    if (unknownCells > 0 && import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `renderRegionToCanvas: ${unknownCells} entr(ies) missing from the `
+        + `atlas cellMap (drawable: ${drawable}) — ghost will have holes`,
+      );
+    }
+    if (drawable === 0) return null;
+
+    const work = document.createElement("canvas");
+    work.width = Math.ceil(x1 - x0);
+    work.height = Math.ceil(y1 - y0);
+    const ctx = work.getContext("2d");
+    if (!ctx) return null;
+
+    // Iso row groups — same ordering scheme as render(): rows keyed by
+    // (dx + dy), left-to-right within a row by (dx - dy).
+    const rowsByXy = new Map<number, GhostRegionTile[]>();
+    for (const t of tiles) {
+      const k = t.dx + t.dy;
+      let row = rowsByXy.get(k);
+      if (!row) { row = []; rowsByXy.set(k, row); }
+      row.push(t);
+    }
+    for (const row of rowsByXy.values()) {
+      row.sort((a, b) => (a.dx - a.dy) - (b.dx - b.dy));
+    }
+    const orderedXy = [...rowsByXy.keys()].sort((a, b) => a - b);
+
+    const drawPass = (layer: LayerName, shadow: boolean) => {
+      for (const xy of orderedXy) {
+        const row = rowsByXy.get(xy)!;
+        for (const t of row) {
+          const entries = t.layers[layer];
+          if (!entries || entries.length === 0) continue;
+          const [rawX, rawY] = this.tileToPixRaw(t.dx, t.dy);
+          this.drawEntriesAt(ctx, entries, rawX - x0, rawY - y0,
+            layer, shadow);
+        }
+      }
+    };
+    // PASS 1-3: land, objs, shadows (darken-blend) — whole-region passes.
+    drawPass("land", false);
+    drawPass("objs", false);
+    drawPass("shadows", true);
+    // PASS 4: struct + roof + onroof grouped, level-major WITHIN each iso
+    // row (mirrors render()'s critical fidelity rule).
+    for (const xy of orderedXy) {
+      const row = rowsByXy.get(xy)!;
+      for (const layer of ["structs", "roofs", "onroofs"] as const) {
+        for (const t of row) {
+          const entries = t.layers[layer];
+          if (!entries || entries.length === 0) continue;
+          const [rawX, rawY] = this.tileToPixRaw(t.dx, t.dy);
+          this.drawEntriesAt(ctx, entries, rawX - x0, rawY - y0,
+            layer, false);
+        }
+      }
+    }
+
+    // Apply the uniform ghost alpha to the finished composite.
+    const out = document.createElement("canvas");
+    out.width = work.width;
+    out.height = work.height;
+    const outCtx = out.getContext("2d");
+    if (!outCtx) return null;
+    outCtx.globalAlpha = alpha;
+    outCtx.drawImage(work, 0, 0);
+    return { canvas: out, originX: x0, originY: y0 };
   }
 }
 

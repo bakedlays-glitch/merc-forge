@@ -1074,6 +1074,22 @@ function BuildingLibrarySection({
                         {e.w}×{e.h} · {e.room_count} room{e.room_count !== 1 ? "s" : ""}
                         {e.seen_in > 1 ? ` · ×${e.seen_in}` : ""}
                       </span>
+                      {/* Family-sibling provenance badge — this building
+                          was scanned from another tileset of the same
+                          family and renders here with THIS tileset's
+                          art (the intended per-sector reskin). */}
+                      {e.source_tileset !== undefined
+                        && e.source_tileset !== tileset && (
+                        <span
+                          className="rounded bg-amber-900/50 px-1 text-[8px] leading-3 text-amber-300/90"
+                          title={`Scanned from family tileset #${e.source_tileset}`
+                            + (e.source_tileset_name ? ` (${e.source_tileset_name})` : "")
+                            + ` — stamps with this tileset's art.`}
+                        >
+                          from #{e.source_tileset}
+                          {e.source_tileset_name ? ` ${e.source_tileset_name}` : ""}
+                        </span>
+                      )}
                     </button>
                     {renamingId === e.id ? (
                       <input

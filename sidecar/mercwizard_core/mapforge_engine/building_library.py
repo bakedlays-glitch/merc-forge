@@ -49,6 +49,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import struct
 import time
 import xml.etree.ElementTree as ET
@@ -83,6 +84,92 @@ MAX_OVERHANG_EXPAND = 4     # ring-expansion cap per side
 # Content-layer subdirs, highest VFS priority first (matches
 # routes/mapforge.py's _TILESET_LAYERS).
 _DATA_LAYERS = ("Data-1.13", "Data-DMK", "Data")
+
+
+# ─── Tileset families ────────────────────────────────────────────────────
+# JA2 town tilesets are per-sector VARIANTS of one art family — e.g.
+# #16 "LAWLESS 1 (San Mona-d5)" / #18 "LAWLESS 2 (burnt-c5)" /
+# #21 "LAWLESS 3 (burnt-c6)" — so a single-tileset scan often yields only
+# the open map's own buildings. The library widens its scan to the whole
+# family, grouped by normalized Ja2Set.dat.xml tileset name.
+#
+# NOTE: no authoritative tileset-family table exists in the corpus work
+# (Headless_Compiler/map_corpus has no tileset_family field; its "family"
+# mentions are wall-orientation families), so the grouping is this name
+# heuristic, verified against the real install's tileset names.
+
+#: Families the suffix-stripper can't derive (different WORD suffixes,
+#: not numbers). Keyed on the heuristic-normalized name so the overlay is
+#: name-based (portable across installs), not tileset-id-based.
+_FAMILY_ALIASES = {
+    # #31 CAMBRIA STRIP + #32 CAMBRIA HOMES are per-sector variants of
+    # the Cambria town family.
+    "CAMBRIA STRIP": "CAMBRIA",
+    "CAMBRIA HOMES": "CAMBRIA",
+}
+
+#: Trailing sector-list token, e.g. "g2,h2" in "GRUMM g2,h2" or "d13".
+_SECTOR_LIST_RE = re.compile(r"[A-P]\d{1,2}(?:[,/\-][A-P]?\d{1,2})*")
+
+
+def normalize_family_name(name: str) -> str:
+    """Normalize a Ja2Set.dat.xml tileset name to its family key.
+
+    "LAWLESS 1 (San Mona-d5)" → "LAWLESS"; "GRUMM g2,h2" → "GRUMM";
+    "FARM 2 (ruined walls)" → "FARM"; "LUSH2 (different trees)" → "LUSH"
+    (the missing-space case); "DESERT SAM" stays "DESERT SAM" (word
+    suffixes are NOT stripped — only trailing numbers / sector lists /
+    parenthesized qualifiers). Returns "" for empty/missing names (the
+    caller must treat that as "no family")."""
+    s = (name or "").strip().strip("\"'")
+    # Parenthesized qualifier — even unspaced ("DEAD AIRSTRIP(Drassen-c13)").
+    s = re.sub(r"\(.*$", "", s)
+    s = s.strip().upper()
+    tokens = s.split()
+    while len(tokens) > 1:
+        t = tokens[-1]
+        if t.isdigit() or _SECTOR_LIST_RE.fullmatch(t):
+            tokens.pop()
+        else:
+            break
+    s = " ".join(tokens)
+    # Missing-space variant number glued onto the word: "LUSH2" → "LUSH".
+    # Single digit preceded by a letter only, so "JA25" (the JA2.5
+    # tilesets, letter+digit+digit) stays intact. Runs AFTER the token
+    # strip so sector lists like "G2,H2" aren't mangled first.
+    s = re.sub(r"(?<=[A-Z])\d$", "", s)
+    return _FAMILY_ALIASES.get(s, s)
+
+
+def load_tileset_names(xml_path: Path) -> Dict[int, str]:
+    """Tileset index → <Name> text from Ja2Set.dat.xml ("" when the
+    block has no Name node). Empty dict on parse failure."""
+    try:
+        tree = ET.parse(xml_path)
+    except (ET.ParseError, OSError):
+        return {}
+    out: Dict[int, str] = {}
+    for ts in tree.getroot().iter("Tileset"):
+        try:
+            idx = int(ts.get("index", "-1"))
+        except ValueError:
+            continue
+        if idx < 0:
+            continue
+        out[idx] = (ts.findtext("Name") or "").strip()
+    return out
+
+
+def tileset_family(xml_path: Path, tileset: int) -> List[int]:
+    """Sorted tileset ids sharing `tileset`'s name family (incl. itself).
+    A tileset with no/empty name is its own family of one."""
+    names = load_tileset_names(xml_path)
+    fam = normalize_family_name(names.get(tileset, ""))
+    if not fam:
+        return [tileset]
+    members = {i for i, n in names.items() if normalize_family_name(n) == fam}
+    members.add(tileset)
+    return sorted(members)
 
 
 # ─── Map-source enumeration ─────────────────────────────────────────────
@@ -154,10 +241,15 @@ def list_map_sources(install_root: Path) -> List[Dict[str, Any]]:
 
 def fingerprint(install_root: Path, tileset: int, xml_path: Path,
                 sources: List[Dict[str, Any]]) -> str:
-    """Cache key: install + tileset + tileset-XML mtime + every map
-    source's (path, internal, mtime, size). Any map edit, addition or
-    removal changes the fingerprint and invalidates the cached library."""
+    """Cache key: build-format version + install + tileset + tileset-XML
+    mtime + every map source's (path, internal, mtime, size). `sources`
+    spans EVERY map in the install (not just this tileset's), so edits to
+    any family-sibling map invalidate the cache too; the XML mtime covers
+    tileset renames that change the family grouping."""
     h = hashlib.sha1()
+    # Payload-format version — bump when the build output changes shape
+    # (famv1 = family-widened scan + source_tileset provenance fields).
+    h.update(b"famv1|")
     h.update(str(install_root.resolve()).lower().encode("utf-8", "replace"))
     h.update(f"|ts={tileset}|".encode())
     try:
@@ -445,6 +537,24 @@ def _dedupe_key(structure: List[Dict[str, Any]],
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+def _slot_requirements(structure: List[Dict[str, Any]],
+                       contents: List[Dict[str, Any]]) -> Dict[int, int]:
+    """Every slot a captured building references → the highest sub it
+    uses on any layer. Drives the family slot-compatibility guard."""
+    req: Dict[int, int] = {}
+    for tiles in (structure, contents):
+        for t in tiles:
+            for ln in LAYER_NAMES:
+                for slot, sub in t["layers"][ln]:
+                    if sub > req.get(slot, 0):
+                        req[slot] = sub
+    return req
+
+
+#: Cap on the per-build excluded-building note list (diagnostics only).
+_MAX_EXCLUDED_NOTES = 20
+
+
 def build_library(
     xml_path: Path,
     tileset: int,
@@ -454,13 +564,26 @@ def build_library(
     sources: Optional[List[Dict[str, Any]]] = None,
     thumbs: bool = True,
     progress: Optional[Callable[[str], None]] = None,
+    frame_count_fn: Optional[Callable[[int], int]] = None,
 ) -> Dict[str, Any]:
-    """Scan every map of `tileset` in the install and extract its
-    buildings. Returns the library payload (entries + scan stats).
+    """Scan every map of `tileset`'s TILESET FAMILY in the install and
+    extract its buildings. Returns the library payload (entries + scan
+    stats + family info).
 
-    `loose_dirs` / `slf_paths` are the TILESET asset roots (for
-    thumbnail rendering) — derived by the caller from the active
-    install, same contract as IsoRenderer."""
+    Family widening: town tilesets are per-sector variants (LAWLESS 1/2/3,
+    GRUMM g1/g2, …) sharing one slot layout, so buildings from sibling
+    tilesets graft cleanly — they render/stamp with the TARGET tileset's
+    art for the same slots (the intended reskin). Each sibling building
+    passes a SLOT-COMPATIBILITY GUARD first: every (slot, sub) it uses
+    must resolve to a registered STI in the target tileset's slot map
+    (tile-0 inheritance included) with at least that many sub-frames.
+    Incompatible siblings are excluded and counted instead of shipping
+    invisible/garbled grafts.
+
+    `loose_dirs` / `slf_paths` are the TILESET asset roots (for thumbnail
+    rendering + the guard's frame counts) — derived by the caller from
+    the active install, same contract as IsoRenderer. `frame_count_fn`
+    overrides the StiCache-backed per-slot frame counter (tests)."""
     from .iso_renderer import IsoRenderer, StiCache, load_tileset_xml
     from .parse_dat_ext import parse_dat_full, DatParseError
 
@@ -469,29 +592,82 @@ def build_library(
         sources = list_map_sources(install_root)
     sector_names = load_sector_names(install_root)
     slot_filenames = load_tileset_xml(xml_path, tileset)
+    tileset_names = load_tileset_names(xml_path)
+    family_ids = tileset_family(xml_path, tileset)
+    family_set = set(family_ids)
 
     entries: List[Dict[str, Any]] = []
     by_key: Dict[str, Dict[str, Any]] = {}
     scanned = 0
-    matched = 0
+    matched_by_tileset: Dict[int, int] = {}
     skipped_clusters = 0
+    excluded_incompatible = 0
+    excluded_notes: List[Dict[str, Any]] = []
     shared_sti: Optional[StiCache] = None
     renderer: Optional[IsoRenderer] = None
 
+    def _ensure_sti() -> StiCache:
+        nonlocal shared_sti
+        if shared_sti is None:
+            shared_sti = StiCache(tileset, loose_dirs=loose_dirs,
+                                  slf_paths=slf_paths)
+        return shared_sti
+
+    # Per-slot frame counts of the TARGET tileset (lazy — only decodes an
+    # STI when a sibling building actually references the slot). Same
+    # machinery as run_generator's frame_count wiring.
+    _fc_cache: Dict[int, int] = {}
+
+    def _frame_count(slot: int) -> int:
+        if frame_count_fn is not None:
+            return frame_count_fn(slot)
+        if slot not in _fc_cache:
+            nm = slot_filenames.get(slot)
+            try:
+                _fc_cache[slot] = len(_ensure_sti().get(nm)) if nm else 0
+            except Exception:  # noqa: BLE001
+                _fc_cache[slot] = 0
+        return _fc_cache[slot]
+
+    def _compat_missing(req: Dict[int, int]) -> List[str]:
+        """Slots/subs the TARGET tileset can't render. Empty = graftable."""
+        missing: List[str] = []
+        for slot, max_sub in sorted(req.items()):
+            nm = slot_filenames.get(slot)
+            if not nm:
+                missing.append(f"slot {slot}: not registered in target")
+                continue
+            fc = _frame_count(slot)
+            if fc < max_sub:
+                missing.append(
+                    f"slot {slot} ({nm}): needs sub {max_sub}, "
+                    f"target has {fc} frame(s)")
+        return missing
+
+    # Collect every family map ONE read/parse each, then process the
+    # TARGET tileset's maps first so cross-tileset dedupe keeps target
+    # provenance (a building present both at home and in a sibling map
+    # is canon for the target).
+    candidates: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     for src in sources:
         data = _read_source_bytes(src)
         if data is None:
             continue
         scanned += 1
-        if _header_tileset(data) != tileset:
+        if _header_tileset(data) not in family_set:
             continue
         try:
             parsed = parse_dat_full(data, src["name"])
         except DatParseError:
             continue
-        if parsed["tileset"] != tileset:
+        if parsed["tileset"] not in family_set:
             continue
-        matched += 1
+        candidates.append((src, parsed))
+    candidates.sort(key=lambda c: c[1]["tileset"] != tileset)
+
+    for src, parsed in candidates:
+        map_ts = parsed["tileset"]
+        matched_by_tileset[map_ts] = matched_by_tileset.get(map_ts, 0) + 1
         if progress:
             progress(f"scanning {src['name']}")
         rows, cols = parsed["rows"], parsed["cols"]
@@ -499,14 +675,15 @@ def build_library(
         if not comps:
             continue
         # One reusable renderer per build; swap the parsed dict per map.
+        # Created with the TARGET tileset's slot map + StiCache, so
+        # sibling-map thumbnails render in the target's art — exactly
+        # what stamping will produce.
         if thumbs and renderer is None:
-            shared_sti = StiCache(tileset, loose_dirs=loose_dirs,
-                                  slf_paths=slf_paths)
             renderer = IsoRenderer(
                 Path(src["name"]), xml_path, tileset,
                 parsed=parsed, loose_dirs=[], slf_paths=[],
             )
-            renderer.sti = shared_sti
+            renderer.sti = _ensure_sti()
         if renderer is not None:
             renderer.parsed = parsed
             renderer.cols = cols
@@ -540,6 +717,23 @@ def build_library(
             if key in by_key:
                 by_key[key]["seen_in"] += 1
                 continue
+            # SLOT-COMPATIBILITY GUARD for family siblings: a graft
+            # renders with the TARGET's art for the same slots, so every
+            # (slot, sub) must exist there. The target's own buildings
+            # are verbatim canon — no guard needed.
+            if map_ts != tileset:
+                missing = _compat_missing(
+                    _slot_requirements(structure, contents))
+                if missing:
+                    excluded_incompatible += 1
+                    if len(excluded_notes) < _MAX_EXCLUDED_NOTES:
+                        excluded_notes.append({
+                            "source_map": src["name"],
+                            "source_tileset": map_ts,
+                            "w": w, "h": h,
+                            "missing": missing[:5],
+                        })
+                    continue
             thumb = ""
             if renderer is not None:
                 try:
@@ -557,7 +751,11 @@ def build_library(
                 "town": town,
                 "sector": sector,
                 "source_map": src["name"],
+                # The stamp/render tileset is the TARGET (grafts adopt
+                # its art); provenance lives in source_tileset.
                 "tileset": tileset,
+                "source_tileset": map_ts,
+                "source_tileset_name": tileset_names.get(map_ts, ""),
                 "w": w,
                 "h": h,
                 "room_count": room_count,
@@ -576,7 +774,13 @@ def build_library(
         "install_root": str(install_root),
         "entries": entries,
         "scanned_maps": scanned,
-        "matching_maps": matched,
+        "matching_maps": sum(matched_by_tileset.values()),
+        "matched_by_tileset": matched_by_tileset,
+        "family_tilesets": family_ids,
+        "family_name": normalize_family_name(
+            tileset_names.get(tileset, "")),
+        "excluded_incompatible": excluded_incompatible,
+        "excluded_notes": excluded_notes,
         "skipped_clusters": skipped_clusters,
         "build_ms": int((time.time() - t0) * 1000),
     }
