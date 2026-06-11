@@ -226,12 +226,17 @@ export function MapForgeGeneratePanel({
     if (!sessionId) clearGhostRef.current();
   }, [sessionId]);
 
+  // True once the user EXPLICITLY set slot/sub (typed or clicked Use
+  // brush) — from then on, brush changes stop auto-overwriting them.
+  const slotTouchedRef = useRef(false);
+
   const selectGenerator = (name: string) => {
     previewAbortRef.current?.abort();
     clearGhost();
     setPreviewCount(null);
     setPreviewError(null);
     setSelectedName(name);
+    slotTouchedRef.current = false;
     const g = (list.data ?? []).find((x) => x.name === name);
     const defaults: Record<string, unknown> = {};
     if (g) for (const p of g.params) defaults[p.name] = p.default;
@@ -253,6 +258,7 @@ export function MapForgeGeneratePanel({
   /** Re-sync slot/sub/layer from the current brush on demand. */
   const useBrush = () => {
     if (!activeBrush) return;
+    slotTouchedRef.current = true;
     setValues((prev) => ({
       ...prev,
       slot: activeBrush.slot,
@@ -263,11 +269,45 @@ export function MapForgeGeneratePanel({
     }));
   };
 
+  const hasSlotSubParams = useMemo(
+    () => (selected?.params ?? []).some((p) => p.name === "slot")
+      && (selected?.params ?? []).some((p) => p.name === "sub"),
+    [selected],
+  );
+
+  // LIVE brush adoption: the most common real flow is "open Generate
+  // first, realize you need a brush, go arm one" — the generator must
+  // pick it up the moment it's armed, not require a button press
+  // (owner: "why can't it take what's in the brush by default?").
+  // Only while the user hasn't explicitly chosen a slot/sub.
+  useEffect(() => {
+    if (!activeBrush || !selected || !hasSlotSubParams) return;
+    if (slotTouchedRef.current) return;
+    setValues((prev) => {
+      if (prev.slot === activeBrush.slot && prev.sub === activeBrush.sub) {
+        return prev;
+      }
+      return {
+        ...prev,
+        slot: activeBrush.slot,
+        sub: activeBrush.sub,
+        ...(selected.params.some((p) => p.name === "layer")
+          ? { layer: activeBrush.layer }
+          : {}),
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBrush, selected, hasSlotSubParams]);
+
   // ── Live preview: dry-run on every (debounced) param change ────────
   const valuesKey = JSON.stringify(values);
   useEffect(() => {
     if (!autoPreview || !sessionId || !selected || running || readOnly) return;
     if (scheme && !region.picked) return;   // wait for a region first
+    // Don't ghost known-junk: a slot/sub generator with no brush armed
+    // and untouched defaults would preview slot-0 garbage right under
+    // the "No brush armed" warning.
+    if (hasSlotSubParams && !activeBrush && !slotTouchedRef.current) return;
     const t = setTimeout(() => {
       previewAbortRef.current?.abort();
       const ac = new AbortController();
@@ -373,11 +413,7 @@ export function MapForgeGeneratePanel({
     ),
     [selected, hidden],
   );
-  const hasSlotSub = useMemo(
-    () => (selected?.params ?? []).some((p) => p.name === "slot")
-      && (selected?.params ?? []).some((p) => p.name === "sub"),
-    [selected],
-  );
+  const hasSlotSub = hasSlotSubParams;
   const presets = selected ? PRESETS[selected.name] ?? null : null;
 
   if (!sessionId) {
@@ -466,9 +502,21 @@ export function MapForgeGeneratePanel({
               key={p.name}
               param={p}
               value={values[p.name]}
-              onChange={(v) => setValues((prev) => ({ ...prev, [p.name]: v }))}
+              onChange={(v) => {
+                if (p.name === "slot" || p.name === "sub") slotTouchedRef.current = true;
+                setValues((prev) => ({ ...prev, [p.name]: v }));
+              }}
             />
           ))}
+          {hasSlotSub && !activeBrush && (
+            <div className="rounded border border-amber-700/60 bg-amber-950/40 px-2 py-1.5 text-[10px] leading-snug text-amber-200">
+              <strong>No brush armed</strong> — this generator will paint
+              slot {String(values.slot ?? 0)}, which is almost certainly
+              not what you want. Pick a tile in the Palette (or
+              right-click one on the map) and the generator will use it
+              automatically.
+            </div>
+          )}
           {hasSlotSub && activeBrush && (
             <div className="flex items-center justify-between gap-2 rounded border border-gray-700 bg-gray-900/60 px-2 py-1">
               <span className="truncate text-[10px] text-gray-400">
@@ -509,7 +557,10 @@ export function MapForgeGeneratePanel({
                       key={p.name}
                       param={p}
                       value={values[p.name]}
-                      onChange={(v) => setValues((prev) => ({ ...prev, [p.name]: v }))}
+                      onChange={(v) => {
+                if (p.name === "slot" || p.name === "sub") slotTouchedRef.current = true;
+                setValues((prev) => ({ ...prev, [p.name]: v }));
+              }}
                     />
                   ))}
                 </div>
