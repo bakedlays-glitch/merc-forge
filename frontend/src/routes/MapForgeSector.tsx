@@ -80,6 +80,7 @@ import { MapForgeSettingsModal } from "./MapForgeSettingsModal";
 import MapForgeConsole, { type CommandSpec } from "./MapForgeConsole";
 import MapForgeGeneratorWizard from "./MapForgeGeneratorWizard";
 import { MapForgeGeneratePanel } from "./MapForgeGeneratePanel";
+import { MapForgeHelpOverlay } from "./MapForgeHelpOverlay";
 import { MapForgeValidateBody, MapForgeValidatePanel } from "./MapForgeValidatePanel";
 import ConfirmModal from "../components/ConfirmModal";
 import { FloatingPanel } from "../components/FloatingPanel";
@@ -367,6 +368,8 @@ function MapForgeSectorInner() {
   // backdrop click (except during a streaming run).
   const [wizardOpen, setWizardOpen] = useState(false);
   const [showValidate, setShowValidate] = useState(false);
+  // `?` cheatsheet overlay (MapForgeHelpOverlay).
+  const [showHelp, setShowHelp] = useState(false);
   const [radarBusy, setRadarBusy] = useState(false);
   // Last generated radar minimap — shown as a thumbnail in the View
   // panel so there's visible proof the STI was written (the engine
@@ -1971,6 +1974,36 @@ function MapForgeSectorInner() {
     }
   }
 
+  /** Generate the in-game minimap STI + pin its preview thumbnail.
+   * Shared by the dock View panel and the legacy toolbar. */
+  async function generateRadarNow() {
+    if (!datPath || !xmlPath || radarBusy) return;
+    setRadarBusy(true);
+    try {
+      const r = await generateRadar(datPath, xmlPath, tileset);
+      const fn = r.output_path.split(/[\\/]/).pop();
+      setRadarPreview({
+        png: r.preview_png_b64,
+        name: fn ?? "radar.sti",
+        path: r.output_path,
+      });
+      log?.append({
+        severity: "success",
+        message: `Radar map written: ${fn}`
+          + (r.overrides_bundled ? " (overrides bundled radar)" : ""),
+        detail: r.output_path,
+      });
+    } catch (e) {
+      log?.append({
+        severity: "error",
+        message: "Radar generation failed",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setRadarBusy(false);
+    }
+  }
+
   /** Post-generator-run resync — shared by the wizard and the Generate
    * panel. Always paint regardless of `ok`: the per-op mirror already
    * mutated renderer.parsed, so the canvas MUST repaint to reflect
@@ -2679,9 +2712,12 @@ function MapForgeSectorInner() {
           // the open path here.
           if (!datPath) { ctx.print("No sector open.", "warn"); return; }
           ctx.print("Reloading sector…");
-          // setSession(null) triggers the effect that opens a fresh one
-          // (see the session-open useEffect upstream).
-          setSession(null);
+          // Bump the restart epoch — it's in the session-open effect's
+          // dep array, so a fresh session opens from disk. (The old
+          // `setSession(null)` re-opened NOTHING — `session` is not a
+          // dep of that effect — leaving a dead blank viewport until
+          // the URL changed or the sidecar restarted.)
+          setSessionRestartEpoch((n) => n + 1);
         },
       },
       {
@@ -2850,6 +2886,13 @@ function MapForgeSectorInner() {
       if (e.key === ":" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         setConsoleOpen(true);
+        return;
+      }
+      // `?` toggles the shortcut cheatsheet. Like `:`, it runs before
+      // the action dispatcher so it's always reachable.
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setShowHelp((h) => !h);
         return;
       }
       // Encode the event into our canonical combo format + look up.
@@ -3674,38 +3717,21 @@ function MapForgeSectorInner() {
         <button
           type="button"
           disabled={radarBusy}
-          onClick={async () => {
-            setRadarBusy(true);
-            try {
-              const r = await generateRadar(datPath, xmlPath, tileset);
-              const fn = r.output_path.split(/[\\/]/).pop();
-              setRadarPreview({
-                png: r.preview_png_b64,
-                name: fn ?? "radar.sti",
-                path: r.output_path,
-              });
-              log?.append({
-                severity: "success",
-                message: `Radar map written: ${fn}`
-                  + (r.overrides_bundled ? " (overrides bundled radar)" : ""),
-                detail: r.output_path,
-              });
-            } catch (e) {
-              log?.append({
-                severity: "error",
-                message: "Radar generation failed",
-                detail: e instanceof Error ? e.message : String(e),
-              });
-            } finally {
-              setRadarBusy(false);
-            }
-          }}
+          onClick={() => void generateRadarNow()}
           title="Generate the 88×44 minimap STI the engine loads (writes to the install's user profile, above Radarmaps.slf)"
           className="text-xs px-3 py-1.5 rounded border border-sky-500/60 bg-sky-500/15 text-sky-100 hover:bg-sky-500/30 font-medium disabled:opacity-50"
         >
           {radarBusy ? "Radar…" : "🛰 Radar"}
         </button>
       )}
+      <button
+        type="button"
+        onClick={() => setShowHelp(true)}
+        title="Controls & shortcuts (?)"
+        className="text-xs px-2.5 py-1.5 rounded border border-gray-600 bg-gray-800/60 text-gray-200 hover:bg-gray-700 font-medium"
+      >
+        ? Help
+      </button>
       {radarPreview && (
         <span
           className="inline-flex items-center gap-1.5 rounded border border-sky-700 bg-sky-950/60 px-1.5 py-0.5"
@@ -3982,6 +4008,65 @@ function MapForgeSectorInner() {
               >
                 ✨ Generate…
               </button>
+            )}
+            {/* Validate / Radar / Help — legacy-layout parity with the
+                dock's View panel (these were dock-only, so undocked
+                users could only reach them via... nothing). */}
+            {datPath && (
+              <button
+                type="button"
+                onClick={openValidatePanel}
+                title="Pre-flight validate this sector (crash traps, playability, JSD frame match)"
+                className="text-xs px-3 py-1.5 rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 font-medium"
+              >
+                ✓ Validate
+              </button>
+            )}
+            {datPath && xmlPath && (
+              <button
+                type="button"
+                disabled={radarBusy}
+                onClick={() => void generateRadarNow()}
+                title="Generate the 88×44 minimap STI the engine loads (writes to the install's user profile)"
+                className="text-xs px-3 py-1.5 rounded border border-sky-500/60 bg-sky-500/15 text-sky-100 hover:bg-sky-500/30 font-medium disabled:opacity-50"
+              >
+                {radarBusy ? "Radar…" : "🛰 Radar"}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowHelp(true)}
+              title="Controls & shortcuts (?)"
+              className="text-xs px-2.5 py-1.5 rounded border border-gray-600 bg-gray-800/60 text-gray-200 hover:bg-gray-700 font-medium"
+            >
+              ? Help
+            </button>
+            {radarPreview && (
+              <span
+                className="inline-flex items-center gap-1.5 rounded border border-sky-700 bg-sky-950/60 px-1.5 py-0.5"
+                title={`Written to ${radarPreview.path}`}
+              >
+                <img
+                  src={`data:image/png;base64,${radarPreview.png}`}
+                  alt={`Radar minimap ${radarPreview.name}`}
+                  width={132}
+                  height={66}
+                  style={{ imageRendering: "pixelated" }}
+                  className="rounded-sm ring-1 ring-sky-800"
+                />
+                <span className="flex flex-col text-[9px] leading-tight text-sky-200">
+                  <span>{radarPreview.name}</span>
+                  <span className="text-sky-400/70">✓ in profile RADARMAPS</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setRadarPreview(null)}
+                  className="ml-0.5 text-[10px] text-sky-300 hover:text-white"
+                  title="Dismiss preview"
+                >
+                  ✕
+                </button>
+              </span>
             )}
             <SectorControls
             info={info.data}
@@ -4538,6 +4623,14 @@ function MapForgeSectorInner() {
         }}
         onOp={mirrorGeneratorOpThrottled}
         onComplete={genRunComplete}
+      />
+
+      {/* `?` shortcut cheatsheet — reachable from the Help buttons in
+          both layouts and the `?` key. */}
+      <MapForgeHelpOverlay
+        open={showHelp}
+        onClose={() => setShowHelp(false)}
+        settings={settings}
       />
 
       {/* Browse Assets pop-out — legacy (non-dock) layout only. The full
