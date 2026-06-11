@@ -26,6 +26,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -54,6 +55,7 @@ import {
   type SessionEdit,
   type SessionInfo,
   type TileInspection,
+  type TilesetInfo,
 } from "../lib/mapforge";
 import {
   IsoRenderer,
@@ -67,27 +69,36 @@ import {
 } from "../lib/IsoRenderer";
 import { IsoRendererGL } from "../lib/IsoRendererGL";
 import { type ActiveBrush } from "./MapForgePalette";
-import { MapForgeAssetViewer, MapForgeAssetBrowserBody } from "./MapForgeAssetViewer";
+import { MapForgeAssetBrowserBody } from "./MapForgeAssetViewer";
 import { MapForgeTilesetBrowser } from "./MapForgeTilesetBrowser";
-import { MapForgePaletteRail, RecentBrushGrid } from "./MapForgePaletteRail";
+import { MapForgePaletteRail } from "./MapForgePaletteRail";
 import {
   MapForgeLogFull,
-  MapForgeLogPanel,
   MapForgeLogProvider,
   useMapForgeLog,
 } from "./MapForgeLog";
 import { MapForgeSettingsModal } from "./MapForgeSettingsModal";
 import MapForgeConsole, { type CommandSpec } from "./MapForgeConsole";
-import MapForgeGeneratorWizard from "./MapForgeGeneratorWizard";
 import { MapForgeGeneratePanel } from "./MapForgeGeneratePanel";
 import { MapForgeHelpOverlay } from "./MapForgeHelpOverlay";
-import { MapForgeValidateBody, MapForgeValidatePanel } from "./MapForgeValidatePanel";
+import { MapForgeValidateBody } from "./MapForgeValidatePanel";
 import ConfirmModal from "../components/ConfirmModal";
-import { FloatingPanel } from "../components/FloatingPanel";
-import { MapForgeDock } from "./MapForgeDock";
-import { MapForgeDockContext } from "./mapForgeDockContext";
+import {
+  MapForgeDock,
+  PANEL_ORDER,
+  PANEL_TITLE,
+  reopenDockPanel,
+  resetDockLayout,
+  saveUserDefaultLayout,
+} from "./MapForgeDock";
+import { MapForgeDockContext, type DockPanelId } from "./mapForgeDockContext";
 import type { DockviewApi } from "dockview";
-import { generateRadar, listGenerators, runGenerator } from "../lib/mapforge";
+import {
+  generateRadar,
+  listGenerators,
+  listTilesets,
+  runGenerator,
+} from "../lib/mapforge";
 import {
   actionForBinding,
   bindingFor,
@@ -183,7 +194,7 @@ function _mirrorGeneratorOp(renderer: IsoRenderer, op: unknown): void {
   // the whole generator run as a single undo step. recordSnapshot /
   // recordRoomSnapshot early-return when no stroke is active, so this
   // is safe outside a beginStroke/endStroke pair (called by the
-  // console + wizard generator handlers, not by anyone else right now).
+  // console + Generate-panel generator handlers, nobody else right now).
   // User-reported: Ctrl+Z does nothing after a generator run.
   if (opName === "set_room") {
     renderer.recordRoomSnapshot(x, y);
@@ -363,20 +374,9 @@ function MapForgeSectorInner() {
   // top of the component so the keybinding effect + command handlers
   // can read it. See MapForgeConsole.tsx + task #114.
   const [consoleOpen, setConsoleOpen] = useState(false);
-  // Modal generator wizard — the GUI peer to the console's `:gen`
-  // command. Launched by a toolbar button; closed via ✕ / Esc /
-  // backdrop click (except during a streaming run).
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [showValidate, setShowValidate] = useState(false);
   // `?` cheatsheet overlay (MapForgeHelpOverlay).
   const [showHelp, setShowHelp] = useState(false);
   const [radarBusy, setRadarBusy] = useState(false);
-  // Last generated radar minimap — shown as a thumbnail in the View
-  // panel so there's visible proof the STI was written (the engine
-  // gives no feedback until a game load). Cleared via its ✕.
-  const [radarPreview, setRadarPreview] = useState<{
-    png: string; name: string; path: string;
-  } | null>(null);
   const [params, setParams] = useSearchParams();
   const datPath = params.get("dat") ?? "";
   const xmlPath = params.get("xml") ?? "";
@@ -387,6 +387,16 @@ function MapForgeSectorInner() {
     queryKey: ["mapforge", "sector", "info", datPath],
     queryFn: () => getSectorInfo(datPath),
     enabled: !!datPath,
+  });
+
+  // Tileset list (index + NAME) for the command bar's tileset dropdown —
+  // the same enumerator the Tileset Editor uses, so the user picks
+  // "#70 — FALLOUT VAULT" instead of typing a bare number.
+  const tilesetList = useQuery({
+    queryKey: ["mapforge", "tilesets", xmlPath],
+    queryFn: () => listTilesets(xmlPath),
+    enabled: !!xmlPath,
+    staleTime: 60 * 1000,
   });
 
   // parseInt returns NaN on non-numeric input (e.g. ?room=abc, a stale
@@ -549,89 +559,60 @@ function MapForgeSectorInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ─── Asset browser modal + recent-brush history ────────────────────
-  // The new compact rail (10rem) replaces the old 18rem sidebar; the
-  // full palette lives in the pop-out viewer below. Recent picks are
-  // surfaced in the rail for one-click switching between tiles the
-  // user is actively using.
-  const [assetViewerOpen, setAssetViewerOpen] = useState(false);
-  // Pop-out floating panels for the Variants strip + Recent palette.
-  // Geometry/size persist inside the panels themselves (localStorage);
-  // only the open/closed toggle lives here.
-  const [variantsFloat, setVariantsFloat] = useState(false);
-  const [recentFloat, setRecentFloat] = useState(false);
-  // Dock layout — the editor body renders through dockview (MapForgeDock)
-  // instead of the fixed grid. Now the DEFAULT; only an explicit "0"
-  // (Undocked Mode, toggled in Settings → Layout) opts out. Persisted.
-  const [dockMode, setDockMode] = useState<boolean>(() => {
-    try { return localStorage.getItem("mapforge.dockMode") !== "0"; } catch { return true; }
-  });
-  // Live DockviewApi (dock mode only) — lets the rail's "Browse assets"
-  // button activate the docked Browse Assets panel instead of opening the
-  // legacy modal. Null in legacy layout / before the dock is ready.
+  // ─── Dock plumbing + recent-brush history ──────────────────────────
+  // Live DockviewApi — lets the command bar + rail drive the dock
+  // imperatively (focus/re-open panels, reset layout). Null before the
+  // dock is ready.
   const dockApiRef = useRef<DockviewApi | null>(null);
-  // "Browse assets" handler: in dock mode, focus (and re-open if the user
-  // closed it) the docked Browse Assets panel; otherwise open the modal.
+  // Open panel ids, reported by MapForgeDock — drives the Panels▾ menu
+  // (re-open closed panels).
+  const [dockOpenIds, setDockOpenIds] = useState<string[]>([]);
+  // "Browse assets" handler: focus (and re-open if the user closed it)
+  // the docked Browse Assets panel.
   const onBrowseAssets = useCallback(() => {
     const api = dockApiRef.current;
-    if (dockMode && api) {
-      const existing = api.getPanel("assets");
-      if (existing) {
-        existing.api.setActive();
-      } else {
-        // The user closed the panel's tab — re-add it beside Palette.
-        api.addPanel({
-          id: "assets",
-          component: "default",
-          title: "Browse Assets",
-          position: api.getPanel("palette")
-            ? { referencePanel: "palette", direction: "within" }
-            : undefined,
-        });
-      }
-      return;
+    if (!api) return;
+    const existing = api.getPanel("assets");
+    if (existing) {
+      existing.api.setActive();
+    } else {
+      // The user closed the panel's tab — re-add it beside Palette.
+      api.addPanel({
+        id: "assets",
+        component: "default",
+        title: PANEL_TITLE.assets,
+        position: api.getPanel("palette")
+          ? { referencePanel: "palette", direction: "within" }
+          : undefined,
+      });
     }
-    setAssetViewerOpen(true);
-  }, [dockMode]);
-  // Hotkey ("A") variant: in dock mode focus the docked panel (same as
-  // the button); in the legacy modal, TOGGLE — a second press dismisses
-  // the picker the user just opened, which feels more natural than
-  // requiring Esc.
-  const toggleBrowseAssets = useCallback(() => {
-    if (dockMode && dockApiRef.current) {
-      onBrowseAssets();
-      return;
-    }
-    setAssetViewerOpen((o) => !o);
-  }, [dockMode, onBrowseAssets]);
-  // Ref to the latest handler so the keydown effect (which intentionally
-  // doesn't depend on dockMode, to avoid re-binding the global listener)
-  // can invoke the current dock-aware version.
+  }, []);
+  // Hotkey ("A") variant — same as the button (focus the docked panel).
+  const toggleBrowseAssets = onBrowseAssets;
+  // Ref to the latest handler so the global keydown effect can invoke
+  // the current version without re-binding.
   const toggleBrowseAssetsRef = useRef(toggleBrowseAssets);
   toggleBrowseAssetsRef.current = toggleBrowseAssets;
-  // "Validate" opener: in dock mode, focus (re-adding if the user closed
-  // its tab) the docked Validation panel; legacy layout keeps the
-  // floating panel. Same pattern as onBrowseAssets.
+  // "Validate" opener: focus the docked Validation tab (pre-created as
+  // an inactive tab of the inspector group in the default layout), or
+  // re-add it into that group if the user closed it.
   const openValidatePanel = useCallback(() => {
     const api = dockApiRef.current;
-    if (dockMode && api) {
-      const existing = api.getPanel("validate");
-      if (existing) {
-        existing.api.setActive();
-      } else {
-        api.addPanel({
-          id: "validate",
-          component: "default",
-          title: "Validation",
-          position: api.getPanel("inspector")
-            ? { referencePanel: "inspector", direction: "within" }
-            : undefined,
-        });
-      }
-      return;
+    if (!api) return;
+    const existing = api.getPanel("validate");
+    if (existing) {
+      existing.api.setActive();
+    } else {
+      api.addPanel({
+        id: "validate",
+        component: "default",
+        title: PANEL_TITLE.validate,
+        position: api.getPanel("inspector")
+          ? { referencePanel: "inspector", direction: "within" }
+          : undefined,
+      });
     }
-    setShowValidate(true);
-  }, [dockMode]);
+  }, []);
   // Full-screen / focus mode — overlay the editor over the whole window
   // and hide the page header chrome. Transient (not persisted), so a
   // reload always starts un-focused.
@@ -787,7 +768,7 @@ function MapForgeSectorInner() {
   // only triggers a React repaint every N ops — without throttling
   // either we choke on 25k repaints (bump per op) or freeze the canvas
   // for 10 s (no bump at all).
-  const wizardOpCount = useRef(0);
+  const genPanelOpCount = useRef(0);
   const consoleOpCount = useRef(0);
 
   // ─── Phase 3: client-side renderer state ──────────────────────────
@@ -941,12 +922,6 @@ function MapForgeSectorInner() {
   // so it can't pin the inspector).
   const pickJustAnchoredRef = useRef(false);
   const pickSuppressClickRef = useRef(false);
-  // Wizard restore-state — set when the wizard's "Pick on map" button
-  // closes the wizard for a corner pick. After the picker resolves we
-  // reopen the wizard with these prefilled so the user lands back
-  // exactly where they were, with x1/y1/x2/y2 updated.
-  const [wizardRestoreGen, setWizardRestoreGen] = useState<string | null>(null);
-  const [wizardRestoreValues, setWizardRestoreValues] = useState<Record<string, unknown> | null>(null);
   // Bumped on every local mutation that should re-paint the canvas.
   // The render effect depends on this so React schedules a paint after
   // each edit. (Mutating `renderer.parsed` doesn't itself trigger React.)
@@ -1046,8 +1021,8 @@ function MapForgeSectorInner() {
     setRenderEpoch((e) => e + 1);
   }, [renderer, clearGhost]);
 
-  // Region pick for the Generate panel — same canvas picker the wizard
-  // uses, but the panel stays docked (no modal close/reopen dance).
+  // Region pick for the Generate panel — drag/click two corners on the
+  // canvas while the panel stays docked.
   const pickRegionForPanel = useCallback(
     (cb: (c1: { x: number; y: number }, c2: { x: number; y: number }) => void) => {
       setPickingRect({
@@ -1058,32 +1033,26 @@ function MapForgeSectorInner() {
     }, [],
   );
 
-  // "Generate" opener: dock mode focuses/re-adds the Generate panel;
-  // legacy layout falls back to the modal wizard.
+  // "Generate" opener: focus the docked Generate tab (pre-created as an
+  // inactive tab of the inspector group in the default layout), or
+  // re-add it into that group if the user closed it.
   const openGeneratePanel = useCallback(() => {
     const api = dockApiRef.current;
-    if (dockMode && api) {
-      const existing = api.getPanel("generate");
-      if (existing) {
-        existing.api.setActive();
-      } else {
-        const p = api.addPanel({
-          id: "generate",
-          component: "default",
-          title: "Generate",
-          position: api.getPanel("inspector")
-            ? { referencePanel: "inspector", direction: "within" }
-            : undefined,
-        });
-        // The panel needs real width for its sliders + region block —
-        // squeezed into a skinny inspector column it grows an inner
-        // scrollbar and reads as clutter (user screenshot, 2026-06-10).
-        try { p.group.api.setSize({ width: 380 }); } catch { /* best effort */ }
-      }
-      return;
+    if (!api) return;
+    const existing = api.getPanel("generate");
+    if (existing) {
+      existing.api.setActive();
+    } else {
+      api.addPanel({
+        id: "generate",
+        component: "default",
+        title: PANEL_TITLE.generate,
+        position: api.getPanel("inspector")
+          ? { referencePanel: "inspector", direction: "within" }
+          : undefined,
+      });
     }
-    setWizardOpen(true);
-  }, [dockMode]);
+  }, []);
   // requestAnimationFrame-coalesced epoch bump for the paint hot path.
   // A held-and-drag pencil-paint fires one paintBrush() per mousemove
   // (potentially 60+/sec on a fast drag); each previously called
@@ -1461,14 +1430,6 @@ function MapForgeSectorInner() {
       setLoadPhase(null);
     }
   }, [renderer, renderMeta, selectedRoom, hiddenLayers, renderEpoch, highlightTiles, firstPaintDone]);
-
-  // Persist the dock toggle + repaint when it flips: the <canvas>
-  // unmounts from one layout and remounts in the other, so bump
-  // renderEpoch (a render-effect dep) to redraw into the new element.
-  useEffect(() => {
-    try { localStorage.setItem("mapforge.dockMode", dockMode ? "1" : "0"); } catch { /* ignore */ }
-    setRenderEpoch((e) => e + 1);
-  }, [dockMode]);
 
   // Repaint when full-screen flips — the <canvas> remounts (dock slot
   // ↔ render-only view), so bump renderEpoch to redraw into the new
@@ -1971,38 +1932,35 @@ function MapForgeSectorInner() {
   }
 
   /** Mirror one streamed generator op into the local IsoRenderer so the
-   * canvas reflects output incrementally — shared by the modal wizard
-   * and the Generate dock panel. Throttled paint trigger: bump
+   * canvas reflects output incrementally — used by the Generate dock
+   * panel. Throttled paint trigger: bump
    * renderEpoch every 1000 ops so the canvas updates ~10× during a
    * 10k-op stream without choking React on 25k re-renders
    * (mirror-only-no-bump was "canvas frozen for the whole stream"). */
   function mirrorGeneratorOpThrottled(op: unknown) {
     if (!renderer) return;
     _mirrorGeneratorOp(renderer, op);
-    wizardOpCount.current += 1;
-    if (wizardOpCount.current % 1000 === 0) {
+    genPanelOpCount.current += 1;
+    if (genPanelOpCount.current % 1000 === 0) {
       setRenderEpoch((e) => e + 1);
     }
   }
 
-  /** Generate the in-game minimap STI + pin its preview thumbnail.
-   * Shared by the dock View panel and the legacy toolbar. */
+  /** Generate the in-game minimap STI. Success lands in the log WITH
+   * the preview thumbnail (LogEntry.imageDataUrl) — visible proof the
+   * STI was written (the engine gives no feedback until a game load). */
   async function generateRadarNow() {
     if (!datPath || !xmlPath || radarBusy) return;
     setRadarBusy(true);
     try {
       const r = await generateRadar(datPath, xmlPath, tileset);
       const fn = r.output_path.split(/[\\/]/).pop();
-      setRadarPreview({
-        png: r.preview_png_b64,
-        name: fn ?? "radar.sti",
-        path: r.output_path,
-      });
       log?.append({
         severity: "success",
         message: `Radar map written: ${fn}`
           + (r.overrides_bundled ? " (overrides bundled radar)" : ""),
         detail: r.output_path,
+        imageDataUrl: `data:image/png;base64,${r.preview_png_b64}`,
       });
     } catch (e) {
       log?.append({
@@ -2015,8 +1973,7 @@ function MapForgeSectorInner() {
     }
   }
 
-  /** Post-generator-run resync — shared by the wizard and the Generate
-   * panel. Always paint regardless of `ok`: the per-op mirror already
+  /** Post-generator-run resync — called by the Generate panel. Always paint regardless of `ok`: the per-op mirror already
    * mutated renderer.parsed, so the canvas MUST repaint to reflect
    * client state (an `ok`-gated repaint left partial-fail mirror
    * mutations invisible — code-review finding). On success, a
@@ -2024,7 +1981,7 @@ function MapForgeSectorInner() {
    * even if an op raced the React state machine. */
   function genRunComplete(applied: number, ok: boolean) {
     void ok;
-    wizardOpCount.current = 0;
+    genPanelOpCount.current = 0;
     if (renderer && session && applied > 0) {
       getSessionParsed(session.session_id).then((parsed) => {
         renderer.setParsed(parsed);
@@ -2105,7 +2062,7 @@ function MapForgeSectorInner() {
     // Plain left button only; alt+left and middle are reserved for pan
     // (the wrapper div handles those).
     if (e.button !== 0 || e.altKey) return;
-    // While picking a region (generator wizard), the canvas is a
+    // While picking a region (Generate panel), the canvas is a
     // region-picker — not a paint/shape surface. Mousedown ANCHORS the
     // first corner so the user can drag a box (release completes), or
     // release in place and click the opposite corner instead.
@@ -2188,7 +2145,7 @@ function MapForgeSectorInner() {
       pickSuppressClickRef.current = false;
       return;
     }
-    // Region-picker mode (generator wizard side-trip). Mousedown anchors
+    // Region-picker mode (Generate-panel side-trip). Mousedown anchors
     // (see onCanvasMouseDown), mouseup-on-another-tile completes; this
     // click path is the click-then-click fallback's second corner.
     if (pickingRect) {
@@ -2218,7 +2175,12 @@ function MapForgeSectorInner() {
 
   function onCanvasMove(e: React.MouseEvent<HTMLCanvasElement>) {
     const tile = pixelToTile(e);
-    setHovered(tile);
+    // Dedupe: mousemove fires far more often than the hovered TILE
+    // changes — returning the previous object when (x, y) is unchanged
+    // skips the setState re-render entirely.
+    setHovered((prev) =>
+      prev && tile && prev.x === tile.x && prev.y === tile.y ? prev : tile,
+    );
     // Drag-paint: if pencil + brush + left button held + stroke active.
     // Inherit the Shift state from the live mousemove so the user can
     // toggle stamp/manual mid-drag if they want to (rare but coherent).
@@ -2969,10 +2931,8 @@ function MapForgeSectorInner() {
           cycleSub(-1);
           break;
         case "open-asset-viewer":
-          // Dock-aware: focuses the docked Browse Assets panel in dock
-          // mode, or toggles the modal in the legacy layout. Routed
-          // through a ref so this global listener needn't re-bind when
-          // dockMode flips.
+          // Focuses the docked Browse Assets panel. Routed through a
+          // ref so this global listener needn't re-bind.
           toggleBrowseAssetsRef.current();
           break;
       }
@@ -3094,7 +3054,7 @@ function MapForgeSectorInner() {
   const previewTiles = useMemo<Tile[] | null>(() => {
     const cols = info.data?.cols ?? 0;
     const rows = info.data?.rows ?? 0;
-    // Region corner-pick (generator wizard side-trip): live-tint the
+    // Region corner-pick (Generate-panel side-trip): live-tint the
     // rectangle between the anchored corner and the cursor so the user
     // sees the region before confirming — overrides any tool preview.
     if (pickingRect?.stage === 1 && pickingRect.corner1 && hovered) {
@@ -3322,7 +3282,7 @@ function MapForgeSectorInner() {
           navigate(`/tileset-editor/${a.tileset}?slot=${a.slot}`);
         }}
         onOpenViewer={onBrowseAssets}
-        hideBrowseButton={dockMode}
+        hideBrowseButton
       />
     ) : (
       <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-500">
@@ -3565,72 +3525,6 @@ function MapForgeSectorInner() {
 
   const renderLogPanel = () => <MapForgeLogFull />;
 
-  // Toolbar as a dock panel (Phase 2). Left-aligned copy of the header
-  // toolbar — the fixed header keeps its right-aligned inline version
-  // (hidden in dock mode). Same controls + handlers, closing over state.
-  // Toolbar split into individual dock panels (each its own dock, per
-  // request). The fixed header keeps the combined inline toolbar
-  // (hidden in dock mode). Default layout groups these as tabs so they
-  // don't each cost a tab bar — drag a tab out to give it its own dock.
-  const renderToolPanel = () => (
-    <div className="flex flex-wrap items-end gap-3 p-2">
-      <ToolSelector
-        tool={tool} setTool={setTool}
-        hasBrush={activeBrush !== null}
-      />
-      <BrushChip
-        brush={activeBrush}
-        renderer={renderer}
-        onClear={() => {
-          setActiveBrush(null);
-          log?.append({ severity: "info", message: "Brush cleared." });
-        }}
-      />
-      <BrushOptions
-        tool={tool}
-        activeBrush={activeBrush}
-        paintLayer={paintLayer}
-        setPaintLayer={setPaintLayer}
-        brushRadius={brushRadius}
-        setBrushRadius={setBrushRadius}
-      />
-      <ShapeOptions
-        tool={tool}
-        shapeKind={shapeKind}
-        setShapeKind={setShapeKind}
-        activeBrush={activeBrush}
-        hasBrush={activeBrush !== null}
-        paintLayer={paintLayer}
-        setPaintLayer={setPaintLayer}
-        roomId={roomId}
-        setRoomId={setRoomId}
-        rooms={info.data?.rooms ?? []}
-        suggestedRoomId={
-          (info.data?.rooms.reduce((m, r) => Math.max(m, r.room_id), 0) ?? 0) + 1
-        }
-      />
-      <SelectOptions
-        tool={tool}
-        hasSelection={selectRect !== null}
-        clipboard={clipboard}
-        pasteMode={pasteMode}
-        readOnly={session?.read_only ?? false}
-        activeTileset={tileset}
-        busy={editsInFlight > 0}
-        onCopy={() => void doCopy()}
-        onArmPaste={() => setPasteMode(true)}
-        onCancelPaste={() => setPasteMode(false)}
-      />
-      <HeightOptions
-        tool={tool}
-        heightMode={heightMode}
-        setHeightMode={setHeightMode}
-        heightValue={heightValue}
-        setHeightValue={setHeightValue}
-      />
-    </div>
-  );
-
   const renderVariantsDockPanel = () => {
     // In the dock, the variant grid fills the whole panel and wraps to
     // fit the width — no max-h cap (that's only for the compact header
@@ -3665,156 +3559,13 @@ function MapForgeSectorInner() {
     );
   };
 
-  const renderLayersPanel = () => (
-    <div className="p-2">
-      <LayerVisibilityToggles
-        hiddenLayers={hiddenLayers}
-        setHiddenLayers={setHiddenLayers}
-      />
-    </div>
-  );
-
-  const renderViewPanel = () => (
-    <div className="flex flex-wrap items-end gap-3 p-2">
-      {session && !session.read_only && renderer && (
-        <>
-          <UndoButton
-            undoDepth={undoDepth}
-            label={renderer.peekUndoLabel()}
-            onUndo={() => {
-              undo().then(() => bumpHistory());
-            }}
-          />
-          <RedoButton
-            redoDepth={redoDepth}
-            label={renderer.peekRedoLabel()}
-            onRedo={() => {
-              redo().then(() => bumpHistory());
-            }}
-          />
-        </>
-      )}
-      {session && !session.read_only && (
-        <SaveButton
-          session={session}
-          localDirty={localDirty}
-          undoDepth={undoDepth}
-          savedAtDepth={savedAtDepth}
-          onSaved={(updated) => {
-            setSession(updated);
-            setSavedAtDepth(undoDepth);
-            setSavedAtGen(renderer ? renderer.generation() : histGen);
-          }}
-        />
-      )}
-      {session && !session.read_only && (
-        <button
-          type="button"
-          onClick={openGeneratePanel}
-          title="Open the Generate panel — pick a generator, drag its region on the map, watch the live preview, Apply"
-          className="text-xs px-3 py-1.5 rounded border border-rust-500/60 bg-rust-500/15 text-rust-100 hover:bg-rust-500/30 font-medium"
-        >
-          ✨ Generate
-        </button>
-      )}
-      {datPath && (
-        <button
-          type="button"
-          onClick={openValidatePanel}
-          title="Pre-flight validate this sector (crash traps, playability, JSD frame match)"
-          className="text-xs px-3 py-1.5 rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 font-medium"
-        >
-          ✓ Validate
-        </button>
-      )}
-      {datPath && xmlPath && (
-        <button
-          type="button"
-          disabled={radarBusy}
-          onClick={() => void generateRadarNow()}
-          title="Generate the 88×44 minimap STI the engine loads (writes to the install's user profile, above Radarmaps.slf)"
-          className="text-xs px-3 py-1.5 rounded border border-sky-500/60 bg-sky-500/15 text-sky-100 hover:bg-sky-500/30 font-medium disabled:opacity-50"
-        >
-          {radarBusy ? "Radar…" : "🛰 Radar"}
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={() => setShowHelp(true)}
-        title="Controls & shortcuts (?)"
-        className="text-xs px-2.5 py-1.5 rounded border border-gray-600 bg-gray-800/60 text-gray-200 hover:bg-gray-700 font-medium"
-      >
-        ? Help
-      </button>
-      {radarPreview && (
-        <span
-          className="inline-flex items-center gap-1.5 rounded border border-sky-700 bg-sky-950/60 px-1.5 py-0.5"
-          title={`Written to ${radarPreview.path}`}
-        >
-          <img
-            src={`data:image/png;base64,${radarPreview.png}`}
-            alt={`Radar minimap ${radarPreview.name}`}
-            width={132}
-            height={66}
-            style={{ imageRendering: "pixelated" }}
-            className="rounded-sm ring-1 ring-sky-800"
-          />
-          <span className="flex flex-col text-[9px] leading-tight text-sky-200">
-            <span>{radarPreview.name}</span>
-            <span className="text-sky-400/70">✓ in profile RADARMAPS</span>
-          </span>
-          <button
-            type="button"
-            onClick={() => setRadarPreview(null)}
-            className="ml-0.5 text-[10px] text-sky-300 hover:text-white"
-            title="Dismiss preview"
-          >
-            ✕
-          </button>
-        </span>
-      )}
-      <SectorControls
-        info={info.data}
-        tileset={tileset}
-        selectedRoom={selectedRoom}
-        showGrid={showGrid}
-        gridAutoHidden={showGrid && !showGridForThisView}
-        showRoomLabels={showRoomLabels}
-        zoom={zoom}
-        debugClickHud={debugClickHud}
-        onChangeRoom={(r) => {
-          const np = new URLSearchParams(params);
-          if (r === null) np.delete("room");
-          else np.set("room", String(r));
-          setParams(np);
-        }}
-        onChangeTileset={(t) => {
-          if (localDirty && t !== tileset) {
-            setPendingTilesetSwitch(t);
-            return;
-          }
-          const np = new URLSearchParams(params);
-          np.set("tileset", String(t));
-          setParams(np);
-        }}
-        onToggleGrid={() => setShowGrid((s) => !s)}
-        onToggleRoomLabels={() => setShowRoomLabels((s) => !s)}
-        onToggleDebugHud={() => setDebugClickHud((s) => !s)}
-        onResetView={resetView}
-      />
-    </div>
-  );
-
   const dockPanels = {
     canvas: renderCanvasPanel,
     palette: renderPalettePanel,
     assets: renderAssetsPanel,
     tilesetViewer: renderTilesetViewerPanel,
     inspector: renderInspectorPanel,
-    tool: renderToolPanel,
     variants: renderVariantsDockPanel,
-    layers: renderLayersPanel,
-    view: renderViewPanel,
     log: renderLogPanel,
     validate: () => (datPath ? (
       <MapForgeValidateBody
@@ -3842,9 +3593,9 @@ function MapForgeSectorInner() {
 
   return (
     // MapForge uses the full window width — the iso viewer + inspector
-    // need every pixel on a wide monitor. (Most other MercWizard routes
-    // sit inside max-w-5xl / max-w-7xl wrappers, which is fine for
-    // form-style pages but cramps the editor.)
+    // need every pixel on a wide monitor. The editor fills the viewport
+    // (flex column) so the dock takes all remaining height below the
+    // two fixed toolbar rows.
     //
     // onContextMenu prevents the browser's default right-click menu
     // ("Save image", "Copy", etc.) inside the editor. Specific
@@ -3856,52 +3607,272 @@ function MapForgeSectorInner() {
       className={
         focusMode
           ? "fixed inset-0 z-40 flex flex-col overflow-hidden bg-gray-950 px-2 py-1"
-          : dockMode
-            // Dock mode fills the viewport (flex column) so the dock can
-            // take all remaining height — no dead space below it.
-            ? "w-full px-4 py-2 h-screen flex flex-col overflow-hidden"
-            : "w-full px-4 py-2"
+          : "flex h-screen w-full flex-col overflow-hidden px-4 py-2"
       }
       onContextMenu={(e) => e.preventDefault()}
     >
-      {!focusMode && !dockMode && (
-      <div className="mb-2 flex items-center justify-between gap-4">
-        <div className="min-w-0 flex flex-wrap items-baseline gap-x-3">
-          <a
-            href="/mapforge"
-            className="text-sm text-blue-400 hover:underline"
-            onClick={(e) => {
-              e.preventDefault();
-              if (localDirty) {
-                const ok = window.confirm(
-                  "You have unsaved edits in this sector. Leave anyway "
-                  + "and discard them?\n\n"
-                  + "OK = discard + go. Cancel = stay so you can Save first."
-                );
-                if (!ok) return;
-              }
-              navigate("/mapforge");
-            }}
-          >
-            ← Map Forge
-          </a>
-          <h1 className="truncate font-mono text-base">
-            {datPath.split(/[\\/]/).pop()}
-          </h1>
-          {info.data && (
-            <p className="text-xs text-gray-500">
-              {info.data.rows}×{info.data.cols} · tileset {info.data.tileset_in_header} ·{" "}
-              {info.data.rooms.length} rooms
-            </p>
-          )}
-        </div>
-        {!dockMode && (
-        <div className="flex flex-col items-end gap-2">
-          {/* Row 1 — paint controls. Stays narrow in inspect mode
-              (no BrushOptions, no Variants), wide in pencil mode.
-              Tool toggle is always position 0 so its visual anchor
-              doesn't move when switching tools. */}
-          <div className="flex flex-wrap items-end justify-end gap-3">
+      {focusMode ? (
+        // ─── Focus mode: render-only canvas + a minimal exit strip ────
+        <>
+          <div className="mb-1 flex items-center gap-2">
+            <a
+              href="/mapforge"
+              className="text-sm text-blue-400 hover:underline"
+              onClick={(e) => {
+                e.preventDefault();
+                if (localDirty) {
+                  const ok = window.confirm(
+                    "You have unsaved edits in this sector. Leave anyway "
+                    + "and discard them?\n\n"
+                    + "OK = discard + go. Cancel = stay so you can Save first."
+                  );
+                  if (!ok) return;
+                }
+                navigate("/mapforge");
+              }}
+            >
+              ← Map Forge
+            </a>
+            <button
+              type="button"
+              onClick={() => setFocusMode(false)}
+              title="Exit focus mode — restore the toolbars and panels"
+              className="ml-auto rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-gray-100"
+            >
+              ⛶ Exit focus
+            </button>
+          </div>
+          <div className="min-h-0 flex-1">
+            {renderCanvasPanel()}
+          </div>
+        </>
+      ) : (
+        <>
+          {/* ─── Command bar (fixed row 1) ────────────────────────────
+              back-link · map name · dirty dot │ Undo / Redo / Save │
+              Generate / Validate / Radar (dock-tab openers) │ Tileset ·
+              Room │ spacer │ Panels▾ · Layout▾ · Settings · Help ·
+              Focus. ONE accent total: the Save button keeps emerald
+              while dirty (the dirty dot echoes it); everything else is
+              neutral — groups read via the thin dividers, not hue. */}
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <a
+              href="/mapforge"
+              className="text-sm text-blue-400 hover:underline"
+              onClick={(e) => {
+                e.preventDefault();
+                if (localDirty) {
+                  const ok = window.confirm(
+                    "You have unsaved edits in this sector. Leave anyway "
+                    + "and discard them?\n\n"
+                    + "OK = discard + go. Cancel = stay so you can Save first."
+                  );
+                  if (!ok) return;
+                }
+                navigate("/mapforge");
+              }}
+            >
+              ← Map Forge
+            </a>
+            <h1
+              className="max-w-[14rem] truncate font-mono text-sm text-gray-200"
+              title={info.data
+                ? `${datPath}\n${info.data.rows}×${info.data.cols} · tileset `
+                  + `${info.data.tileset_in_header} · ${info.data.rooms.length} rooms`
+                : datPath}
+            >
+              {datPath.split(/[\\/]/).pop()}
+            </h1>
+            {localDirty && (
+              <span
+                className="text-xs leading-none text-emerald-400"
+                title="Unsaved changes — Save writes them to disk"
+              >
+                ●
+              </span>
+            )}
+            <ToolbarDivider />
+            {session && !session.read_only && renderer && (
+              <>
+                <UndoButton
+                  undoDepth={undoDepth}
+                  label={renderer.peekUndoLabel()}
+                  onUndo={() => {
+                    undo().then(() => bumpHistory());
+                  }}
+                />
+                <RedoButton
+                  redoDepth={redoDepth}
+                  label={renderer.peekRedoLabel()}
+                  onRedo={() => {
+                    redo().then(() => bumpHistory());
+                  }}
+                />
+              </>
+            )}
+            {session && !session.read_only && (
+              <SaveButton
+                session={session}
+                localDirty={localDirty}
+                undoDepth={undoDepth}
+                savedAtDepth={savedAtDepth}
+                onSaved={(updated) => {
+                  setSession(updated);
+                  setSavedAtDepth(undoDepth);
+                  setSavedAtGen(renderer ? renderer.generation() : histGen);
+                }}
+              />
+            )}
+            <ToolbarDivider />
+            {session && !session.read_only && (
+              <button
+                type="button"
+                onClick={openGeneratePanel}
+                title="Open the Generate panel — pick a generator, drag its region on the map, watch the live preview, Apply"
+                className="rounded border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-200 hover:bg-gray-800"
+              >
+                ✨ Generate
+              </button>
+            )}
+            {datPath && (
+              <button
+                type="button"
+                onClick={openValidatePanel}
+                title="Pre-flight validate this sector (crash traps, playability, JSD frame match)"
+                className="rounded border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-200 hover:bg-gray-800"
+              >
+                ✓ Validate
+              </button>
+            )}
+            {datPath && xmlPath && (
+              <button
+                type="button"
+                disabled={radarBusy}
+                onClick={() => void generateRadarNow()}
+                title="Generate the 88×44 minimap STI the engine loads (writes to the install's user profile, above Radarmaps.slf). The preview lands in the Log."
+                className="rounded border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs font-medium text-gray-200 hover:bg-gray-800 disabled:opacity-50"
+              >
+                {radarBusy ? "Radar…" : "🛰 Radar"}
+              </button>
+            )}
+            <ToolbarDivider />
+            <span className="text-[10px] text-gray-500">Tileset</span>
+            <TilesetSelect
+              tilesets={tilesetList.data?.tilesets}
+              tileset={tileset}
+              onChange={(t) => {
+                if (localDirty && t !== tileset) {
+                  setPendingTilesetSwitch(t);
+                  return;
+                }
+                const np = new URLSearchParams(params);
+                np.set("tileset", String(t));
+                setParams(np);
+              }}
+            />
+            <span className="text-[10px] text-gray-500">Room</span>
+            <select
+              value={selectedRoom === null ? "" : String(selectedRoom)}
+              onChange={(e) => {
+                const np = new URLSearchParams(params);
+                if (e.target.value === "") np.delete("room");
+                else np.set("room", e.target.value);
+                setParams(np);
+              }}
+              title="Room scope — render the full sector or zoom to a single room"
+              className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-200"
+            >
+              <option value="">— full sector —</option>
+              {info.data?.rooms.map((r) => (
+                <option key={r.room_id} value={r.room_id}>
+                  Room {r.room_id} ({r.tile_count} tiles)
+                </option>
+              ))}
+            </select>
+            <span className="flex-1" />
+            <ToolbarMenu label="Panels">
+              {(() => {
+                const openSet = new Set(dockOpenIds);
+                const closed = PANEL_ORDER.filter((id) => !openSet.has(id));
+                if (closed.length === 0) {
+                  return (
+                    <ToolbarMenuItem disabled>All panels open</ToolbarMenuItem>
+                  );
+                }
+                return closed.map((id) => (
+                  <ToolbarMenuItem
+                    key={id}
+                    title={`Re-open the ${PANEL_TITLE[id]} panel`}
+                    onClick={() => {
+                      const api = dockApiRef.current;
+                      if (api) reopenDockPanel(api, id);
+                    }}
+                  >
+                    + {PANEL_TITLE[id]}
+                  </ToolbarMenuItem>
+                ));
+              })()}
+            </ToolbarMenu>
+            <ToolbarMenu label="Layout">
+              <ToolbarMenuItem
+                title="Discard your saved arrangement and restore the default layout"
+                onClick={() => {
+                  const api = dockApiRef.current;
+                  if (!api) return;
+                  resetDockLayout(api);
+                  log?.append({
+                    severity: "info",
+                    message: "Dock layout reset to default.",
+                  });
+                }}
+              >
+                Reset layout
+              </ToolbarMenuItem>
+              <ToolbarMenuItem
+                title="Save the current arrangement as your default — Reset layout and fresh sessions open this."
+                onClick={() => {
+                  const api = dockApiRef.current;
+                  if (!api) return;
+                  saveUserDefaultLayout(api);
+                  log?.append({
+                    severity: "success",
+                    message: "Current dock arrangement saved as default.",
+                  });
+                }}
+              >
+                Set as default
+              </ToolbarMenuItem>
+            </ToolbarMenu>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              title="MapForge settings — hotkeys, defaults, engine cap, etc."
+              className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-gray-100"
+            >
+              ⚙ Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowHelp(true)}
+              title="Controls & shortcuts (?)"
+              className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-gray-100"
+            >
+              ? Help
+            </button>
+            <button
+              type="button"
+              onClick={() => setFocusMode(true)}
+              title="Focus mode — show ONLY the map render (no toolbars or panels). Click ⛶ Exit focus to return."
+              className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-gray-100"
+            >
+              ⛶ Focus
+            </button>
+          </div>
+
+          {/* ─── Tool options bar (fixed row 2) ───────────────────────
+              ToolSelector │ BrushChip │ per-tool options │ spacer │
+              layer visibility │ Grid · R# · Reset view. */}
+          <div className="mb-1 flex flex-wrap items-end gap-3">
             <ToolSelector
               tool={tool} setTool={setTool}
               hasBrush={activeBrush !== null}
@@ -3956,577 +3927,60 @@ function MapForgeSectorInner() {
               heightValue={heightValue}
               setHeightValue={setHeightValue}
             />
-            <BrushSubStrip
-              brush={activeBrush}
-              renderer={renderer}
-              poppedOut={variantsFloat}
-              onTogglePopOut={() => setVariantsFloat((v) => !v)}
-              hidePopOut={dockMode}
-              onPickSub={(sub) => {
-                if (!activeBrush || sub === activeBrush.sub) return;
-                setActiveBrush({ ...activeBrush, sub });
-                log?.append({
-                  severity: "info",
-                  message: `Sub ${activeBrush.sub} → ${sub} `
-                         + `(${activeBrush.sti_filename.replace(/\.sti$/i, "")})`,
-                });
-              }}
-            />
+            <span className="flex-1" />
             <LayerVisibilityToggles
               hiddenLayers={hiddenLayers}
               setHiddenLayers={setHiddenLayers}
             />
-          </div>
-          {/* Row 2 — commit + sector + view controls. Save/Undo/
-              Generate group on the left, Tileset/Room/View on the
-              right. Visual separation from the paint controls above
-              cuts the "everything in one giant row" crowd. */}
-          <div className="flex flex-wrap items-end justify-end gap-3">
-            {session && !session.read_only && renderer && (
-              <>
-                <UndoButton
-                  undoDepth={undoDepth}
-                  label={renderer.peekUndoLabel()}
-                  onUndo={() => {
-                    undo().then(() => bumpHistory());
-                  }}
-                />
-                <RedoButton
-                  redoDepth={redoDepth}
-                  label={renderer.peekRedoLabel()}
-                  onRedo={() => {
-                    redo().then(() => bumpHistory());
-                  }}
-                />
-              </>
-            )}
-            {session && !session.read_only && (
-              <SaveButton
-                session={session}
-                localDirty={localDirty}
-                undoDepth={undoDepth}
-                savedAtDepth={savedAtDepth}
-                onSaved={(updated) => {
-                  setSession(updated);
-                  // Mark this depth as the new "clean" baseline.
-                  setSavedAtDepth(undoDepth);
-                  setSavedAtGen(renderer ? renderer.generation() : histGen);
-                }}
-              />
-            )}
-            {session && !session.read_only && (
+            <div className="flex items-end gap-1">
               <button
                 type="button"
-                onClick={() => setWizardOpen(true)}
-                title="Open the map-generation wizard (pick a generator + configure params)"
-                className="text-xs px-3 py-1.5 rounded border border-rust-500/60 bg-rust-500/15 text-rust-100 hover:bg-rust-500/30 font-medium"
+                onClick={() => setShowGrid((s) => !s)}
+                className={`rounded border px-2 py-1 text-xs ${
+                  showGrid
+                    ? showGridForThisView
+                      ? "border-gray-500 bg-gray-700 text-gray-100"
+                      : "border-gray-600 bg-gray-800 text-gray-500"
+                    : "border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800"
+                }`}
+                title={
+                  showGrid && !showGridForThisView
+                    ? "Grid is enabled but auto-hidden for this view (too many tiles). Pick a room from the dropdown to see it."
+                    : "Toggle diamond tile grid"
+                }
               >
-                ✨ Generate…
+                Grid{showGrid && !showGridForThisView ? " (n/a)" : ""}
               </button>
-            )}
-            {/* Validate / Radar / Help — legacy-layout parity with the
-                dock's View panel (these were dock-only, so undocked
-                users could only reach them via... nothing). */}
-            {datPath && (
               <button
                 type="button"
-                onClick={openValidatePanel}
-                title="Pre-flight validate this sector (crash traps, playability, JSD frame match)"
-                className="text-xs px-3 py-1.5 rounded border border-emerald-500/60 bg-emerald-500/15 text-emerald-100 hover:bg-emerald-500/30 font-medium"
+                onClick={() => setShowRoomLabels((s) => !s)}
+                className={`rounded border px-2 py-1 text-xs ${
+                  showRoomLabels
+                    ? "border-gray-500 bg-gray-700 text-gray-100"
+                    : "border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800"
+                }`}
+                title="Toggle room number labels"
               >
-                ✓ Validate
+                R#
               </button>
-            )}
-            {datPath && xmlPath && (
               <button
                 type="button"
-                disabled={radarBusy}
-                onClick={() => void generateRadarNow()}
-                title="Generate the 88×44 minimap STI the engine loads (writes to the install's user profile)"
-                className="text-xs px-3 py-1.5 rounded border border-sky-500/60 bg-sky-500/15 text-sky-100 hover:bg-sky-500/30 font-medium disabled:opacity-50"
+                onClick={resetView}
+                className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
+                title={`Reset zoom (currently ${zoom.toFixed(2)}×) and pan`}
               >
-                {radarBusy ? "Radar…" : "🛰 Radar"}
+                Reset view
               </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setShowHelp(true)}
-              title="Controls & shortcuts (?)"
-              className="text-xs px-2.5 py-1.5 rounded border border-gray-600 bg-gray-800/60 text-gray-200 hover:bg-gray-700 font-medium"
-            >
-              ? Help
-            </button>
-            {radarPreview && (
-              <span
-                className="inline-flex items-center gap-1.5 rounded border border-sky-700 bg-sky-950/60 px-1.5 py-0.5"
-                title={`Written to ${radarPreview.path}`}
-              >
-                <img
-                  src={`data:image/png;base64,${radarPreview.png}`}
-                  alt={`Radar minimap ${radarPreview.name}`}
-                  width={132}
-                  height={66}
-                  style={{ imageRendering: "pixelated" }}
-                  className="rounded-sm ring-1 ring-sky-800"
-                />
-                <span className="flex flex-col text-[9px] leading-tight text-sky-200">
-                  <span>{radarPreview.name}</span>
-                  <span className="text-sky-400/70">✓ in profile RADARMAPS</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setRadarPreview(null)}
-                  className="ml-0.5 text-[10px] text-sky-300 hover:text-white"
-                  title="Dismiss preview"
-                >
-                  ✕
-                </button>
-              </span>
-            )}
-            <SectorControls
-            info={info.data}
-            tileset={tileset}
-            selectedRoom={selectedRoom}
-            showGrid={showGrid}
-            gridAutoHidden={showGrid && !showGridForThisView}
-            showRoomLabels={showRoomLabels}
-            zoom={zoom}
-            debugClickHud={debugClickHud}
-            onChangeRoom={(r) => {
-              const np = new URLSearchParams(params);
-              if (r === null) np.delete("room");
-              else np.set("room", String(r));
-              setParams(np);
-            }}
-            onChangeTileset={(t) => {
-              // If the sector has unsaved changes, prompt before
-              // re-opening — the session re-open at line ~362 will
-              // discard every uncommitted edit (paint strokes,
-              // generator output, etc.). The previous silent reload
-              // was data loss.
-              if (localDirty && t !== tileset) {
-                setPendingTilesetSwitch(t);
-                return;
-              }
-              const np = new URLSearchParams(params);
-              np.set("tileset", String(t));
-              setParams(np);
-            }}
-            onToggleGrid={() => setShowGrid((s) => !s)}
-            onToggleRoomLabels={() => setShowRoomLabels((s) => !s)}
-            onToggleDebugHud={() => setDebugClickHud((s) => !s)}
-            onResetView={resetView}
-          />
-          </div>
-        </div>
-        )}
-      </div>
-      )}
-
-      {/* Top control bar. In dock / full-screen mode the big header is
-          hidden (the dock fills the window), so the back-link rides
-          here. Full screen = render only (just the canvas), so the dock
-          toggle is hidden there. */}
-      <div className="mb-1 flex items-center gap-2">
-        {(dockMode || focusMode) && (
-          <a
-            href="/mapforge"
-            className="text-sm text-blue-400 hover:underline"
-            onClick={(e) => {
-              e.preventDefault();
-              if (localDirty) {
-                const ok = window.confirm(
-                  "You have unsaved edits in this sector. Leave anyway "
-                  + "and discard them?\n\n"
-                  + "OK = discard + go. Cancel = stay so you can Save first."
-                );
-                if (!ok) return;
-              }
-              navigate("/mapforge");
-            }}
-          >
-            ← Map Forge
-          </a>
-        )}
-        <div className="ml-auto flex gap-2">
-          <button
-            type="button"
-            onClick={() => setSettingsOpen(true)}
-            title="MapForge settings — hotkeys, defaults, engine cap, etc."
-            className="rounded border border-blue-600 bg-blue-700/80 px-2 py-1 text-xs font-semibold text-blue-50 hover:bg-blue-600"
-          >
-            ⚙ Settings
-          </button>
-          <button
-            type="button"
-            onClick={() => setFocusMode((v) => !v)}
-            title="Full screen — show ONLY the map render (no panels). Click again to exit."
-            className="rounded border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-gray-100"
-          >
-            {focusMode ? "⛶ Exit full screen" : "⛶ Full screen"}
-          </button>
-          {/* Dock vs. Undocked layout toggle now lives in Settings → Layout
-              ("Undocked Mode"); dock is the default. */}
-        </div>
-      </div>
-      {focusMode ? (
-        // Render-only: just the canvas viewport filling the window.
-        <div className="min-h-0 flex-1">
-          {renderCanvasPanel()}
-        </div>
-      ) : dockMode ? (
-        <div className="min-h-0 flex-1">
-          <MapForgeDock onApi={(api) => { dockApiRef.current = api; }} />
-        </div>
-      ) : (
-        <>
-      <div
-        className="grid grid-cols-1 gap-4 lg:grid-cols-[10rem_1fr_22rem]"
-        style={{ height: "78vh" }}
-      >
-        {/* Compact left rail (Phase 5 redesign) — recent brushes +
-            Browse-assets button. Full palette lives in the pop-out
-            viewer; this rail is the always-visible quick-switch
-            surface. Wheel events inside this narrow column have
-            very little vertical content to scroll, so the old
-            "scroll bleed when zooming over the palette" problem
-            doesn't show up here. */}
-        {xmlPath ? (
-          <MapForgePaletteRail
-            renderer={renderer}
-            activeBrush={activeBrush}
-            recentBrushes={recentBrushes}
-            recentAdditions={recentAdditions}
-            onPick={(b) => {
-              setActiveBrush(b);
-              log?.append({
-                severity: "info",
-                message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
-                       + `· slot ${b.slot} sub ${b.sub} → ${b.layer} (recent)`,
-              });
-            }}
-            onPickAddition={(a) => {
-              // "Pick as brush" on a Just-Added card. Default to sub 0
-              // — most STIs the user just imported are single-sub
-              // (props, decals); multi-sub STIs need the View-subs
-              // affordance (Phase 3) to pick a non-zero sub. layer +
-              // category are unknown without the palette manifest;
-              // safe defaults keep paint working.
-              setActiveBrush({
-                slot: a.slot,
-                sub: 0,
-                category: "Library",
-                layer: "land",
-                sti_filename: a.sti_filename,
-              });
-              log?.append({
-                severity: "info",
-                message: `Brush: ${a.sti_filename.replace(/\.sti$/i, "")} `
-                       + `· slot ${a.slot} sub 0 (just-added)`,
-              });
-            }}
-            onOpenInTilesetEditor={(a) => {
-              // Navigate to the Tileset Editor at the slot the user
-              // just added. Library + inject UIs live there now.
-              // BUT — if the sector has unsaved edits, navigating away
-              // would silently lose them. Confirm first. User feedback:
-              // "If i open in tileset editor it exits map without saving."
-              if (localDirty) {
-                const ok = window.confirm(
-                  "You have unsaved edits in this sector. Open Tileset "
-                  + "Editor anyway and discard them?\n\n"
-                  + "OK = discard + go. Cancel = stay here so you can Save first."
-                );
-                if (!ok) return;
-              }
-              navigate(`/tileset-editor/${a.tileset}?slot=${a.slot}`);
-            }}
-            onOpenViewer={onBrowseAssets}
-            hideBrowseButton={dockMode}
-            recentPoppedOut={recentFloat}
-            onTogglePopOutRecent={() => setRecentFloat((v) => !v)}
-          />
-        ) : (
-          <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-500">
-            No Ja2Set.dat.xml — palette unavailable
-          </div>
-        )}
-        {/* Render viewport */}
-        <div
-          className="relative overflow-hidden rounded border border-gray-700 bg-gray-950"
-          style={{
-            height: "70vh",
-            // Crosshair cursor while picking rect corners; canvas's
-            // normal cursor (paint/inspect) is misleading during pick.
-            cursor: pickingRect ? "crosshair" : undefined,
-          }}
-          onWheel={onWheel}
-          onMouseDown={onMouseDown}
-          onMouseMove={onMouseMoveDrag}
-          onMouseUp={onMouseUpDrag}
-          onMouseLeave={onMouseUpDrag}
-        >
-          {/* Rectangle corner-picker banner — pinned to the top of the
-              viewport so the user can see what mode they're in even
-              while panning around to pick. */}
-          {pickingRect && (
-            <div
-              className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-rust-700/95 text-rust-50 px-3 py-2 text-sm border-b border-rust-500 shadow-md pointer-events-none"
-            >
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-rust-900/70">
-                  {pickingRect.stage === 0 ? "1 / 2" : "2 / 2"}
-                </span>
-                <span>
-                  {pickingRect.stage === 0
-                    ? "Drag a box over the region (or click two corners)"
-                    : `Corner pinned at (${pickingRect.corner1?.x}, ${pickingRect.corner1?.y}) — release or click the opposite corner`}
-                </span>
-              </div>
-              <span className="text-xs text-rust-200">ESC to cancel</span>
             </div>
-          )}
-          {!info.data && info.isLoading && (
-            <p className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">
-              Parsing .dat...
-            </p>
-          )}
-          {info.error && (
-            <p className="absolute inset-2 text-sm text-red-400">
-              {formatApiError(info.error)}
-            </p>
-          )}
-          {sessionError && (
-            <p className="absolute inset-2 text-sm text-red-400">
-              Failed to open editing session: {sessionError}
-            </p>
-          )}
-          {(isSlfBundled || session?.read_only) && (
-            <SlfReadOnlyBanner
-              slfUri={datPath}
-              onExtracted={(loose_path) => {
-                // Navigate the sector view to the new loose copy.
-                // Updating ?dat= triggers the load effect chain
-                // (close current session → open new one → fetch
-                // atlas/parsed → render).
-                const np = new URLSearchParams(params);
-                np.set("dat", loose_path);
-                setParams(np);
-              }}
-            />
-          )}
-          {/* "Syncing edit…" + "Reloading atlas…" toasts moved into
-              the bottom log panel — they were cluttering the top-right
-              corner and the log gives the user a persistent timeline
-              instead of corner pop-ins. The atlas-reload effect logs
-              its own entries below. */}
-          {rendererLoading && loadPhase && (
-            <LoadProgressBar
-              phase={loadPhase}
-              phasePct={phasePct}
-              overallPct={loadOverallPct}
-            />
-          )}
-          {debugClickHud && lastClickDebug && (
-            <DebugClickHud d={lastClickDebug} />
-          )}
-          {renderError && (
-            <p className="absolute inset-2 text-sm text-red-400">{renderError}</p>
-          )}
-
-          {renderer && renderMeta && (
-            <div
-              className="absolute left-1/2 top-1/2"
-              style={{
-                transform: `translate(calc(-50% + ${pan.x}px), calc(-50% + ${pan.y}px)) scale(${zoom})`,
-                transformOrigin: "center center",
-                cursor: dragRef.current ? "grabbing" : "default",
-              }}
-            >
-              <div className="relative" style={{ width: renderMeta.canvasW, height: renderMeta.canvasH }}>
-                <canvas
-                  ref={canvasRef}
-                  className="block cursor-crosshair select-none"
-                  style={{
-                    imageRendering: "pixelated",
-                    width: renderMeta.canvasW,
-                    height: renderMeta.canvasH,
-                  }}
-                  onMouseDown={onCanvasMouseDown}
-                  onClick={onCanvasClick}
-                  onMouseMove={onCanvasMove}
-                  onMouseUp={onCanvasMouseUp}
-                  onMouseLeave={() => setHovered(null)}
-                  onContextMenu={onCanvasContextMenu}
-                />
-                <IsoOverlay
-                  meta={renderMeta}
-                  info={info.data}
-                  selectedRoom={selectedRoom}
-                  hovered={hovered}
-                  pinned={pinned}
-                  previewTiles={previewTiles}
-                  showGrid={showGridForThisView}
-                  showRoomLabels={showRoomLabels}
-                  debugClick={debugClickHud ? lastClickDebug : null}
-                  stampPreview={(() => {
-                    // Show outline diamonds for every footprint tile
-                    // (minus the anchor — that's the existing hover
-                    // marker) when the user is about to drop a
-                    // multi-tile stamp. Keeps the preview honest:
-                    // hide it when tool is inspect, brush is single-
-                    // tile, or Shift inverted us into manual mode.
-                    if (tool !== "pencil" || !hovered || !activeBrush || !renderer) {
-                      return null;
-                    }
-                    const fp = renderer.getFootprint(activeBrush.slot);
-                    if (!fp) return null;
-                    // Effective stamp = configured mode XOR shift held.
-                    const willStamp = (settings.paintMode === "stamp") !== shiftHeld;
-                    if (!willStamp) return null;
-                    return fp.tiles
-                      .filter((t) => t.bX !== 0 || t.bY !== 0)
-                      .map((t) => ({
-                        x: hovered.x + t.bX,
-                        y: hovered.y + t.bY,
-                      }));
-                  })()}
-                  brushRadiusPreview={(() => {
-                    // Manhattan-diamond brush radius preview. Only
-                    // when pencil mode + active brush + radius > 1 +
-                    // hovering. Mirrors the anchor expansion in
-                    // paintBrush so the user sees exactly which tiles
-                    // will get painted. Each tile gets a safety check
-                    // (in-bounds) so they can see clipping. Multi-tile
-                    // stamps already force radius=1 in paintBrush, so
-                    // we skip preview there to avoid double-marking
-                    // (the stampPreview already shows the footprint).
-                    //
-                    // Height brush: plain radius footprint, no brush/stamp logic.
-                    if (tool === "height") {
-                      if (!hovered || brushRadius <= 1) return null;
-                      const r = brushRadius - 1;
-                      const cols = info.data?.cols ?? 0;
-                      const rows = info.data?.rows ?? 0;
-                      const tiles: Array<{ x: number; y: number; safe: boolean }> = [];
-                      for (let dy = -r; dy <= r; dy++) {
-                        for (let dx = -r; dx <= r; dx++) {
-                          if (Math.abs(dx) + Math.abs(dy) > r) continue;
-                          if (dx === 0 && dy === 0) continue;
-                          const tx = hovered.x + dx;
-                          const ty = hovered.y + dy;
-                          const safe = tx >= 0 && ty >= 0 && tx < cols && ty < rows;
-                          tiles.push({ x: tx, y: ty, safe });
-                        }
-                      }
-                      return tiles;
-                    }
-                    if (tool !== "pencil" || !hovered || !activeBrush || !renderer) {
-                      return null;
-                    }
-                    if (brushRadius <= 1) return null;
-                    const fp = renderer.getFootprint(activeBrush.slot);
-                    const willStamp = fp !== null
-                      && ((settings.paintMode === "stamp") !== shiftHeld);
-                    if (willStamp) return null;
-                    const r = brushRadius - 1;
-                    const cols = info.data?.cols ?? 0;
-                    const rows = info.data?.rows ?? 0;
-                    const tiles: Array<{ x: number; y: number; safe: boolean }> = [];
-                    for (let dy = -r; dy <= r; dy++) {
-                      for (let dx = -r; dx <= r; dx++) {
-                        if (Math.abs(dx) + Math.abs(dy) > r) continue;
-                        // Skip the anchor — already drawn by the
-                        // `hovered` marker above.
-                        if (dx === 0 && dy === 0) continue;
-                        const tx = hovered.x + dx;
-                        const ty = hovered.y + dy;
-                        const safe = tx >= 0 && ty >= 0 && tx < cols && ty < rows;
-                        tiles.push({ x: tx, y: ty, safe });
-                      }
-                    }
-                    return tiles;
-                  })()}
-                  heightOverlay={heightOverlay}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Status bar — hover/pin coords + zoom info. Sits ABOVE
-              the log panel (z-30) so the log doesn't bury it. */}
-          <div className="absolute bottom-1 left-2 right-2 z-20 flex items-center justify-between text-xs text-gray-400 pointer-events-none">
-            <span>
-              {hovered
-                ? `Hover: (${hovered.x},${hovered.y})`
-                : "Hover the render to preview a tile"}
-              {pinned && ` · Pinned: (${pinned.x},${pinned.y})`}
-              {previewDims && (
-                <span className="ml-2 text-emerald-300">
-                  · {previewDims.label}: {previewDims.w}×{previewDims.h} = {previewDims.count} tile{previewDims.count === 1 ? "" : "s"}
-                </span>
-              )}
-              {showGrid && !showGridForThisView && (
-                <span className="ml-2 text-amber-400">
-                  · grid hidden ({"too many tiles for this view"})
-                </span>
-              )}
-            </span>
-            <span className="text-gray-500">
-              Zoom {zoom.toFixed(2)}× · {bindingFor(settings, "wheel-cycle-tool") || "—"} = tool · {bindingFor(settings, "wheel-zoom") || "—"} = zoom · Alt+drag or middle-drag = pan
-            </span>
           </div>
-          {/* Log panel used to live here as an absolute overlay.
-              Moved out (just below the 3-column grid) so it doesn't
-              cover render content. */}
-        </div>
 
-        <TileInspectorPanel
-          datPath={datPath}
-          xmlPath={xmlPath}
-          tileset={tileset}
-          session={session}
-          renderer={renderer}
-          renderEpoch={renderEpoch}
-          isSlfBundled={isSlfBundled}
-          cols={info.data?.cols ?? 160}
-          rows={info.data?.rows ?? 160}
-          pinned={pinned}
-          onPin={setPinned}
-          onPickAsBrush={(slot, sub, layer, sti_filename) => {
-            // Inspector picks are LITERAL — copy this exact (slot, sub)
-            // as a single-tile brush. forceSingleTile suppresses the
-            // multi-tile JSD stamp expansion so clicking the chair-
-            // seat thumbnail in the inspector lands the seat AT the
-            // click point (instead of stamping the whole chair with
-            // the seat offset from the anchor). Palette picks at the
-            // slot's anchor still stamp normally.
-            setActiveBrush({
-              slot, sub, layer,
-              category: "(picked from tile)",
-              sti_filename,
-              forceSingleTile: true,
-            });
-            setTool("pencil");
-            log?.append({
-              severity: "info",
-              message: `Brush ← ${sti_filename} (slot ${slot} sub ${sub} → ${layer}, single-tile)`,
-            });
-          }}
-          onEditApplied={(updatedSession) => {
-            setSession(updatedSession);
-            setRenderEpoch((e) => e + 1);
-            // Inspector edits commit a stroke — sync undo/redo/dirty UI.
-            bumpHistory();
-          }}
-        />
-      </div>
-
-      {/* Log panel — sits in the dead space below the 3-column grid
-          (the grid is 78vh, leaving ~22vh below). Was an absolute
-          overlay inside the canvas viewport but covered render
-          content. */}
-      <MapForgeLogPanel />
+          {/* ─── The dock — fills all remaining height ───────────────── */}
+          <div className="min-h-0 flex-1">
+            <MapForgeDock
+              onApi={(api) => { dockApiRef.current = api; }}
+              onOpenPanelsChange={setDockOpenIds}
+            />
+          </div>
         </>
       )}
 
@@ -4537,8 +3991,6 @@ function MapForgeSectorInner() {
           settings={settings}
           onChange={setSettings}
           onClose={() => setSettingsOpen(false)}
-          dockMode={dockMode}
-          onSetDockMode={setDockMode}
         />
       )}
 
@@ -4581,134 +4033,14 @@ function MapForgeSectorInner() {
         }}
       />
 
-      {/* Generator wizard — GUI peer to the console's `:gen` command.
-          Modal: step 1 picks generator, step 2 surfaces a form built
-          from the param schema with sliders + descriptions. Submits
-          to the same streaming endpoint, so the canvas paints live
-          and undo works identically. Task #117. */}
-      {showValidate && datPath && !dockMode && (
-        <MapForgeValidatePanel
-          datPath={datPath}
-          xmlPath={xmlPath}
-          tileset={tileset}
-          sessionId={session?.session_id ?? null}
-          onClose={() => setShowValidate(false)}
-        />
-      )}
-      <MapForgeGeneratorWizard
-        open={wizardOpen}
-        onClose={() => {
-          setWizardOpen(false);
-          // Clear restore state on a clean close so the next manual
-          // open starts at the picker. Without this, reopening the
-          // wizard after a corner-pick run would jump straight back
-          // into rect/configure.
-          setWizardRestoreGen(null);
-          setWizardRestoreValues(null);
-        }}
-        sessionId={session?.session_id ?? null}
-        renderer={renderer}
-        initialGenerator={wizardRestoreGen}
-        initialValues={wizardRestoreValues}
-        onPickRectCorners={(currentValues) => {
-          // Stash the wizard's in-progress state, close the modal,
-          // start the corner-picker. When the user completes the pick
-          // (or cancels), the picker callback reopens the wizard with
-          // restored state + the new x1/y1/x2/y2.
-          setWizardOpen(false);
-          setWizardRestoreGen("rect");
-          setWizardRestoreValues(currentValues);
-          setPickingRect({
-            stage: 0,
-            onComplete: (c1, c2) => {
-              setWizardRestoreValues({
-                ...currentValues,
-                x1: c1.x, y1: c1.y,
-                x2: c2.x, y2: c2.y,
-              });
-              setWizardOpen(true);
-            },
-            onCancel: () => {
-              // User hit ESC — reopen with the original values, no
-              // corners changed. Better than dropping them on the
-              // pick step with their progress lost.
-              setWizardOpen(true);
-            },
-          });
-        }}
-        onOp={mirrorGeneratorOpThrottled}
-        onComplete={genRunComplete}
-      />
-
-      {/* `?` shortcut cheatsheet — reachable from the Help buttons in
-          both layouts and the `?` key. */}
+      {/* `?` shortcut cheatsheet — reachable from the Help button in
+          the command bar and the `?` key. */}
       <MapForgeHelpOverlay
         open={showHelp}
         onClose={() => setShowHelp(false)}
         settings={settings}
       />
 
-      {/* Browse Assets pop-out — legacy (non-dock) layout only. The full
-          MapForgePalette brush picker in a modal; picking auto-closes so
-          the pick→paint loop stays fast. */}
-      {xmlPath && !dockMode && (
-        <MapForgeAssetViewer
-          open={assetViewerOpen}
-          onClose={() => setAssetViewerOpen(false)}
-          xmlPath={xmlPath}
-          tileset={tileset}
-          renderer={renderer}
-          activeBrush={activeBrush}
-          onPick={(b) => {
-            setActiveBrush(b);
-            if (b) {
-              log?.append({
-                severity: "info",
-                message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
-                       + `· slot ${b.slot} sub ${b.sub} → ${b.layer}`,
-              });
-            }
-          }}
-          showShadowSlots={settings.showShadowSlots || !settings.autoPairShadows}
-          engineMaxTileSlot={settings.engineMaxTileSlot}
-        />
-      )}
-
-      {/* Pop-out floating panels — variants + recent palette. Rendered
-          at root level so their fixed positioning overlays the editor
-          (z-30, below the asset modal). Geometry persists per panel. */}
-      {xmlPath && variantsFloat && !dockMode && (
-        <FloatingVariantsPanel
-          brush={activeBrush}
-          renderer={renderer}
-          onPickSub={(sub) => {
-            if (!activeBrush || sub === activeBrush.sub) return;
-            setActiveBrush({ ...activeBrush, sub });
-            log?.append({
-              severity: "info",
-              message: `Sub ${activeBrush.sub} → ${sub} `
-                     + `· slot ${activeBrush.slot} (variants pop-out)`,
-            });
-          }}
-          onClose={() => setVariantsFloat(false)}
-        />
-      )}
-      {xmlPath && recentFloat && !dockMode && (
-        <FloatingRecentPanel
-          recentBrushes={recentBrushes}
-          renderer={renderer}
-          activeBrush={activeBrush}
-          onPick={(b) => {
-            setActiveBrush(b);
-            log?.append({
-              severity: "info",
-              message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
-                     + `· slot ${b.slot} sub ${b.sub} → ${b.layer} (recent)`,
-            });
-          }}
-          onClose={() => setRecentFloat(false)}
-        />
-      )}
     </div>
     </MapForgeDockContext.Provider>
   );
@@ -5032,117 +4364,6 @@ function RoomLabel({ room, x, y }: { room: RoomSummary; x: number; y: number }) 
         {text}
       </text>
     </g>
-  );
-}
-
-// ─── Controls ──────────────────────────────────────────────────────────
-function SectorControls({
-  info,
-  tileset,
-  selectedRoom,
-  showGrid,
-  gridAutoHidden,
-  showRoomLabels,
-  zoom,
-  debugClickHud,
-  onChangeRoom,
-  onChangeTileset,
-  onToggleGrid,
-  onToggleRoomLabels,
-  onToggleDebugHud,
-  onResetView,
-}: {
-  info: SectorInfo | undefined;
-  tileset: number;
-  selectedRoom: number | null;
-  showGrid: boolean;
-  gridAutoHidden: boolean;
-  showRoomLabels: boolean;
-  zoom: number;
-  debugClickHud: boolean;
-  onChangeRoom: (r: number | null) => void;
-  onChangeTileset: (t: number) => void;
-  onToggleGrid: () => void;
-  onToggleRoomLabels: () => void;
-  onToggleDebugHud: () => void;
-  onResetView: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-end gap-3">
-      <div>
-        <label className="block text-xs text-gray-400">Tileset</label>
-        <input
-          type="number"
-          value={tileset}
-          onChange={(e) => onChangeTileset(parseInt(e.target.value, 10) || 0)}
-          className="w-20 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-sm"
-        />
-      </div>
-      <div>
-        <label className="block text-xs text-gray-400">Room</label>
-        <select
-          value={selectedRoom === null ? "" : String(selectedRoom)}
-          onChange={(e) =>
-            onChangeRoom(e.target.value === "" ? null : parseInt(e.target.value, 10))
-          }
-          className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-sm"
-        >
-          <option value="">— full sector —</option>
-          {info?.rooms.map((r) => (
-            <option key={r.room_id} value={r.room_id}>
-              Room {r.room_id} ({r.tile_count} tiles)
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="flex items-end gap-1">
-        <button
-          type="button"
-          onClick={onToggleGrid}
-          className={`rounded border px-2 py-1 text-xs ${
-            showGrid
-              ? gridAutoHidden
-                ? "border-blue-800 bg-blue-950 text-blue-300/60"
-                : "border-blue-600 bg-blue-900 text-blue-100"
-              : "border-gray-700 bg-gray-900 text-gray-300"
-          }`}
-          title={
-            gridAutoHidden
-              ? "Grid is enabled but auto-hidden for this view (too many tiles). Pick a room from the dropdown to see it."
-              : "Toggle diamond tile grid"
-          }
-        >
-          Grid{gridAutoHidden ? " (n/a)" : ""}
-        </button>
-        <button
-          type="button"
-          onClick={onToggleRoomLabels}
-          className={`rounded border px-2 py-1 text-xs ${
-            showRoomLabels
-              ? "border-amber-600 bg-amber-900 text-amber-100"
-              : "border-gray-700 bg-gray-900 text-gray-300"
-          }`}
-          title="Toggle room number labels"
-        >
-          R#
-        </button>
-        <button
-          type="button"
-          onClick={onResetView}
-          className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800"
-          title={`Reset zoom (currently ${zoom.toFixed(2)}×) and pan`}
-        >
-          Reset view
-        </button>
-        {/* Debug HUD toggle moved off the toolbar 2026-05-24 — was
-            taking visual real estate for a developer-only feature. It
-            still works via the Shift+D keyboard binding (rebindable
-            in Settings → Hotkeys → View → "Toggle debug HUD"). */}
-        {/* Settings now lives in the always-visible "⚙ Settings" button in
-            the top control bar (this legacy header is hidden in dock /
-            full-screen mode, so a gear here would double up). */}
-      </div>
-    </div>
   );
 }
 
@@ -5888,82 +5109,10 @@ function BrushChip({
   );
 }
 
-// ─── Floating sub-strip ───────────────────────────────────────────────
-// Clickable sub thumbnails for the active brush. Companion to the
-// keyboard shortcuts (`,` / `.`) and Alt+right-click on the canvas —
-// same `setActiveBrush({ ...brush, sub })` underneath.
-//
-// Visibility rules:
-//   - hidden when there's no active brush (BrushChip handles the empty
-//     state slot — no point doubling up)
-//   - hidden when the brush has 0 or 1 valid subs (nothing to switch
-//     between; a single grey cell would be misleading)
-//
-// Layout: a 2-row max box with vertical scroll for tall variant lists.
-// Some slots (roadtile, walls) have 200+ subs — without a row cap they
-// blow up the toolbar and push the canvas out of view. 2 rows shows
-// ~24-30 thumbs at once and leaves the rest behind a scroll. For the
-// "I want the 80th sub" case, keyboard `,` / `.` is the practical path
-// anyway.
-function BrushSubStrip({
-  brush, renderer, onPickSub, poppedOut, onTogglePopOut, hidePopOut = false,
-}: {
-  brush: ActiveBrush | null;
-  renderer: IsoRenderer | null;
-  onPickSub: (sub: number) => void;
-  poppedOut: boolean;
-  onTogglePopOut: () => void;
-  /** Hide the ⤢ pop-out button (the FloatingPanel pop-out is redundant
-   * in dock mode, where dockview floats panels itself). */
-  hidePopOut?: boolean;
-}) {
-  if (!brush || !renderer) return null;
-  const subs = renderer.listValidSubs(brush.slot);
-  if (subs.length <= 1) return null;
-  // Retract entirely when popped out — the grid lives in the floating
-  // window, so a docked stub would just waste the space we freed.
-  if (poppedOut) return null;
-  return (
-    <div className="flex flex-col items-start gap-0.5">
-      <div className="flex w-full items-center gap-1">
-        <span className="block text-xs text-gray-400">
-          Variants <span className="text-gray-600">({subs.length})</span>
-        </span>
-        {!hidePopOut && (
-          <button
-            type="button"
-            onClick={onTogglePopOut}
-            title="Pop out into a resizable floating window with larger tiles"
-            aria-label="Pop out Variants panel"
-            className="ml-auto rounded border border-gray-700 px-1 py-0.5 text-[11px] leading-none text-gray-400 hover:bg-gray-800 hover:text-gray-100"
-          >⤢</button>
-        )}
-      </div>
-      <div
-        className="flex max-h-[5rem] max-w-[24rem] flex-wrap items-start gap-1 overflow-y-auto rounded border border-gray-800 bg-gray-950 p-1"
-        title={
-          `Click a thumbnail to switch the active brush's sub-frame.\n`
-          + `Keyboard: , / . to cycle prev/next.`
-        }
-      >
-        <VariantTileGrid
-          subs={subs}
-          currentSub={brush.sub}
-          slot={brush.slot}
-          renderer={renderer}
-          onPickSub={onPickSub}
-          tileSize={24}
-        />
-      </div>
-    </div>
-  );
-}
-
-/** The subs→thumbnail grid shared by the docked Variants strip and the
- * pop-out floating panel. The caller owns the container (scroll / size
- * caps) and the `tileSize`: docked uses 24px in a 2-row capped box; the
- * floating panel uses a larger, user-adjustable size. The sub-number
- * label scales with the tile so big thumbnails stay legible. */
+/** The subs→thumbnail grid for the docked Variants panel. The caller
+ * owns the container (scroll / size caps) and the `tileSize`. The
+ * sub-number label scales with the tile so big thumbnails stay
+ * legible. */
 function VariantTileGrid({
   subs, currentSub, slot, renderer, onPickSub, tileSize,
 }: {
@@ -6008,153 +5157,6 @@ function VariantTileGrid({
         );
       })}
     </div>
-  );
-}
-
-// ─── Pop-out floating panels (variants + recent palette) ──────────────
-// The "⤢ pop out" buttons on the Variants strip / Recent palette toggle
-// these. They reuse VariantTileGrid / RecentBrushGrid at a larger,
-// user-adjustable tile size so similar floor tiles (deeplake s8/1 vs
-// s8/2) are actually distinguishable. Tile size persists per panel.
-
-// Discrete tile-size stops (px) the −/＋ control steps through. Coarse,
-// roughly-even rungs spanning small (24, the docked size) up to very
-// large (240) so similar tiles can be compared at a glance. The control
-// snaps to the nearest rung, so an old persisted value lands sensibly.
-const TILE_SIZE_STOPS = [24, 48, 72, 96, 128, 160, 200, 240];
-const TILE_SIZE_MIN = TILE_SIZE_STOPS[0]!;
-const TILE_SIZE_MAX = TILE_SIZE_STOPS[TILE_SIZE_STOPS.length - 1]!;
-
-function nearestStopIndex(size: number): number {
-  let best = 0;
-  let bestDist = Infinity;
-  TILE_SIZE_STOPS.forEach((s, i) => {
-    const d = Math.abs(s - size);
-    if (d < bestDist) { bestDist = d; best = i; }
-  });
-  return best;
-}
-
-/** Per-panel persisted tile size (px), clamped to the stop range. */
-function usePersistedTileSize(key: string, fallback: number): [number, (n: number) => void] {
-  const storeKey = `mapforge.floatpanel.${key}.tileSize`;
-  const [size, setSizeState] = useState<number>(() => {
-    try {
-      const raw = localStorage.getItem(storeKey);
-      const n = raw ? parseInt(raw, 10) : NaN;
-      return Number.isFinite(n) ? Math.min(TILE_SIZE_MAX, Math.max(TILE_SIZE_MIN, n)) : fallback;
-    } catch {
-      return fallback;
-    }
-  });
-  function setSize(n: number) {
-    const clamped = Math.min(TILE_SIZE_MAX, Math.max(TILE_SIZE_MIN, Math.round(n)));
-    setSizeState(clamped);
-    try {
-      localStorage.setItem(storeKey, String(clamped));
-    } catch {
-      /* localStorage unavailable — size just won't persist */
-    }
-  }
-  return [size, setSize];
-}
-
-/** −/＋ stepper for the floating-panel title bar. Steps through
- * TILE_SIZE_STOPS (snapping the current value to the nearest rung). */
-function TileSizeControl({ size, setSize }: { size: number; setSize: (n: number) => void }) {
-  const idx = nearestStopIndex(size);
-  const atMin = idx <= 0;
-  const atMax = idx >= TILE_SIZE_STOPS.length - 1;
-  return (
-    <span className="flex items-center gap-0.5 text-[10px] text-gray-400">
-      <button
-        type="button"
-        title="Smaller tiles"
-        disabled={atMin}
-        onClick={() => setSize(TILE_SIZE_STOPS[Math.max(0, idx - 1)]!)}
-        className="rounded border border-gray-700 px-1 leading-none hover:bg-gray-800 hover:text-gray-100 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
-      >−</button>
-      <span className="w-10 text-center tabular-nums">{size}px</span>
-      <button
-        type="button"
-        title="Larger tiles"
-        disabled={atMax}
-        onClick={() => setSize(TILE_SIZE_STOPS[Math.min(TILE_SIZE_STOPS.length - 1, idx + 1)]!)}
-        className="rounded border border-gray-700 px-1 leading-none hover:bg-gray-800 hover:text-gray-100 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
-      >＋</button>
-    </span>
-  );
-}
-
-function FloatingVariantsPanel({
-  brush, renderer, onPickSub, onClose,
-}: {
-  brush: ActiveBrush | null;
-  renderer: IsoRenderer | null;
-  onPickSub: (sub: number) => void;
-  onClose: () => void;
-}) {
-  const [tileSize, setTileSize] = usePersistedTileSize("variants", 96);
-  const subs = brush && renderer ? renderer.listValidSubs(brush.slot) : [];
-  const hasVariants = !!brush && subs.length > 1;
-  return (
-    <FloatingPanel
-      id="variants"
-      title={hasVariants ? `Variants (${subs.length})` : "Variants"}
-      defaultRect={{ x: Math.max(8, window.innerWidth - 380), y: 120, w: 340, h: 380 }}
-      onClose={onClose}
-      headerRight={<TileSizeControl size={tileSize} setSize={setTileSize} />}
-    >
-      {hasVariants && brush ? (
-        <VariantTileGrid
-          subs={subs}
-          currentSub={brush.sub}
-          slot={brush.slot}
-          renderer={renderer}
-          onPickSub={onPickSub}
-          tileSize={tileSize}
-        />
-      ) : (
-        <p className="text-[11px] italic text-gray-500">
-          Pick a multi-sub brush (a floor, wall, or road STI) to see its
-          variants here at full size.
-        </p>
-      )}
-    </FloatingPanel>
-  );
-}
-
-function FloatingRecentPanel({
-  recentBrushes, renderer, activeBrush, onPick, onClose,
-}: {
-  recentBrushes: ActiveBrush[];
-  renderer: IsoRenderer | null;
-  activeBrush: ActiveBrush | null;
-  onPick: (b: ActiveBrush) => void;
-  onClose: () => void;
-}) {
-  const [tileSize, setTileSize] = usePersistedTileSize("recent", 96);
-  return (
-    <FloatingPanel
-      id="recent"
-      title="Recent brushes"
-      defaultRect={{ x: 24, y: 120, w: 320, h: 360 }}
-      onClose={onClose}
-      headerRight={<TileSizeControl size={tileSize} setSize={setTileSize} />}
-    >
-      {recentBrushes.length === 0 ? (
-        <p className="text-[11px] italic text-gray-500">No recent brushes yet.</p>
-      ) : (
-        <RecentBrushGrid
-          recentBrushes={recentBrushes}
-          renderer={renderer}
-          activeBrush={activeBrush}
-          onPick={onPick}
-          size={tileSize}
-          cols={0}
-        />
-      )}
-    </FloatingPanel>
   );
 }
 
@@ -6220,6 +5222,122 @@ function LayerVisibilityToggles({
         </button>
       </div>
     </div>
+  );
+}
+
+// ─── Command-bar primitives ───────────────────────────────────────────
+// The fixed command bar groups its controls with thin vertical rules
+// instead of color — one accent total (the Save button's emerald-when-
+// dirty); everything else stays neutral gray.
+function ToolbarDivider() {
+  return <span aria-hidden className="mx-0.5 h-5 w-px self-center bg-gray-700" />;
+}
+
+/** Minimal dropdown for the command bar (Panels▾ / Layout▾). Click the
+ * label to open; any item click, outside click, or Escape closes it.
+ * No portal — the bar sits at the top of the editor so a z-50 absolute
+ * flyout clears the dock below it. */
+function ToolbarMenu({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-gray-100"
+      >
+        {label} ▾
+      </button>
+      {open && (
+        <div
+          className="absolute right-0 top-full z-50 mt-1 min-w-[11rem] rounded border border-gray-700 bg-gray-900 py-1 shadow-lg"
+          // Any (enabled) item click closes the menu — the items'
+          // own onClick handlers run first via bubbling.
+          onClick={() => setOpen(false)}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolbarMenuItem({
+  children, onClick, title, disabled = false,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  title?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className="block w-full px-3 py-1.5 text-left text-xs text-gray-200 hover:bg-gray-800 disabled:cursor-default disabled:text-gray-600 disabled:hover:bg-transparent"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Named tileset dropdown for the command bar — "#70 — FALLOUT VAULT"
+ * instead of a bare number. Falls back to a numeric input while the
+ * enumerator list is loading (or when no Ja2Set.dat.xml is wired). */
+function TilesetSelect({
+  tilesets, tileset, onChange,
+}: {
+  tilesets: TilesetInfo[] | undefined;
+  tileset: number;
+  onChange: (t: number) => void;
+}) {
+  if (!tilesets || tilesets.length === 0) {
+    return (
+      <input
+        type="number"
+        value={tileset}
+        onChange={(e) => onChange(parseInt(e.target.value, 10) || 0)}
+        title="Tileset index (name list unavailable)"
+        className="w-16 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-200"
+      />
+    );
+  }
+  const known = tilesets.some((t) => t.index === tileset);
+  return (
+    <select
+      value={tileset}
+      onChange={(e) => onChange(parseInt(e.target.value, 10))}
+      title="Active tileset — switching re-opens the sector (you'll be prompted if there are unsaved edits)"
+      className="max-w-[14rem] rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-200"
+    >
+      {/* A header tileset outside the enumerated list (custom/modded
+          index) still needs to render as selected — synthesize its
+          option so the select doesn't silently snap to the first row. */}
+      {!known && <option value={tileset}>#{tileset} — (not in list)</option>}
+      {tilesets.map((t) => (
+        <option key={t.index} value={t.index}>
+          #{t.index} — {t.name ?? "(unnamed)"}
+        </option>
+      ))}
+    </select>
   );
 }
 

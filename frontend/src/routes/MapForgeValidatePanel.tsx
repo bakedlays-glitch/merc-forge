@@ -6,11 +6,9 @@
  * that catches "will this crash / is it playable?" BEFORE the expensive
  * in-game launch.
  *
- * Two presentations of the same body:
- *   - `MapForgeValidateBody` — bare content, rendered inside the dock's
- *     "Validation" panel (dock layout).
- *   - `MapForgeValidatePanel` — the legacy FloatingPanel wrapper (used
- *     by the non-dock layout).
+ * Rendered as `MapForgeValidateBody` inside the dock's "Validation"
+ * panel. (A legacy FloatingPanel wrapper existed for the old non-dock
+ * layout; it was removed with that layout.)
  *
  * Self-contained: given the open sector's paths it fetches its own
  * report (preferring the live session's uncommitted state when a
@@ -22,7 +20,6 @@
  * native room-ID gaps.
  */
 import { useCallback, useEffect, useState } from "react";
-import { FloatingPanel } from "../components/FloatingPanel";
 import {
   validateSector,
   validateSession,
@@ -221,28 +218,5 @@ export function MapForgeValidateBody({
         </p>
       )}
     </div>
-  );
-}
-
-/** Legacy floating presentation (non-dock layout). */
-export function MapForgeValidatePanel({
-  datPath, xmlPath, tileset, sessionId, onClose,
-}: BodyProps & { onClose: () => void }) {
-  return (
-    <FloatingPanel
-      id="validate"
-      title="Validation"
-      defaultRect={{ x: Math.max(8, window.innerWidth - 430), y: 90, w: 410, h: 470 }}
-      minW={300}
-      minH={220}
-      onClose={onClose}
-    >
-      <MapForgeValidateBody
-        datPath={datPath}
-        xmlPath={xmlPath}
-        tileset={tileset}
-        sessionId={sessionId}
-      />
-    </FloatingPanel>
   );
 }

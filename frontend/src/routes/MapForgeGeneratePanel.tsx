@@ -2,8 +2,8 @@
  * Generate dock panel — the live-preview home of the MapForge generator
  * subsystem (UX Phase 2).
  *
- * Unlike the modal wizard (which covers the canvas), this is a DOCK
- * panel: the map stays visible while you configure, so the flow is
+ * Unlike the old modal wizard (deleted — it covered the canvas), this
+ * is a DOCK panel: the map stays visible while you configure, so the flow is
  *   pick a generator → drag its region on the map → watch the GHOST
  *   preview render on the canvas → drag sliders (ghost re-renders
  *   live) → Apply.
@@ -24,13 +24,13 @@ import { useQuery } from "@tanstack/react-query";
 
 import {
   type GeneratorInfo,
+  type GeneratorParamSchema,
   listGenerators,
   runGenerator,
 } from "../lib/mapforge";
 import type { IsoRenderer } from "../lib/IsoRenderer";
 import { useMapForgeLog } from "./MapForgeLog";
 import type { ActiveBrush } from "./MapForgePalette";
-import { ParamRow, SlotSubPreview } from "./MapForgeGeneratorWizard";
 
 interface XY { x: number; y: number }
 
@@ -583,6 +583,272 @@ export function MapForgeGeneratePanel({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+//  SlotSubPreview — live thumbnail + STI metadata
+//  (moved here from the deleted modal MapForgeGeneratorWizard)
+// ──────────────────────────────────────────────────────────────────────
+//
+// Renders alongside the slot/sub number inputs. The canvas re-draws
+// whenever slot or sub changes — uses the same `drawCellInto` the
+// inspector / palette use, so the appearance matches what'll land on
+// the map at run time.
+//
+// When the requested (slot, sub) isn't in the cellMap (off-by-one
+// 1-based sub mistake, slot out of range, etc.), the canvas falls back
+// to a red "no sprite" placeholder so the user can see the misconfiguration
+// BEFORE running the generator and discovering 25,600 invisible ops.
+
+export function SlotSubPreview({
+  renderer, slot, sub,
+}: {
+  renderer: IsoRenderer;
+  slot: number;
+  sub: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const slotInfo = useMemo(
+    () => renderer.getSlotInfo(slot),
+    // Cell-Map shape doesn't change inside the panel's life — only
+    // slot does. renderer reference change (e.g. atlas reload) is rare
+    // and unmounts/remounts the panel.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [renderer, slot],
+  );
+  // Whether the current (slot, sub) actually resolves to a cell. The
+  // canvas draws nothing if not — we show a "no sprite" badge instead.
+  const [hasCell, setHasCell] = useState<boolean>(true);
+
+  useEffect(() => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    // Fill the box with a checkerboard background so transparent
+    // sprites read against the dark panel correctly.
+    const W = c.width;
+    const H = c.height;
+    ctx.fillStyle = "#1a1410";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#221a14";
+    const cb = 8;
+    for (let y = 0; y < H; y += cb) {
+      for (let x = 0; x < W; x += cb) {
+        if (((x / cb) + (y / cb)) % 2 === 0) {
+          ctx.fillRect(x, y, cb, cb);
+        }
+      }
+    }
+    const ok = renderer.drawCellInto(ctx, slot, sub, W, H);
+    setHasCell(ok);
+  }, [renderer, slot, sub]);
+
+  const filename = slotInfo.filename;
+  const subCount = slotInfo.subCount;
+  const subOutOfRange = sub < 1 || (subCount > 0 && sub > subCount);
+
+  return (
+    <div className="flex items-start gap-3 rounded border border-wasteland-700 bg-wasteland-900/70 p-2">
+      <canvas
+        ref={canvasRef}
+        width={64}
+        height={64}
+        className="rounded border border-wasteland-800 bg-wasteland-950 flex-shrink-0"
+      />
+      <div className="flex-1 min-w-0 space-y-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-xs font-medium text-wasteland-200">
+            slot {slot} · sub {sub}
+          </span>
+          {!hasCell && (
+            <span
+              className="text-[10px] text-rust-300 bg-rust-500/20 border border-rust-500/40 rounded px-1 py-0.5"
+              title="The renderer's cellMap has no entry for this (slot, sub) pair. The fill will write data but nothing will draw."
+            >
+              ⚠ no sprite
+            </span>
+          )}
+        </div>
+        <div className="text-[11px] text-wasteland-500 font-mono truncate">
+          {filename ?? <span className="italic">— no STI mapped to this slot —</span>}
+        </div>
+        {subCount > 0 && (
+          <div className="text-[10px] text-wasteland-600">
+            sub range: 1–{subCount}
+            {subOutOfRange && (
+              <span className="ml-2 text-rust-400">
+                {sub < 1
+                  ? "(sub must be ≥ 1 — JA2 .dat sub-indices are 1-based)"
+                  : `(sub ${sub} exceeds this STI's frame count)`}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Layer dropdown — special-cased instead of free-text because the
+ *  set is fixed at six values and a typo would 400 the request. */
+export const LAYER_NAMES = ["land", "objs", "shadows", "structs", "roofs", "onroofs"] as const;
+
+export function ParamRow({
+  param, value, onChange,
+}: {
+  param: GeneratorParamSchema;
+  value: unknown;
+  onChange(value: unknown): void;
+}) {
+  const labelEl = (
+    <div>
+      <label
+        htmlFor={`gen-wiz-${param.name}`}
+        className="block text-xs font-medium text-wasteland-200"
+      >
+        {param.name}
+      </label>
+      {param.description && (
+        <p className="text-[11px] text-wasteland-500 mt-0.5">{param.description}</p>
+      )}
+    </div>
+  );
+
+  // bool → checkbox
+  if (param.type === "bool") {
+    return (
+      <div className="flex items-start gap-3 py-1">
+        <input
+          id={`gen-wiz-${param.name}`}
+          type="checkbox"
+          checked={value === true}
+          onChange={(e) => onChange(e.target.checked)}
+          className="mt-1 accent-rust-500 w-4 h-4"
+        />
+        {labelEl}
+      </div>
+    );
+  }
+
+  // layer name → dropdown (instead of free text)
+  if (param.name === "layer" && param.type === "str") {
+    return (
+      <div>
+        {labelEl}
+        <select
+          id={`gen-wiz-${param.name}`}
+          value={(value as string) ?? "land"}
+          onChange={(e) => onChange(e.target.value)}
+          className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100"
+        >
+          {LAYER_NAMES.map((l) => (
+            <option key={l} value={l}>{l}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  // mode dropdown for the rect generator
+  if (param.name === "mode" && param.type === "str") {
+    return (
+      <div>
+        {labelEl}
+        <select
+          id={`gen-wiz-${param.name}`}
+          value={(value as string) ?? "outline"}
+          onChange={(e) => onChange(e.target.value)}
+          className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100"
+        >
+          <option value="outline">outline (perimeter only)</option>
+          <option value="fill">fill (every interior tile)</option>
+        </select>
+      </div>
+    );
+  }
+
+  // int/float with both min and max → slider + number input combo
+  // (so the user can drag for rough exploration OR type for precision)
+  if ((param.type === "int" || param.type === "float")
+      && param.min !== null && param.max !== null) {
+    const step = param.type === "int" ? 1 : (param.max - param.min) / 100;
+    const numValue = typeof value === "number" ? value : (param.default as number) ?? param.min;
+    return (
+      <div>
+        {labelEl}
+        <div className="flex items-center gap-2 mt-1">
+          <input
+            type="range"
+            min={param.min}
+            max={param.max}
+            step={step}
+            value={numValue}
+            onChange={(e) => {
+              const raw = e.target.value;
+              onChange(param.type === "int" ? parseInt(raw, 10) : parseFloat(raw));
+            }}
+            className="flex-1 accent-rust-500"
+          />
+          <input
+            id={`gen-wiz-${param.name}`}
+            type="number"
+            min={param.min}
+            max={param.max}
+            step={param.type === "int" ? 1 : "any"}
+            value={numValue}
+            onChange={(e) => {
+              const raw = e.target.value;
+              const n = param.type === "int" ? parseInt(raw, 10) : parseFloat(raw);
+              onChange(Number.isFinite(n) ? n : raw);
+            }}
+            className="w-20 rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1 text-sm text-wasteland-100 font-mono"
+          />
+        </div>
+        <div className="flex justify-between text-[10px] text-wasteland-600 mt-0.5 font-mono">
+          <span>{param.min}</span>
+          <span>{param.max}</span>
+        </div>
+      </div>
+    );
+  }
+
+  // int/float without bounds → plain number input
+  if (param.type === "int" || param.type === "float") {
+    return (
+      <div>
+        {labelEl}
+        <input
+          id={`gen-wiz-${param.name}`}
+          type="number"
+          step={param.type === "int" ? 1 : "any"}
+          min={param.min ?? undefined}
+          max={param.max ?? undefined}
+          value={value as number | string}
+          onChange={(e) => {
+            const raw = e.target.value;
+            const n = param.type === "int" ? parseInt(raw, 10) : parseFloat(raw);
+            onChange(Number.isFinite(n) ? n : raw);
+          }}
+          className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100 font-mono"
+        />
+      </div>
+    );
+  }
+
+  // str default
+  return (
+    <div>
+      {labelEl}
+      <input
+        id={`gen-wiz-${param.name}`}
+        type="text"
+        value={(value as string) ?? ""}
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100 font-mono"
+      />
     </div>
   );
 }

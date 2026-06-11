@@ -29,7 +29,7 @@ import {
 } from "../lib/mapforgeSettings";
 
 export function MapForgeSettingsModal({
-  settings, onChange, onClose, dockMode, onSetDockMode,
+  settings, onChange, onClose,
 }: {
   settings: MapForgeSettings;
   /** Called whenever settings change. Parent should persist via
@@ -37,10 +37,6 @@ export function MapForgeSettingsModal({
    * the parent forgets, but the parent must update its local copy). */
   onChange: (next: MapForgeSettings) => void;
   onClose: () => void;
-  /** Current layout mode + setter. "Undocked Mode" (the toggle below) is
-   * the inverse of dockMode; it lives here now, not on the toolbar. */
-  dockMode: boolean;
-  onSetDockMode: (v: boolean) => void;
 }) {
   // ── Esc closes the modal (matches the rest of MapForge modals).
   useEffect(() => {
@@ -119,29 +115,6 @@ export function MapForgeSettingsModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-3 space-y-4">
-          {/* ── Layout ─────────────────────────────────────────── */}
-          <section>
-            <h4 className="mb-1 text-xs font-semibold uppercase text-gray-400">
-              Layout
-            </h4>
-            <div className="flex items-center justify-between rounded border border-gray-800 bg-gray-900 px-2 py-1.5">
-              <div className="flex-1 pr-2">
-                <div className="text-xs text-gray-300">Undocked Mode</div>
-                <div className="text-[10px] text-gray-500">
-                  Use the classic fixed-grid layout instead of the dockable
-                  panel layout (drag / dock / tab / float). Off by default —
-                  the dockable layout is now the default. Switching re-lays
-                  out the editor body immediately.
-                </div>
-              </div>
-              <input
-                type="checkbox"
-                checked={!dockMode}
-                onChange={(e) => onSetDockMode(!e.target.checked)}
-                className="h-4 w-4"
-              />
-            </div>
-          </section>
           {/* ── Hotkey section ─────────────────────────────────── */}
           <section>
             <h4 className="mb-1 text-xs font-semibold uppercase text-gray-400">

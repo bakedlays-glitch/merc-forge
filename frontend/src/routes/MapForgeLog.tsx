@@ -35,6 +35,10 @@ export interface LogEntry {
   /** Optional secondary text shown when the entry is expanded.
    * Useful for things like backup paths, error stack traces. */
   detail?: string;
+  /** Optional inline image (data: URL) rendered as a small thumbnail
+   * under the message — e.g. the radar-minimap preview on a successful
+   * radar generation. */
+  imageDataUrl?: string;
 }
 
 interface LogApi {
@@ -191,6 +195,14 @@ export function MapForgeLogPanel() {
                         {e.detail}
                       </div>
                     )}
+                    {e.imageDataUrl && (
+                      <img
+                        src={e.imageDataUrl}
+                        alt=""
+                        className="mt-1 max-h-16 rounded-sm ring-1 ring-gray-700"
+                        style={{ imageRendering: "pixelated" }}
+                      />
+                    )}
                   </li>
                 );
               })}
@@ -208,6 +220,14 @@ export function MapForgeLogPanel() {
               {fmtTime(newest.ts)}
             </span>
             <span className="flex-1 truncate">{newest.message}</span>
+            {newest.imageDataUrl && (
+              <img
+                src={newest.imageDataUrl}
+                alt=""
+                className="h-5 rounded-sm ring-1 ring-gray-700"
+                style={{ imageRendering: "pixelated" }}
+              />
+            )}
             {log.entries.length > 1 && (
               <span className="text-[9px] opacity-60">
                 +{log.entries.length - 1} more
@@ -267,6 +287,14 @@ export function MapForgeLogFull() {
               </div>
               {e.detail && (
                 <div className="mt-0.5 text-[10px] opacity-70">{e.detail}</div>
+              )}
+              {e.imageDataUrl && (
+                <img
+                  src={e.imageDataUrl}
+                  alt=""
+                  className="mt-1 max-h-16 rounded-sm ring-1 ring-gray-700"
+                  style={{ imageRendering: "pixelated" }}
+                />
               )}
             </li>
           );

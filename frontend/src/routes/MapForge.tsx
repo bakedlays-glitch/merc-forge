@@ -177,7 +177,8 @@ export default function MapForge() {
           </Link>
           <h1 className="mt-2 text-2xl font-semibold">Map Forge</h1>
           <p className="text-sm text-gray-400">
-            JA2 sector inspector and editor (Phase 0: read-only inspector).
+            JA2 sector editor — inspect, paint, generate, validate, and
+            save sectors.
           </p>
         </div>
       </div>
