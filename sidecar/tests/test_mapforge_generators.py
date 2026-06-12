@@ -20,7 +20,10 @@ from mercwizard_core.mapforge.generators import (
     REGISTRY,
     ScatterGenerator,
     WipeGenerator,
+    NAMED_MASKS,
+    _combine_masks,
     _make_mask_predicate,
+    _make_named_mask_predicate,
     _make_sub_picker,
     _normalize_region,
     _parse_int_csv,
@@ -1438,6 +1441,248 @@ def test_make_mask_predicate_specific_slots():
     assert is_masked(2, 2) is True   # slot 9 matches the avoid set
     assert is_masked(1, 1) is False  # slot 5 not avoided
     assert is_masked(0, 0) is False  # empty tile
+
+
+# ────────────────────────────────────────────────────────────────────────
+#  Named masks (avoid_named) — the "Don't place on" checkboxes
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_named_mask_none_when_blank():
+    ctx = GeneratorContext(rows=4, cols=4, parsed={"rows": 4, "cols": 4})
+    assert _make_named_mask_predicate(ctx, "objs", "") is None
+    assert _make_named_mask_predicate(ctx, "objs", "  ") is None
+
+
+def test_named_mask_unknown_name_raises():
+    parsed = _parsed_with_layers(4, 4)
+    ctx = GeneratorContext(rows=4, cols=4, parsed=parsed)
+    with pytest.raises(ValueError, match="unknown avoid_named"):
+        _make_named_mask_predicate(ctx, "objs", "occupied,lava")
+
+
+def test_named_mask_none_when_grids_absent():
+    """Minimal test context with no layer grids → nothing to avoid."""
+    ctx = GeneratorContext(rows=4, cols=4, parsed={"rows": 4, "cols": 4})
+    assert _make_named_mask_predicate(ctx, "objs", "occupied,water,trees") is None
+
+
+def test_named_mask_occupied_reads_target_layer():
+    """`occupied` masks tiles with ANY content on the generator's TARGET
+    layer — and only that layer."""
+    parsed = _parsed_with_layers(4, 4, {
+        "objs": {(1, 1): [(5, 1)]},
+        "land": {(2, 2): [(0, 1)]},
+    })
+    ctx = GeneratorContext(rows=4, cols=4, parsed=parsed)
+    is_masked = _make_named_mask_predicate(ctx, "objs", "occupied")
+    assert is_masked is not None
+    assert is_masked(1, 1) is True    # content on target layer
+    assert is_masked(2, 2) is False   # land content doesn't mask objs target
+    assert is_masked(0, 0) is False
+    # Same map, structs target → neither tile masks.
+    is_masked_s = _make_named_mask_predicate(ctx, "structs", "occupied")
+    assert is_masked_s(1, 1) is False
+
+
+def test_named_mask_water_land_slots():
+    """`water` = land-layer REGWATERTEXTURE(7) / DEEPWATERTEXTURE(8)
+    (TileDat.h TileTypeDefines)."""
+    parsed = _parsed_with_layers(4, 4, {
+        "land": {(0, 0): [(7, 3)], (1, 0): [(8, 1)], (2, 0): [(0, 1)]},
+    })
+    ctx = GeneratorContext(rows=4, cols=4, parsed=parsed)
+    is_masked = _make_named_mask_predicate(ctx, "objs", "water")
+    assert is_masked(0, 0) is True    # REGWATERTEXTURE
+    assert is_masked(1, 0) is True    # DEEPWATERTEXTURE
+    assert is_masked(2, 0) is False   # plain ground texture
+    assert is_masked(3, 3) is False
+
+
+def test_named_mask_roads_objs50_and_land78():
+    """`roads` = ROADPIECES(50) on objs (modern macro roads) plus
+    FIRSTROAD(78) legacy land-layer roads."""
+    parsed = _parsed_with_layers(4, 4, {
+        "objs": {(0, 0): [(50, 120)], (1, 0): [(5, 1)]},
+        "land": {(2, 0): [(78, 4)]},
+    })
+    ctx = GeneratorContext(rows=4, cols=4, parsed=parsed)
+    is_masked = _make_named_mask_predicate(ctx, "objs", "roads")
+    assert is_masked(0, 0) is True    # ROADPIECES on objs
+    assert is_masked(2, 0) is True    # legacy FIRSTROAD on land
+    assert is_masked(1, 0) is False   # non-road obj
+    assert is_masked(3, 3) is False
+
+
+def test_named_mask_structures_any_structs_content():
+    parsed = _parsed_with_layers(4, 4, {
+        "structs": {(1, 2): [(39, 7)]},
+        "objs": {(2, 2): [(5, 1)]},
+    })
+    ctx = GeneratorContext(rows=4, cols=4, parsed=parsed)
+    is_masked = _make_named_mask_predicate(ctx, "objs", "structures")
+    assert is_masked(1, 2) is True
+    assert is_masked(2, 2) is False   # objs content isn't a structure
+
+
+def test_named_mask_trees_ostruct_families():
+    """`trees` = the O-struct/full-struct vegetation families
+    (FIRSTOSTRUCT..FOURTHFULLSTRUCT 12-23 + NINTH/TENTHOSTRUCT 97-98) on
+    both objs and structs layers."""
+    parsed = _parsed_with_layers(6, 6, {
+        "structs": {(0, 0): [(20, 1)],   # FIRSTFULLSTRUCT (tree)
+                    (1, 0): [(97, 2)],   # NINTHOSTRUCT
+                    (2, 0): [(39, 7)]},  # FOURTHWALL — not a tree
+        "objs": {(3, 0): [(12, 1)],      # FIRSTOSTRUCT
+                 (4, 0): [(50, 9)]},     # ROADPIECES — not a tree
+    })
+    ctx = GeneratorContext(rows=6, cols=6, parsed=parsed)
+    is_masked = _make_named_mask_predicate(ctx, "objs", "trees")
+    assert is_masked(0, 0) is True
+    assert is_masked(1, 0) is True
+    assert is_masked(3, 0) is True
+    assert is_masked(2, 0) is False
+    assert is_masked(4, 0) is False
+    assert is_masked(5, 5) is False
+
+
+def test_named_mask_combined_list():
+    parsed = _parsed_with_layers(4, 4, {
+        "land": {(0, 0): [(7, 1)]},          # water
+        "structs": {(1, 0): [(39, 7)]},      # structure
+        "objs": {(2, 0): [(5, 1)]},          # occupied (target = objs)
+    })
+    ctx = GeneratorContext(rows=4, cols=4, parsed=parsed)
+    is_masked = _make_named_mask_predicate(
+        ctx, "objs", "occupied, water, structures")
+    assert is_masked(0, 0) is True
+    assert is_masked(1, 0) is True
+    assert is_masked(2, 0) is True
+    assert is_masked(3, 3) is False
+
+
+def test_combine_masks_or_semantics():
+    a = lambda x, y: x == 1   # noqa: E731
+    b = lambda x, y: y == 2   # noqa: E731
+    assert _combine_masks(None, None) is None
+    assert _combine_masks(a, None) is a
+    both = _combine_masks(a, b)
+    assert both(1, 0) is True
+    assert both(0, 2) is True
+    assert bool(both(0, 0)) is False
+
+
+def test_scatter_avoid_named_occupied_skips_existing_content():
+    """Scatter with avoid_named=occupied never stacks on a tile that
+    already has content on the TARGET layer."""
+    rows = cols = 20
+    blocked = {(x, y) for x in range(10) for y in range(rows)}
+    occupied = {"objs": {xy: [(20, 3)] for xy in blocked}}
+    parsed = _parsed_with_layers(rows, cols, occupied)
+    ctx = GeneratorContext(rows=rows, cols=cols, parsed=parsed)
+    events = list(ScatterGenerator().iter_ops(ctx, {
+        "count": 80, "min_distance": 1, "layer": "objs",
+        "slot": 5, "sub": 1, "seed": 3, "avoid_named": "occupied",
+    }))
+    coords = {(e["x"], e["y"]) for e in events if "op" in e}
+    assert coords, "expected placements in the unoccupied half"
+    assert not (coords & blocked)
+
+
+def test_scatter_avoid_named_combines_with_legacy_mask():
+    """avoid_named ORs with avoid_layer/avoid_slots — both masks apply."""
+    rows = cols = 20
+    water = {(x, 0) for x in range(cols)}
+    structs = {(x, 1) for x in range(cols)}
+    parsed = _parsed_with_layers(rows, cols, {
+        "land": {xy: [(7, 1)] for xy in water},
+        "structs": {xy: [(39, 7)] for xy in structs},
+    })
+    ctx = GeneratorContext(rows=rows, cols=cols, parsed=parsed)
+    events = list(ScatterGenerator().iter_ops(ctx, {
+        "count": 120, "min_distance": 1, "layer": "objs",
+        "slot": 5, "sub": 1, "seed": 11,
+        "avoid_named": "water",
+        "avoid_layer": "structs", "avoid_slots": "",
+    }))
+    coords = {(e["x"], e["y"]) for e in events if "op" in e}
+    assert coords
+    assert not (coords & water)
+    assert not (coords & structs)
+
+
+def test_cluster_and_density_respect_avoid_named():
+    rows = cols = 40
+    blocked = {(x, y) for x in range(rows) for y in range(20)}  # top half
+    parsed = _parsed_with_layers(rows, cols, {
+        "objs": {xy: [(12, 1)] for xy in blocked},   # FIRSTOSTRUCT = trees
+    })
+    ctx = GeneratorContext(rows=rows, cols=cols, parsed=parsed)
+    cluster_events = list(ClusterScatterGenerator().iter_ops(ctx, {
+        "cluster_count": 6, "objects_per_cluster": 15, "cluster_radius": 4,
+        "layer": "objs", "slot": 5, "sub": 1, "seed": 8,
+        "avoid_named": "trees",
+    }))
+    density_events = list(DensityFalloffGenerator().iter_ops(ctx, {
+        "center_x": 20, "center_y": 20, "radius": 18, "peak_density": 1.0,
+        "layer": "objs", "slot": 5, "sub": 1, "seed": 2,
+        "avoid_named": "trees",
+    }))
+    for events in (cluster_events, density_events):
+        coords = {(e["x"], e["y"]) for e in events if "op" in e}
+        assert coords
+        assert not (coords & blocked)
+
+
+def test_scatter_avoid_named_blank_is_byte_identical():
+    """Default avoid_named='' changes nothing — legacy streams intact."""
+    ctx_a = GeneratorContext(rows=30, cols=30, parsed={"rows": 30, "cols": 30})
+    ctx_b = GeneratorContext(rows=30, cols=30, parsed={"rows": 30, "cols": 30})
+    base = {"count": 30, "min_distance": 1, "layer": "objs",
+            "slot": 5, "sub": 1, "seed": 4}
+    a = [(e["x"], e["y"], e["sub"])
+         for e in ScatterGenerator().iter_ops(ctx_a, base) if "op" in e]
+    b = [(e["x"], e["y"], e["sub"])
+         for e in ScatterGenerator().iter_ops(ctx_b, {**base, "avoid_named": ""})
+         if "op" in e]
+    assert a == b
+
+
+def test_avoid_named_param_declared_on_scatter_family():
+    for gen in (ScatterGenerator(), ClusterScatterGenerator(),
+                DensityFalloffGenerator()):
+        names = {p.name for p in gen.params}
+        assert "avoid_named" in names, f"{gen.name} missing avoid_named"
+
+
+def test_subs_param_declared_on_fill_and_rect():
+    """fill + rect grew the `subs` variant param so the panel's thumbnail
+    multi-select drives them too."""
+    for gen in (FillLayerGenerator(), RectangleGenerator()):
+        names = {p.name for p in gen.params}
+        assert "subs" in names, f"{gen.name} missing subs"
+
+
+def test_fill_and_rect_subs_variants_emit_from_set():
+    ctx = GeneratorContext(rows=8, cols=8, parsed={"rows": 8, "cols": 8})
+    fill_events = list(FillLayerGenerator().iter_ops(ctx, {
+        "layer": "land", "slot": 0, "sub": 1, "seed": 5, "subs": "1,2,3",
+    }))
+    subs = {e["sub"] for e in fill_events if "op" in e}
+    assert subs <= {1, 2, 3}
+    assert len(subs) >= 2
+    rect_events = list(RectangleGenerator().iter_ops(ctx, {
+        "x1": 0, "y1": 0, "x2": 7, "y2": 7, "layer": "land",
+        "slot": 0, "sub": 1, "seed": 5, "mode": "fill", "subs": "4,5",
+    }))
+    rsubs = {e["sub"] for e in rect_events if "op" in e}
+    assert rsubs <= {4, 5}
+    assert len(rsubs) >= 2
+
+
+def test_named_masks_constant_shape():
+    """The UI's checkbox row mirrors this tuple — keep it stable."""
+    assert NAMED_MASKS == ("occupied", "water", "roads", "structures", "trees")
 
 
 # ────────────────────────────────────────────────────────────────────────

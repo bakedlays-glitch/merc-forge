@@ -211,6 +211,42 @@ function hiddenParams(scheme: RegionScheme | null): Set<string> {
   return new Set(scheme ? SCHEME_PARAMS[scheme] : []);
 }
 
+// ─── Generator picker cards ───────────────────────────────────────────
+// Visual picker metadata: icon glyph + short name + one-line purpose.
+// Honest buttons, not thumbnails — the list is fixed (compiled-in
+// registry), so unknown names just fall back to the API label.
+const GEN_META: Record<string, { icon: string; title: string; blurb: string; order: number }> = {
+  scatter: { icon: "∴", title: "Scatter", blurb: "Random spread with spacing", order: 1 },
+  cluster: { icon: "⁂", title: "Cluster", blurb: "Groves & clumped patches", order: 2 },
+  "density-falloff": { icon: "◎", title: "Density falloff", blurb: "Dense at center, sparse out", order: 3 },
+  fill: { icon: "▦", title: "Fill layer", blurb: "Flood one layer with a tile", order: 4 },
+  rect: { icon: "▭", title: "Rectangle", blurb: "Outline or filled box", order: 5 },
+  bank: { icon: "⛰", title: "Cliff / bank", blurb: "Raised plateau or escarpment", order: 6 },
+  wipe: { icon: "⌫", title: "Wipe sector", blurb: "Clear every tile, every layer", order: 7 },
+  // The canon Building Library above is the real building flow — the
+  // generic corpus stamp stays available but demoted to last place.
+  building: { icon: "⌂", title: "Building (generic)", blurb: "Prefer the Library above", order: 8 },
+};
+
+// ─── Named "don't place on" masks ─────────────────────────────────────
+// Mirrors NAMED_MASKS in sidecar/mercwizard_core/mapforge/generators.py
+// (slot families derived from the engine's TileTypeDefines enum). The
+// panel composes the comma-list `avoid_named` param from checkboxes —
+// the raw avoid_layer/avoid_slots params stay console-only (Advanced).
+const NAMED_MASK_OPTIONS: Array<{ id: string; label: string; hint: string }> = [
+  { id: "occupied", label: "Occupied", hint: "Tiles that already hold content on the target layer — stops stacking on existing sprites." },
+  { id: "water", label: "Water", hint: "Water ground textures (regular + deep water)." },
+  { id: "roads", label: "Roads", hint: "Road pieces (modern object-layer roads + legacy land roads)." },
+  { id: "structures", label: "Structures", hint: "Anything on the structs layer — walls, buildings, doors, obstacles." },
+  { id: "trees", label: "Trees", hint: "The tree / vegetation struct families (O-structs + full-structs)." },
+];
+
+function parseAvoidNamed(v: unknown): Set<string> {
+  return new Set(
+    String(v ?? "").split(",").map((t) => t.trim().toLowerCase()).filter(Boolean),
+  );
+}
+
 export function MapForgeGeneratePanel({
   sessionId, renderer, readOnly, xmlPath, tileset, activeBrush,
   pickRegion, applyGhostOps, clearGhost, ghostActive,
@@ -278,6 +314,12 @@ export function MapForgeGeneratePanel({
     const g = (list.data ?? []).find((x) => x.name === name);
     const defaults: Record<string, unknown> = {};
     if (g) for (const p of g.params) defaults[p.name] = p.default;
+    // "Don't place on" UI default: Occupied ON (stop stacking on
+    // existing content). The BACKEND default stays "" so console/API
+    // runs with raw params are byte-identical to before.
+    if (g && g.params.some((p) => p.name === "avoid_named")) {
+      defaults.avoid_named = "occupied";
+    }
     // Inherit the ACTIVE BRUSH: if the generator paints a (slot, sub),
     // start from what the user already picked in the palette instead
     // of the meaningless slot-0 default.
@@ -312,6 +354,59 @@ export function MapForgeGeneratePanel({
       && (selected?.params ?? []).some((p) => p.name === "sub"),
     [selected],
   );
+  const hasSubsParam = useMemo(
+    () => (selected?.params ?? []).some((p) => p.name === "subs"),
+    [selected],
+  );
+
+  // ── Variant multi-select (replaces the typed `subs` string) ────────
+  // All valid subs of the chosen slot, from the renderer's atlas. When
+  // the slot has >1 sub we render a thumbnail toggle grid; the comma
+  // `subs` param is COMPOSED from the selection (equal weights), so
+  // console/API compatibility is untouched. Default = ALL subs included
+  // (variety by default — the uniform-blob look was a core complaint).
+  const slotNum = typeof values.slot === "number" ? (values.slot as number) : 0;
+  const validSubs = useMemo(
+    () => (renderer && hasSlotSubParams ? renderer.listValidSubs(slotNum) : []),
+    // selectedName forces a re-list when the generator changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [renderer, hasSlotSubParams, slotNum, selectedName],
+  );
+  const multiSub = hasSubsParam && validSubs.length > 1;
+  const [includedSubs, setIncludedSubs] = useState<number[]>([]);
+
+  // Re-seed the selection whenever the generator or the slot changes:
+  // everything included, `subs` composed to match.
+  useEffect(() => {
+    if (!selected || !hasSlotSubParams || !hasSubsParam || !renderer) return;
+    const subs = renderer.listValidSubs(slotNum);
+    setIncludedSubs(subs);
+    const spec = subs.length > 1 ? subs.join(",") : "";
+    setValues((prev) =>
+      (typeof prev.subs === "string" ? prev.subs : "") === spec
+        ? prev
+        : { ...prev, subs: spec });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedName, slotNum, hasSlotSubParams, hasSubsParam, renderer]);
+
+  const toggleSub = useCallback((sub: number) => {
+    setIncludedSubs((prev) => {
+      const has = prev.includes(sub);
+      // Never allow an empty selection — the run would fall back to the
+      // single `sub` and silently ignore the grid.
+      if (has && prev.length === 1) return prev;
+      const next = has
+        ? prev.filter((s) => s !== sub)
+        : [...prev, sub].sort((a, b) => a - b);
+      setValues((v) => ({ ...v, subs: next.join(",") }));
+      return next;
+    });
+  }, []);
+
+  const includeAllSubs = useCallback(() => {
+    setIncludedSubs(validSubs);
+    setValues((v) => ({ ...v, subs: validSubs.join(",") }));
+  }, [validSubs]);
 
   // LIVE brush adoption: the most common real flow is "open Generate
   // first, realize you need a brush, go arm one" — the generator must
@@ -346,6 +441,10 @@ export function MapForgeGeneratePanel({
     // and untouched defaults would preview slot-0 garbage right under
     // the "No brush armed" warning.
     if (hasSlotSubParams && !activeBrush && !slotTouchedRef.current) return;
+    // 120ms debounce so the ghost MORPHS while a slider is dragged
+    // (sliders fire per tick; stale dry-runs are aborted mid-flight) —
+    // owner: "as you adjust the slider it shows you the shadow preview".
+    // The old 400ms read as update-after-you-let-go.
     const t = setTimeout(() => {
       previewAbortRef.current?.abort();
       const ac = new AbortController();
@@ -378,7 +477,7 @@ export function MapForgeGeneratePanel({
         .finally(() => {
           if (previewAbortRef.current === ac) setPreviewBusy(false);
         });
-    }, 400);
+    }, 120);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoPreview, sessionId, selected, valuesKey, running, readOnly,
@@ -387,6 +486,11 @@ export function MapForgeGeneratePanel({
   // ── Apply (the real run) ────────────────────────────────────────────
   const apply = useCallback(async () => {
     if (!sessionId || !selected || !renderer || running) return;
+    // Wipe nukes the sector with one click — make it a deliberate act.
+    if (selected.name === "wipe"
+        && !window.confirm("Wipe ALL layers across the whole sector?")) {
+      return;
+    }
     previewAbortRef.current?.abort();
     clearGhost();
     setPreviewError(null);
@@ -442,11 +546,19 @@ export function MapForgeGeneratePanel({
   // levels are options, not front-and-center).
   // room_id is automatic invisible bookkeeping (0 = auto-assign on the
   // backend) — never a front-and-center slider the user sets by hand.
+  // avoid_layer/avoid_slots are legacy console-power masks — superseded
+  // in the panel by the named "Don't place on" checkboxes.
   const ADV_NAMES = ["seed", "biome", "clip_to_playable", "levels",
-    "place_cliff_faces", "room_id"];
+    "place_cliff_faces", "room_id", "avoid_layer", "avoid_slots"];
+  // Params with DEDICATED visual controls — never rendered as raw rows.
+  // slot/sub come from the brush (visual pick) and show in the preview
+  // strip; subs is composed by the variant grid; avoid_named by the
+  // checkbox row.
+  const UI_OWNED = ["slot", "sub", "subs", "avoid_named"];
   const primary = useMemo(
     () => (selected?.params ?? []).filter(
       (p) => !hidden.has(p.name) && !ADV_NAMES.includes(p.name)
+        && !UI_OWNED.includes(p.name)
         && !p.name.startsWith("corpus_"),
     ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -500,19 +612,52 @@ export function MapForgeGeneratePanel({
         placementActive={placementActive}
         onComplete={onComplete}
       />
-      {/* Generator picker */}
-      <select
-        value={selectedName}
-        onChange={(e) => selectGenerator(e.target.value)}
-        className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-sm text-gray-100"
-      >
-        <option value="">— pick a generator —</option>
-        {(list.data ?? []).map((g) => (
-          <option key={g.name} value={g.name}>{g.label}</option>
-        ))}
-      </select>
+      {/* Generator picker — visual cards (icon + name + purpose), same
+          selection semantics as the old dropdown. */}
+      <div className="grid grid-cols-2 gap-1" data-gen-cards>
+        {[...(list.data ?? [])]
+          .sort((a, b) =>
+            (GEN_META[a.name]?.order ?? 99) - (GEN_META[b.name]?.order ?? 99)
+            || a.name.localeCompare(b.name))
+          .map((g) => {
+            const meta = GEN_META[g.name]
+              ?? { icon: "⚙", title: g.label, blurb: "", order: 99 };
+            const active = g.name === selectedName;
+            return (
+              <button
+                key={g.name}
+                type="button"
+                data-gen-card={g.name}
+                data-active={active ? "1" : undefined}
+                onClick={() => selectGenerator(active ? "" : g.name)}
+                title={`${g.label}\n\n${g.description}`}
+                className={`flex items-center gap-1.5 rounded border px-1.5 py-1 text-left ${
+                  active
+                    ? "border-emerald-500 bg-emerald-950/50"
+                    : "border-gray-700 bg-gray-900/60 hover:border-gray-500"
+                }`}
+              >
+                <span className={`w-4 shrink-0 text-center text-sm leading-none ${
+                  active ? "text-emerald-300" : "text-gray-400"
+                }`}>
+                  {meta.icon}
+                </span>
+                <span className="min-w-0">
+                  <span className={`block truncate text-[11px] leading-tight ${
+                    active ? "text-emerald-100" : "text-gray-200"
+                  }`}>
+                    {meta.title}
+                  </span>
+                  <span className="block truncate text-[9px] leading-tight text-gray-500">
+                    {meta.blurb}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+      </div>
       {selected && (
-        <p className="line-clamp-3 text-[10px] leading-snug text-gray-500" title={selected.description}>
+        <p className="line-clamp-2 text-[10px] leading-snug text-gray-500" title={selected.description}>
           {selected.description}
         </p>
       )}
@@ -562,18 +707,65 @@ export function MapForgeGeneratePanel({
             </div>
           )}
 
-          {/* Params (sliders for bounded ints/floats via ParamRow) */}
-          {primary.map((p) => (
-            <ParamRow
-              key={p.name}
-              param={p}
-              value={values[p.name]}
-              onChange={(v) => {
-                if (p.name === "slot" || p.name === "sub") slotTouchedRef.current = true;
-                setValues((prev) => ({ ...prev, [p.name]: v }));
-              }}
-            />
-          ))}
+          {/* Params (sliders for bounded ints/floats via ParamRow).
+              high_side only applies to escarpment mode — hidden for a
+              plateau (it has no high side). */}
+          {primary
+            .filter((p) => !(p.name === "high_side" && values.bank_mode === "plateau"))
+            .map((p) => (
+              <ParamRow
+                key={p.name}
+                param={p}
+                value={values[p.name]}
+                onChange={(v) => {
+                  if (p.name === "slot" || p.name === "sub") slotTouchedRef.current = true;
+                  setValues((prev) => ({ ...prev, [p.name]: v }));
+                }}
+              />
+            ))}
+          {/* "Don't place on" — named masks as checkboxes. The raw
+              avoid_layer/avoid_slots params stay console-only. */}
+          {selected.params.some((p) => p.name === "avoid_named") && (
+            <div
+              data-avoid-row
+              className="rounded border border-gray-700 bg-gray-900/60 px-2 py-1.5"
+            >
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                Don't place on
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                {NAMED_MASK_OPTIONS.map((m) => {
+                  const set = parseAvoidNamed(values.avoid_named);
+                  const on = set.has(m.id);
+                  return (
+                    <label
+                      key={m.id}
+                      className="flex items-center gap-1 text-[10px] text-gray-300"
+                      title={m.hint}
+                    >
+                      <input
+                        type="checkbox"
+                        data-avoid={m.id}
+                        checked={on}
+                        onChange={() => {
+                          const next = parseAvoidNamed(values.avoid_named);
+                          if (on) next.delete(m.id); else next.add(m.id);
+                          // Stable order = NAMED_MASK_OPTIONS order.
+                          const spec = NAMED_MASK_OPTIONS
+                            .map((o) => o.id)
+                            .filter((id) => next.has(id))
+                            .join(",");
+                          setValues((prev) => ({ ...prev, avoid_named: spec }));
+                        }}
+                        className="h-3 w-3"
+                      />
+                      {m.label}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {hasSlotSub && !activeBrush && (
             <div className="rounded border border-amber-700/60 bg-amber-950/40 px-2 py-1.5 text-[10px] leading-snug text-amber-200">
               <strong>No brush armed</strong> — this generator will paint
@@ -600,7 +792,22 @@ export function MapForgeGeneratePanel({
               </button>
             </div>
           )}
-          {hasSlotSub && renderer && (
+          {/* Variants: thumbnail multi-select for multi-sub slots —
+              every sub starts INCLUDED; click a thumb to exclude it.
+              The `subs` param ("1,2,3", equal weights) is composed from
+              the selection. Single-sub slots keep the read-only
+              SlotSubPreview as the fallback display. */}
+          {hasSlotSub && renderer && multiSub && (
+            <VariantMultiSelect
+              renderer={renderer}
+              slot={slotNum}
+              subs={validSubs}
+              included={includedSubs}
+              onToggle={toggleSub}
+              onAll={includeAllSubs}
+            />
+          )}
+          {hasSlotSub && renderer && !multiSub && (
             <SlotSubPreview
               renderer={renderer}
               slot={typeof values.slot === "number" ? values.slot : 0}
@@ -1148,6 +1355,109 @@ function BuildingLibrarySection({
 }
 
 // ──────────────────────────────────────────────────────────────────────
+//  VariantMultiSelect — thumbnail toggle grid for the `subs` param
+// ──────────────────────────────────────────────────────────────────────
+//
+// Adapted from MapForgeSector's VariantTileGrid (same drawCellInto
+// drawing), but multi-select: each thumb toggles included/excluded
+// instead of picking one. Equal weights, no typed strings — the panel
+// composes the `subs` comma list from the selection.
+
+function AtlasThumb({
+  renderer, slot, sub, size,
+}: {
+  renderer: IsoRenderer;
+  slot: number;
+  sub: number;
+  size: number;
+}) {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#16120e";
+    ctx.fillRect(0, 0, size, size);
+    renderer.drawCellInto(ctx, slot, sub, size, size);
+  }, [renderer, slot, sub, size]);
+  return <canvas ref={ref} width={size} height={size} className="rounded-sm" />;
+}
+
+function VariantMultiSelect({
+  renderer, slot, subs, included, onToggle, onAll,
+}: {
+  renderer: IsoRenderer;
+  slot: number;
+  subs: number[];
+  included: number[];
+  onToggle(sub: number): void;
+  onAll(): void;
+}) {
+  const slotInfo = useMemo(() => renderer.getSlotInfo(slot),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [renderer, slot]);
+  const allIn = included.length === subs.length;
+  return (
+    <div
+      data-variant-grid
+      className="rounded border border-wasteland-700 bg-wasteland-900/70 p-2"
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span
+          className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-wide text-wasteland-300"
+          title={`${slotInfo.filename ?? `slot ${slot}`} — every checked variant is placed with equal probability. Click a thumbnail to exclude/include it.`}
+        >
+          Variants · {slotInfo.filename?.replace(/\.sti$/i, "") ?? `slot ${slot}`}
+        </span>
+        <span className="shrink-0 text-[10px] text-gray-500">
+          {included.length}/{subs.length} in mix
+          {!allIn && (
+            <button
+              type="button"
+              onClick={onAll}
+              className="ml-2 rounded border border-gray-600 bg-gray-800 px-1.5 py-px text-[9px] text-gray-200 hover:bg-gray-700"
+              title="Include every variant again"
+            >
+              All
+            </button>
+          )}
+        </span>
+      </div>
+      <div className="mt-1.5 flex max-h-44 flex-wrap items-start gap-1 overflow-y-auto pr-1">
+        {subs.map((sub) => {
+          const on = included.includes(sub);
+          return (
+            <button
+              key={sub}
+              type="button"
+              data-variant-thumb={sub}
+              data-included={on ? "1" : "0"}
+              onClick={() => onToggle(sub)}
+              title={on
+                ? `Sub ${sub} — included. Click to exclude it from the mix.`
+                : `Sub ${sub} — excluded. Click to include it.`}
+              className={`flex flex-col items-center rounded border p-0.5 ${
+                on
+                  ? "border-emerald-500 bg-emerald-950/50"
+                  : "border-gray-800 bg-gray-950 opacity-40 hover:opacity-70"
+              }`}
+            >
+              <AtlasThumb renderer={renderer} slot={slot} sub={sub} size={36} />
+              <span className={`mt-px text-[8px] leading-none ${
+                on ? "text-emerald-300" : "text-gray-600"
+              }`}>
+                {sub}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────
 //  SlotSubPreview — live thumbnail + STI metadata
 //  (moved here from the deleted modal MapForgeGeneratorWizard)
 // ──────────────────────────────────────────────────────────────────────
@@ -1263,17 +1573,20 @@ export function ParamRow({
   value: unknown;
   onChange(value: unknown): void;
 }) {
+  // De-wordified: the description lives in a hover tooltip, not an
+  // inline paragraph (the panel read like documentation before). The ⓘ
+  // affordance marks rows that actually carry one.
   const labelEl = (
-    <div>
+    <div title={param.description || undefined}>
       <label
         htmlFor={`gen-wiz-${param.name}`}
         className="block text-xs font-medium text-wasteland-200"
       >
         {param.name}
+        {param.description && (
+          <span className="ml-1 cursor-help text-[9px] text-wasteland-600">ⓘ</span>
+        )}
       </label>
-      {param.description && (
-        <p className="text-[11px] text-wasteland-500 mt-0.5">{param.description}</p>
-      )}
     </div>
   );
 
@@ -1330,40 +1643,103 @@ export function ParamRow({
     );
   }
 
-  // bank generator: escarpment-vs-plateau + which side rises
+  // bank generator: escarpment-vs-plateau as a 2-option segmented
+  // control — one glance instead of two paragraph-length dropdowns.
+  // Param values underneath are IDENTICAL ("escarpment" | "plateau").
   if (param.name === "bank_mode" && param.type === "str") {
+    const cur = (value as string) ?? "escarpment";
+    const opts = [
+      { v: "escarpment", label: "Escarpment",
+        hint: "The cliff line runs edge to edge across the whole map (vanilla's idiom); everything on the high side is raised." },
+      { v: "plateau", label: "Plateau",
+        hint: "Raise only the dragged rectangle — a freestanding mesa." },
+    ];
     return (
-      <div>
+      <div data-bank-mode>
         {labelEl}
-        <select
-          id={`gen-wiz-${param.name}`}
-          value={(value as string) ?? "escarpment"}
-          onChange={(e) => onChange(e.target.value)}
-          className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100"
-        >
-          <option value="escarpment">escarpment — cliff line runs edge to edge (vanilla)</option>
-          <option value="plateau">plateau — raise only the dragged rectangle</option>
-        </select>
+        <div className="mt-1 flex overflow-hidden rounded border border-wasteland-700">
+          {opts.map((o) => (
+            <button
+              key={o.v}
+              type="button"
+              data-bank-mode-opt={o.v}
+              onClick={() => onChange(o.v)}
+              title={o.hint}
+              className={`flex-1 px-2 py-1.5 text-xs font-medium ${
+                cur === o.v
+                  ? "bg-emerald-700/40 text-emerald-100"
+                  : "bg-wasteland-900 text-wasteland-400 hover:bg-wasteland-800 hover:text-wasteland-200"
+              }`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
       </div>
     );
   }
+  // bank generator: which side is the high ground — a 3×3 compass of
+  // toggle buttons. S / E (and center) are disabled: the engine only
+  // draws S- and E-looking cliff faces, so an S/E-high ledge would face
+  // away from the iso camera and render invisible. Values unchanged.
   if (param.name === "high_side" && param.type === "str") {
+    const cur = (value as string) ?? "N";
+    const HINTS: Record<string, string> = {
+      N: "North half is high — the cliff line runs edge to edge.",
+      W: "West half is high — the cliff line runs edge to edge.",
+      NW: "NW quadrant is high — L-shaped cliff, both faces visible.",
+      NE: "NE quadrant is high — south face visible.",
+      SW: "SW quadrant is high — east face visible.",
+      SE: "SE quadrant is high — ledge faces away from the camera (no visible cliff art, like vanilla's bare north rims).",
+    };
+    const DISABLED_HINT =
+      "Not selectable — the engine only draws S- and E-looking cliff "
+      + "faces, so this high side's ledge would face away from the iso "
+      + "camera and be invisible.";
+    const cells: Array<string | null> = [
+      "NW", "N", "NE",
+      "W", null, "E",
+      "SW", "S", "SE",
+    ];
+    const enabled = new Set(["N", "W", "NW", "NE", "SW", "SE"]);
     return (
-      <div>
+      <div data-bank-compass>
         {labelEl}
-        <select
-          id={`gen-wiz-${param.name}`}
-          value={(value as string) ?? "N"}
-          onChange={(e) => onChange(e.target.value)}
-          className="mt-1 w-full rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 text-sm text-wasteland-100"
-        >
-          <option value="N">North half — line runs edge to edge</option>
-          <option value="W">West half — line runs edge to edge</option>
-          <option value="NW">NW quadrant — L-shaped cliff (both faces visible)</option>
-          <option value="NE">NE quadrant — south face visible</option>
-          <option value="SW">SW quadrant — east face visible</option>
-          <option value="SE">SE quadrant — ledge faces away (no visible cliff art)</option>
-        </select>
+        <div className="mt-1 grid w-32 grid-cols-3 gap-px overflow-hidden rounded border border-wasteland-700 bg-wasteland-700">
+          {cells.map((c, i) => {
+            if (c === null) {
+              return (
+                <div
+                  key={`c${i}`}
+                  className="flex h-9 items-center justify-center bg-wasteland-950 text-wasteland-700"
+                  title="Pick which side of your drag is the HIGH ground."
+                >
+                  ◈
+                </div>
+              );
+            }
+            const ok = enabled.has(c);
+            return (
+              <button
+                key={c}
+                type="button"
+                data-high-side={c}
+                disabled={!ok}
+                onClick={() => ok && onChange(c)}
+                title={ok ? HINTS[c] : DISABLED_HINT}
+                className={`h-9 text-xs font-medium ${
+                  !ok
+                    ? "cursor-not-allowed bg-wasteland-950 text-wasteland-700 line-through"
+                    : cur === c
+                      ? "bg-emerald-700/50 text-emerald-100"
+                      : "bg-wasteland-900 text-wasteland-300 hover:bg-wasteland-800 hover:text-wasteland-100"
+                }`}
+              >
+                {c}
+              </button>
+            );
+          })}
+        </div>
       </div>
     );
   }

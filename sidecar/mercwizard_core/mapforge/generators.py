@@ -365,7 +365,14 @@ class FillLayerGenerator(Generator):
             max=255,
         ),
         Param(name="seed", type="int", default=42,
-              description="RNG seed for corpus variant picks (only used when corpus_source is set)"),
+              description="RNG seed for variant picks (subs / corpus_source)"),
+        Param(name="subs", type="str", default="",
+              description=(
+                  "Optional sub VARIANTS — comma list, each optionally sub:weight. "
+                  "e.g. '1,2,3' (equal) or '1:5,2:2,3:1' (weighted). Overrides `sub` "
+                  "when set; picked per tile so the fill isn't one repeated sprite. "
+                  "No spaces."
+              )),
     ] + _CORPUS_PARAMS + [_PLAYABLE_PARAM_OFF]
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
@@ -373,7 +380,10 @@ class FillLayerGenerator(Generator):
         slot = int(params.get("slot", 0))
         sub = int(params.get("sub", 1))
         rng = random.Random(int(params.get("seed", 42)))
-        pick_sub = _make_sub_picker(rng, sub, _resolve_corpus_subs(params, layer, slot, ""))
+        pick_sub = _make_sub_picker(
+            rng, sub,
+            _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
+        )
         playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", False)))
 
         yield {
@@ -453,7 +463,13 @@ class RectangleGenerator(Generator):
             description="`outline` (perimeter only) or `fill` (every tile inside)",
         ),
         Param(name="seed", type="int", default=42,
-              description="RNG seed for corpus variant picks (only used when corpus_source is set)"),
+              description="RNG seed for variant picks (subs / corpus_source)"),
+        Param(name="subs", type="str", default="",
+              description=(
+                  "Optional sub VARIANTS — comma list, each optionally sub:weight. "
+                  "e.g. '1,2,3' (equal) or '1:5,2:2,3:1' (weighted). Overrides `sub` "
+                  "when set; picked per tile for a varied edge/fill. No spaces."
+              )),
     ] + _CORPUS_PARAMS + [_PLAYABLE_PARAM_OFF]
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
@@ -462,7 +478,10 @@ class RectangleGenerator(Generator):
         sub = int(params.get("sub", 0))
         mode = str(params.get("mode", "outline")).lower()
         rng = random.Random(int(params.get("seed", 42)))
-        pick_sub = _make_sub_picker(rng, sub, _resolve_corpus_subs(params, layer, slot, ""))
+        pick_sub = _make_sub_picker(
+            rng, sub,
+            _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
+        )
         playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", False)))
         if mode not in ("outline", "fill"):
             raise ValueError(f"mode must be 'outline' or 'fill', got {mode!r}")
@@ -691,6 +710,127 @@ def _make_mask_predicate(ctx: GeneratorContext, avoid_layer: str, avoid_slots: s
     return is_masked
 
 
+# ── Named masks ("don't place on …") ───────────────────────────────────
+#
+# Friendly aliases over the raw avoid_layer/avoid_slots machinery so the
+# panel UI can offer checkboxes instead of typed slot lists. Slot numbers
+# are positions in the engine's TileTypeDefines enum
+# (TileEngine/TileDat.h:3230-3380 — the keystone slot model, see
+# wasteland-engine-maps/references/source_maps_deep_dive.md Part 4):
+#
+#   REGWATERTEXTURE = 7, DEEPWATERTEXTURE = 8        → land-layer water
+#   FIRSTOSTRUCT..EIGHTOSTRUCT = 12-19               → outdoor structs
+#   FIRSTFULLSTRUCT..FOURTHFULLSTRUCT = 20-23        → trees / full veg
+#   ROADPIECES = 50                                  → modern macro roads,
+#       placed on the OBJS layer (source_roads_and_road_smoothing.md §5)
+#   FIRSTROAD = 78                                   → legacy single-tile
+#       roads on the land layer (converted at load; kept for old maps)
+#   NINTHOSTRUCT = 97, TENTHOSTRUCT = 98             → extra O-structs
+#       (same vegetation/obstacle family — see shadow_pairs.OBSTACLE_STRUCTS)
+
+_WATER_LAND_SLOTS = frozenset({7, 8})
+_ROAD_OBJ_SLOTS = frozenset({50})
+_ROAD_LAND_SLOTS = frozenset({78})
+_TREE_SLOTS = frozenset(range(12, 24)) | {97, 98}
+
+NAMED_MASKS = ("occupied", "water", "roads", "structures", "trees")
+
+_AVOID_NAMED_PARAM = Param(
+    name="avoid_named", type="str", default="",
+    description=("Named don't-place-on masks — comma list of: occupied (any "
+                 "content already on the TARGET layer), water, roads, "
+                 "structures (any structs-layer content), trees. Combines "
+                 "with avoid_layer/avoid_slots. Blank = off."),
+)
+
+
+def _make_named_mask_predicate(ctx: GeneratorContext, target_layer: str,
+                               avoid_named: str):
+    """Build an `is_masked(x, y) -> bool` predicate from the named-mask
+    aliases, or None when off / nothing resolvable.
+
+    - blank → None.
+    - unknown name → ValueError (fail fast on a typo, same policy as
+      `_make_mask_predicate`).
+    - Names resolve to (layer grid, slot set) checks; a layer grid absent
+      from `ctx.parsed` (minimal test context) contributes nothing.
+      `occupied` reads the generator's TARGET layer; `structures` the
+      structs layer (any content); water/roads/trees match the TileDat
+      slot families above on their home layers.
+    """
+    names = [t.strip().lower() for t in (avoid_named or "").split(",")
+             if t.strip()]
+    if not names:
+        return None
+    unknown = sorted(set(names) - set(NAMED_MASKS))
+    if unknown:
+        raise ValueError(
+            f"unknown avoid_named mask(s) {', '.join(unknown)}; "
+            f"valid: {', '.join(NAMED_MASKS)}"
+        )
+
+    def grid(layer: str):
+        data = ctx.parsed.get(layer) if isinstance(ctx.parsed, dict) else None
+        return data if isinstance(data, list) else None
+
+    # (layer grid, slot set | None). None slot set = any content masks.
+    checks: list[tuple[list, Optional[frozenset]]] = []
+    for n in dict.fromkeys(names):   # dedupe, keep order
+        if n == "occupied":
+            g = grid(_validate_layer(target_layer))
+            if g is not None:
+                checks.append((g, None))
+        elif n == "structures":
+            g = grid("structs")
+            if g is not None:
+                checks.append((g, None))
+        elif n == "water":
+            g = grid("land")
+            if g is not None:
+                checks.append((g, _WATER_LAND_SLOTS))
+        elif n == "roads":
+            g = grid("objs")
+            if g is not None:
+                checks.append((g, _ROAD_OBJ_SLOTS))
+            g = grid("land")
+            if g is not None:
+                checks.append((g, _ROAD_LAND_SLOTS))
+        elif n == "trees":
+            for layer in ("objs", "structs"):
+                g = grid(layer)
+                if g is not None:
+                    checks.append((g, _TREE_SLOTS))
+    if not checks:
+        return None
+    cols = ctx.cols
+
+    def is_masked(x: int, y: int) -> bool:
+        gridno = y * cols + x
+        for data, slots in checks:
+            if not (0 <= gridno < len(data)):
+                continue
+            entries = data[gridno]
+            if not entries:
+                continue
+            if slots is None:
+                return True
+            if any(int(e[0]) in slots for e in entries):
+                return True
+        return False
+
+    return is_masked
+
+
+def _combine_masks(*preds):
+    """OR-combine mask predicates, ignoring Nones. None when all None."""
+    live = [p for p in preds if p is not None]
+    if not live:
+        return None
+    if len(live) == 1:
+        return live[0]
+    return lambda x, y: any(p(x, y) for p in live)
+
+
 # Off-map border inset, in tiles. The playable diamond is the inscribed diamond
 # minus this border ring. 10 reproduces Headless_Compiler's in_engine_diamond
 # (x+y ∈ [90,230], |x−y| ≤ 70) on a 160-wide sector.
@@ -793,6 +933,7 @@ class ScatterGenerator(Generator):
                   "With avoid_layer set: comma list of slots to avoid (e.g. water "
                   "tiles). Blank = avoid ANY content on avoid_layer."
               )),
+        _AVOID_NAMED_PARAM,
     ] + _CORPUS_PARAMS + [_PLAYABLE_PARAM]
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
@@ -807,10 +948,15 @@ class ScatterGenerator(Generator):
             rng, sub,
             _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
         )
-        mask = _make_mask_predicate(
-            ctx,
-            str(params.get("avoid_layer", "") or ""),
-            str(params.get("avoid_slots", "") or ""),
+        mask = _combine_masks(
+            _make_mask_predicate(
+                ctx,
+                str(params.get("avoid_layer", "") or ""),
+                str(params.get("avoid_slots", "") or ""),
+            ),
+            _make_named_mask_predicate(
+                ctx, layer, str(params.get("avoid_named", "") or ""),
+            ),
         )
         playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", True)))
 
@@ -958,6 +1104,7 @@ class ClusterScatterGenerator(Generator):
                   "With avoid_layer set: comma list of slots to avoid (e.g. water "
                   "tiles). Blank = avoid ANY content on avoid_layer."
               )),
+        _AVOID_NAMED_PARAM,
     ] + _CORPUS_PARAMS + [_PLAYABLE_PARAM]
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
@@ -973,10 +1120,15 @@ class ClusterScatterGenerator(Generator):
             rng, sub,
             _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
         )
-        mask = _make_mask_predicate(
-            ctx,
-            str(params.get("avoid_layer", "") or ""),
-            str(params.get("avoid_slots", "") or ""),
+        mask = _combine_masks(
+            _make_mask_predicate(
+                ctx,
+                str(params.get("avoid_layer", "") or ""),
+                str(params.get("avoid_slots", "") or ""),
+            ),
+            _make_named_mask_predicate(
+                ctx, layer, str(params.get("avoid_named", "") or ""),
+            ),
         )
         playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", True)))
 
@@ -1140,6 +1292,7 @@ class DensityFalloffGenerator(Generator):
                   "With avoid_layer set: comma list of slots to avoid (e.g. water "
                   "tiles). Blank = avoid ANY content on avoid_layer."
               )),
+        _AVOID_NAMED_PARAM,
     ] + _CORPUS_PARAMS + [_PLAYABLE_PARAM]
 
     def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
@@ -1156,10 +1309,15 @@ class DensityFalloffGenerator(Generator):
             rng, sub,
             _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
         )
-        mask = _make_mask_predicate(
-            ctx,
-            str(params.get("avoid_layer", "") or ""),
-            str(params.get("avoid_slots", "") or ""),
+        mask = _combine_masks(
+            _make_mask_predicate(
+                ctx,
+                str(params.get("avoid_layer", "") or ""),
+                str(params.get("avoid_slots", "") or ""),
+            ),
+            _make_named_mask_predicate(
+                ctx, layer, str(params.get("avoid_named", "") or ""),
+            ),
         )
         playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", True)))
 
