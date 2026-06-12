@@ -1048,6 +1048,8 @@ function BuildingLibrarySection({
                       type="button"
                       onClick={() => pick(e)}
                       disabled={running}
+                      data-demo-card={e.id}
+                      data-demo-dims={`${e.w}x${e.h}`}
                       className="flex w-full flex-col items-center gap-1 disabled:opacity-40"
                       title={`${e.label}\nfrom ${e.source_map}`
                         + (e.seen_in > 1 ? ` (seen in ${e.seen_in} maps)` : "")

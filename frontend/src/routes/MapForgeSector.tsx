@@ -1176,6 +1176,116 @@ function MapForgeSectorInner() {
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // ─── Demo hook (?demo=1) ────────────────────────────────────────────
+  // Scripted-demo automation surface for the YouTube demo runner
+  // (frontend/tools/demo/runner.mjs). Gated on &demo=1 in the URL —
+  // without it nothing below renders or attaches, zero effect on
+  // normal use. Exposes window.__mapforgeDemo with eased camera moves
+  // (panTo/zoomTo), an on-screen caption bar, a readiness probe for
+  // the runner's waits, and tileToScreen so the runner can aim real
+  // mouse events at tile coordinates.
+  const demoMode = params.get("demo") === "1";
+  const [demoCaption, setDemoCaption] = useState<string | null>(null);
+  const demoAnimRef = useRef<number | null>(null);
+  // Latest-value ref so the (mount-once) hook closures never go stale.
+  const demoRef = useRef({
+    zoom, pan, renderMeta,
+    ready: false,
+  });
+  demoRef.current = {
+    zoom, pan, renderMeta,
+    ready: !!(session && renderer && renderMeta && firstPaintDone),
+  };
+  useEffect(() => {
+    if (!demoMode) return;
+    const easeInOutCubic = (t: number) =>
+      t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    /** Drive `apply(k)` with k eased 0→1 over `ms` via rAF. */
+    const animate = (apply: (k: number) => void, ms: number) =>
+      new Promise<void>((resolve) => {
+        if (demoAnimRef.current !== null) {
+          cancelAnimationFrame(demoAnimRef.current);
+          demoAnimRef.current = null;
+        }
+        const t0 = performance.now();
+        const step = (now: number) => {
+          const t = Math.min(1, (now - t0) / Math.max(1, ms));
+          apply(easeInOutCubic(t));
+          if (t < 1) {
+            demoAnimRef.current = requestAnimationFrame(step);
+          } else {
+            demoAnimRef.current = null;
+            resolve();
+          }
+        };
+        demoAnimRef.current = requestAnimationFrame(step);
+      });
+    /** Canvas-pixel CENTER of tile (x, y). */
+    const tileCenterPx = (x: number, y: number, meta: RenderMeta) => {
+      const p = tileToCanvasPixel(x, y, meta);
+      return { x: p.x + meta.tileW / 2, y: p.y + meta.tileH / 2 };
+    };
+    const api = {
+      /** Eased pan so tile (x, y) lands at the viewport center, at the
+       * current zoom. The wrapper transform maps canvas point p to
+       * viewportCenter + pan + (p − canvasCenter) · zoom, so the pan
+       * that centers p is (canvasCenter − p) · zoom. */
+      panTo: (x: number, y: number, ms = 1200): Promise<void> => {
+        const meta = demoRef.current.renderMeta;
+        if (!meta) return Promise.resolve();
+        const z = demoRef.current.zoom;
+        const c = tileCenterPx(x, y, meta);
+        const target = {
+          x: (meta.canvasW / 2 - c.x) * z,
+          y: (meta.canvasH / 2 - c.y) * z,
+        };
+        const from = { ...demoRef.current.pan };
+        return animate((k) => setPan({
+          x: from.x + (target.x - from.x) * k,
+          y: from.y + (target.y - from.y) * k,
+        }), ms);
+      },
+      /** Eased zoom that keeps the current viewport center fixed —
+       * pan scales proportionally with zoom (pan ∝ zoom for a fixed
+       * centered point). */
+      zoomTo: (z: number, ms = 900): Promise<void> => {
+        const fromZ = demoRef.current.zoom;
+        const fromPan = { ...demoRef.current.pan };
+        const toZ = Math.max(0.25, Math.min(8, z));
+        return animate((k) => {
+          const nz = fromZ + (toZ - fromZ) * k;
+          const s = nz / fromZ;
+          setZoom(nz);
+          setPan({ x: fromPan.x * s, y: fromPan.y * s });
+        }, ms);
+      },
+      /** Show (or hide with null) the big bottom-center caption bar. */
+      caption: (text: string | null) => setDemoCaption(text),
+      getState: () => ({
+        ready: demoRef.current.ready,
+        zoom: demoRef.current.zoom,
+        pan: { ...demoRef.current.pan },
+      }),
+      /** Client (CSS px) coordinates of tile (x, y)'s center — where a
+       * real mouse event must land to hover/click that tile. Uses the
+       * canvas's live bounding rect so it stays correct mid-pan/zoom. */
+      tileToScreen: (x: number, y: number): { x: number; y: number } | null => {
+        const meta = demoRef.current.renderMeta;
+        const cv = canvasRef.current;
+        if (!meta || !cv) return null;
+        const rect = cv.getBoundingClientRect();
+        const scale = rect.width / meta.canvasW;   // == effective zoom
+        const c = tileCenterPx(x, y, meta);
+        return { x: rect.left + c.x * scale, y: rect.top + c.y * scale };
+      },
+    };
+    (window as unknown as { __mapforgeDemo?: typeof api }).__mapforgeDemo = api;
+    return () => {
+      if (demoAnimRef.current !== null) cancelAnimationFrame(demoAnimRef.current);
+      delete (window as unknown as { __mapforgeDemo?: typeof api }).__mapforgeDemo;
+    };
+  }, [demoMode]);
+
   // ─── Load atlas + manifest + parsed in parallel, build IsoRenderer ──
   // One fetch per session open. The atlas is large (~2-8 MB PNG) but
   // ships from disk cache on second open, and the result is held in
@@ -4236,6 +4346,20 @@ function MapForgeSectorInner() {
         onClose={() => setShowHelp(false)}
         settings={settings}
       />
+
+      {/* Demo caption bar (?demo=1 only) — narration captions for the
+          scripted demo runner. Bottom-center dark pill, large readable
+          text, above every editor layer, never intercepts the mouse. */}
+      {demoMode && demoCaption !== null && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-12 z-50 flex justify-center">
+          <div
+            className="max-w-[70vw] rounded-full border border-gray-600 bg-gray-950/90 px-8 py-3 text-center font-semibold text-gray-50 shadow-2xl"
+            style={{ fontSize: 24, lineHeight: 1.35 }}
+          >
+            {demoCaption}
+          </div>
+        </div>
+      )}
 
     </div>
     </MapForgeDockContext.Provider>
