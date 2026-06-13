@@ -3075,6 +3075,18 @@ function MapForgeSectorInner() {
     log?.append({ severity: "info", message: `Flood-filled ${region.length} tiles with ${name}.` });
   }
 
+  /** Revert the last `n` strokes (History-panel click). Sequential so each
+   * backend round-trip lands in order. */
+  async function revertUndo(n: number) {
+    for (let i = 0; i < n; i++) await undo();
+    bumpHistory();
+  }
+  /** Re-apply the next `n` shelved strokes (History-panel redo click). */
+  async function redoForward(n: number) {
+    for (let i = 0; i < n; i++) await redo();
+    bumpHistory();
+  }
+
   /**
    * Advance the active brush to the next/previous sub-frame and log
    * the change. Used by three surfaces:
@@ -4189,6 +4201,15 @@ function MapForgeSectorInner() {
     assets: renderBrushBoxPanel,
     tilesetViewer: renderTilesetViewerPanel,
     inspector: renderInspectorPanel,
+    history: () => (
+      <HistoryPanel
+        undoLabels={renderer?.listUndoLabels() ?? []}
+        redoLabels={renderer?.listRedoLabels() ?? []}
+        busy={editsInFlight > 0}
+        onRevert={(n) => void revertUndo(n)}
+        onRedo={(n) => void redoForward(n)}
+      />
+    ),
     log: renderLogPanel,
     validate: () => (datPath ? (
       <MapForgeValidateBody
@@ -5193,6 +5214,80 @@ const LAYER_SHORT: Record<LayerName, string> = {
 };
 
 // Shape-kind segmented control options + per-kind tooltip.
+/** R4 history panel: the undo + redo stacks as clickable stroke lists.
+ * Click an entry to jump straight to that point (revert/redo N strokes).
+ * Labels come from beginStroke() (e.g. "Paint floor (12 tiles)"). */
+function HistoryPanel({
+  undoLabels, redoLabels, busy, onRevert, onRedo,
+}: {
+  undoLabels: string[];
+  redoLabels: string[];
+  busy: boolean;
+  onRevert: (n: number) => void;
+  onRedo: (n: number) => void;
+}) {
+  if (undoLabels.length === 0 && redoLabels.length === 0) {
+    return (
+      <div className="p-3 text-xs italic text-gray-500">
+        No edits yet. Paint something — your strokes appear here (newest
+        first); click one to jump back to it.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 p-2 text-xs">
+      <div>
+        <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-400">
+          Undo to ({undoLabels.length})
+        </div>
+        {undoLabels.length === 0 ? (
+          <p className="text-[10px] italic text-gray-600">Nothing to undo.</p>
+        ) : (
+          <ul className="space-y-0.5">
+            {undoLabels.map((lbl, i) => (
+              <li key={`u${i}`}>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onRevert(i + 1)}
+                  title={`Undo ${i + 1} stroke${i === 0 ? "" : "s"} — back to before "${lbl}"`}
+                  className="flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-left hover:bg-gray-800 disabled:opacity-50"
+                >
+                  <span className="w-4 text-right font-mono text-[9px] text-gray-600">{i + 1}</span>
+                  <span className="truncate text-gray-200">↶ {lbl}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {redoLabels.length > 0 && (
+        <div>
+          <div className="mb-1 text-[10px] uppercase tracking-wider text-gray-400">
+            Redo to ({redoLabels.length})
+          </div>
+          <ul className="space-y-0.5">
+            {redoLabels.map((lbl, i) => (
+              <li key={`r${i}`}>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onRedo(i + 1)}
+                  title={`Redo ${i + 1} stroke${i === 0 ? "" : "s"} — forward through "${lbl}"`}
+                  className="flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-left hover:bg-gray-800 disabled:opacity-50"
+                >
+                  <span className="w-4 text-right font-mono text-[9px] text-gray-600">{i + 1}</span>
+                  <span className="truncate text-blue-300">↷ {lbl}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const SHAPE_KINDS: ReadonlyArray<{ kind: ShapeKind; label: string }> = [
   { kind: "rect-fill", label: "▦ Fill" },
   { kind: "rect-outline", label: "▢ Outline" },

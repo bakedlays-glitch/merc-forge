@@ -27,6 +27,7 @@ export type DockPanelId =
   | "assets"
   | "tilesetViewer"
   | "inspector"
+  | "history"
   | "log"
   | "validate"
   | "generate";

@@ -602,6 +602,17 @@ export class IsoRenderer {
     return top ? top.label : null;
   }
 
+  /** All undo-stack labels, NEWEST first — for the History panel. Index 0
+   * is the most recent stroke (one Ctrl+Z away). */
+  listUndoLabels(): string[] {
+    return this.undoStack.map((e) => e.label).reverse();
+  }
+
+  /** All redo-stack labels, NEXT-to-redo first — strokes undo has shelved. */
+  listRedoLabels(): string[] {
+    return this.redoStack.map((e) => e.label).reverse();
+  }
+
   /** Drop the entire undo + redo history. Called on session change /
    * refetch so undo/redo don't try to apply into a stale parsed dict. */
   clearUndo(): void {

@@ -58,13 +58,14 @@ export const PANEL_TITLE: Record<DockPanelId, string> = {
   assets: "Brush Box",
   tilesetViewer: "Tileset Viewer",
   inspector: "Inspector",
+  history: "History",
   log: "Log",
   validate: "Validation",
   generate: "Generate",
 };
 export const PANEL_ORDER: DockPanelId[] = [
   "canvas", "assets", "tilesetViewer", "inspector",
-  "log", "validate", "generate",
+  "history", "log", "validate", "generate",
 ];
 
 /** Re-add a closed panel. Used by the command bar's Panels▾ menu. */
@@ -120,6 +121,10 @@ function buildDefaultLayout(api: DockviewApi) {
     id: "generate", component: "default", title: PANEL_TITLE.generate,
     position: { referencePanel: "inspector", direction: "within" }, inactive: true,
   });
+  api.addPanel({
+    id: "history", component: "default", title: PANEL_TITLE.history,
+    position: { referencePanel: "inspector", direction: "within" }, inactive: true,
+  });
   const log = api.addPanel({
     id: "log", component: "default", title: PANEL_TITLE.log,
     position: { referencePanel: "canvas", direction: "below" },
@@ -142,8 +147,9 @@ const LAYOUT_STORAGE_KEY = "mapforge.dockLayout";
 // tool-options bars above the dock), and Validation/Generate became
 // default inactive tabs of the inspector group. v8: the "palette" rail
 // and "variants" sub-frame panels were folded into the "assets" panel,
-// now the consolidated "Brush Box" (R3).
-const LAYOUT_VERSION = 8;
+// now the consolidated "Brush Box" (R3). v9: added the "history" panel
+// (R4 undo/redo stroke list with click-to-revert).
+const LAYOUT_VERSION = 9;
 
 function saveLayout(api: DockviewApi): void {
   try {
