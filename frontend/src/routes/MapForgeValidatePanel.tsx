@@ -33,6 +33,8 @@ interface BodyProps {
   tileset: number;
   /** Prefer the session's uncommitted state when a session is open. */
   sessionId: string | null;
+  /** Click a finding row → highlight its tiles on the canvas + jump there. */
+  onFindingTiles?: (tiles: number[]) => void;
 }
 
 const SEV_TINT: Record<ValidationSeverity, { bg: string; fg: string; ring: string; icon: string }> = {
@@ -55,7 +57,7 @@ function fmtTiles(tiles: number[], total: number | null, cols: number): string {
 }
 
 export function MapForgeValidateBody({
-  datPath, xmlPath, tileset, sessionId,
+  datPath, xmlPath, tileset, sessionId, onFindingTiles,
 }: BodyProps) {
   const [report, setReport] = useState<ValidationReport | null>(null);
   const [loading, setLoading] = useState(false);
@@ -175,7 +177,9 @@ export function MapForgeValidateBody({
                 return (
                   <li
                     key={`${f.code}-${i}`}
-                    className={`rounded px-2 py-1 text-[11px] ${tint.bg} ${tint.fg} ring-1 ring-inset ${tint.ring} ${f.preexisting ? "opacity-60" : ""}`}
+                    onClick={() => { if (f.tiles.length) onFindingTiles?.(f.tiles); }}
+                    title={f.tiles.length ? "Click to highlight these tiles on the canvas and jump there" : undefined}
+                    className={`rounded px-2 py-1 text-[11px] ${tint.bg} ${tint.fg} ring-1 ring-inset ${tint.ring} ${f.preexisting ? "opacity-60" : ""} ${f.tiles.length ? "cursor-pointer hover:ring-2" : ""}`}
                   >
                     <div className="flex items-baseline gap-1.5">
                       <span>{tint.icon}</span>

@@ -1664,22 +1664,41 @@ function MapForgeSectorInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [atlasComplete, renderer, session?.session_id, xmlPath]);
 
+  // ─── Validation finding highlight (R4) ─────────────────────────────
+  // Set when a finding row in the Validation panel is clicked: the
+  // affected tiles tint on the canvas (alongside any room highlight) and
+  // the view jumps to the first one. Cleared by clicking a different
+  // finding (replaces) or starting a paint stroke.
+  const [findingHighlight, setFindingHighlight] = useState<Set<string>>(() => new Set());
+  const showFindingTiles = useCallback((tiles: number[]) => {
+    if (!tiles.length || !renderer || !renderMeta) return;
+    const cols = renderer.getParsed().cols;
+    setFindingHighlight(new Set(
+      tiles.map((g) => `${g % cols},${Math.floor(g / cols)}`),
+    ));
+    // Center the first affected tile (same math as the demo panTo).
+    const g0 = tiles[0]!;
+    const p = tileToCanvasPixel(g0 % cols, Math.floor(g0 / cols), renderMeta);
+    const cx = p.x + renderMeta.tileW / 2, cy = p.y + renderMeta.tileH / 2;
+    setPan({ x: (renderMeta.canvasW / 2 - cx) * zoom, y: (renderMeta.canvasH / 2 - cy) * zoom });
+  }, [renderer, renderMeta, zoom]);
+
   // ─── Highlight tiles for the selected room (canvas-side green tint) ─
-  // Matches the Python iso_renderer's `--room` behavior. The SVG
-  // overlay still draws hover + pinned highlights on top.
+  // Matches the Python iso_renderer's `--room` behavior, unioned with any
+  // clicked-finding tiles. The SVG overlay still draws hover + pinned
+  // highlights on top.
   const highlightTiles = useMemo(() => {
-    if (selectedRoom === null || !renderer) return new Set<string>();
-    const parsed = renderer.getParsed();
-    const tiles = new Set<string>();
-    for (let g = 0; g < parsed.rooms.length; g++) {
-      if (parsed.rooms[g] === selectedRoom) {
-        const x = g % parsed.cols;
-        const y = Math.floor(g / parsed.cols);
-        tiles.add(`${x},${y}`);
+    const tiles = new Set<string>(findingHighlight);
+    if (selectedRoom !== null && renderer) {
+      const parsed = renderer.getParsed();
+      for (let g = 0; g < parsed.rooms.length; g++) {
+        if (parsed.rooms[g] === selectedRoom) {
+          tiles.add(`${g % parsed.cols},${Math.floor(g / parsed.cols)}`);
+        }
       }
     }
     return tiles;
-  }, [selectedRoom, renderer, renderEpoch]);
+  }, [selectedRoom, renderer, renderEpoch, findingHighlight]);
 
   // ─── Compute renderMeta when renderer or region changes ────────────
   // Must run BEFORE the paint effect — the canvas wrapper only mounts
@@ -3953,6 +3972,7 @@ function MapForgeSectorInner() {
         xmlPath={xmlPath}
         tileset={tileset}
         sessionId={session?.session_id ?? null}
+        onFindingTiles={showFindingTiles}
       />
     ) : null),
     generate: () => (
