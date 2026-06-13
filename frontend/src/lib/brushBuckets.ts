@@ -157,6 +157,52 @@ export function clearJournalEntry(datPath: string | undefined): void {
   }
 }
 
+// ─── Recently-opened sectors (strategic hub grid, R6) ──────────────────
+// A tiny global MRU list of sector .dat paths opened from the hub, so the
+// hub can surface a "Recent sectors" row for quick re-entry. Distinct from
+// the edit-journal (which only tracks sectors with UNSAVED edits): this is
+// a plain "you looked at these lately" history, cleared by nothing but its
+// own LRU rollover. Same quota/parse try-catch — non-fatal on failure.
+export const RECENT_SECTORS_KEY = "mapforge.recentSectors.v1";
+export const RECENT_SECTORS_CAP = 12;
+
+export interface RecentSector {
+  /** Absolute .dat path (or slf:// URI) — the navigation key. */
+  datPath: string;
+  /** Display name, e.g. "A9.DAT" or "The Den (A9)". Advisory; the hub
+   * re-derives a fresh label from current sector-names anyway. */
+  label: string;
+  /** Sector grid code (e.g. "A9"), when derivable from the filename. */
+  grid?: string;
+  /** Epoch ms last opened (Date.now() — frontend app code, allowed). */
+  openedAt: number;
+}
+
+export function readRecentSectors(): RecentSector[] {
+  try {
+    const raw = localStorage.getItem(RECENT_SECTORS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as RecentSector[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Push a sector to the front of the MRU list (de-duped by datPath),
+ * capped at RECENT_SECTORS_CAP. Returns the new list so a caller holding
+ * it in state can update without a re-read. */
+export function pushRecentSector(entry: RecentSector): RecentSector[] {
+  const next = [entry, ...readRecentSectors().filter((r) => r.datPath !== entry.datPath)]
+    .slice(0, RECENT_SECTORS_CAP);
+  try {
+    localStorage.setItem(RECENT_SECTORS_KEY, JSON.stringify(next));
+  } catch {
+    // Quota or parse — non-fatal; recent row just won't persist.
+  }
+  return next;
+}
+
 /**
  * `[clipboard, setClipboard]` persisted per (xmlPath, tileset). Rehydrates
  * on tileset switch; a same-tileset sector switch keeps the same key, so the

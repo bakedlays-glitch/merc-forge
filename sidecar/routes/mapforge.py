@@ -875,6 +875,53 @@ def stream_install_maps(rescan: bool = Query(False)):
                               headers={"Cache-Control": "no-store"})
 
 
+# ─── Sector / town names (strategic hub grid, R6) ────────────────────────
+# The hub-grid sector picker labels each A1–P16 cell with its town/sector
+# name. We reuse building_library.load_sector_names, which reads the active
+# install's TableData/Map/SectorNames.xml (The Wasteland renames towns
+# there, so it's the canonical label source). Returns {} when absent —
+# the grid then falls back to bare sector codes.
+
+class SectorNamesResult(BaseModel):
+    install_id: str
+    install_path: str
+    # SectorGrid (e.g. "C5") → explored display name (e.g. "The Den").
+    names: dict[str, str]
+
+
+@router.get("/installs/sector-names", response_model=SectorNamesResult)
+def list_active_install_sector_names():
+    """Grid→town-name map from the active install's SectorNames.xml.
+
+    Drives the strategic hub grid's cell labels. Cheap (one small XML
+    parse); no caching needed. Returns an empty `names` map rather than
+    erroring when SectorNames.xml is absent, so the grid degrades to bare
+    sector codes instead of crashing."""
+    from mercwizard_core.mapforge_engine import building_library as bl
+
+    _require_renderer()
+    state = get_state()
+    info = state.active()
+    if info is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "NO_ACTIVE_INSTALL",
+                    "message": "Activate an install in MercForge first."},
+        )
+    install_root = Path(info.path)
+    try:
+        names = bl.load_sector_names(install_root)
+    except Exception:
+        # A malformed SectorNames.xml must not break the picker — fall
+        # back to no names (bare grid codes).
+        names = {}
+    return SectorNamesResult(
+        install_id=info.id,
+        install_path=str(install_root),
+        names=names,
+    )
+
+
 @router.get("/sector/info", response_model=SectorInfo)
 def sector_info(
     dat: str = Query(..., description="Absolute path to .dat sector file "

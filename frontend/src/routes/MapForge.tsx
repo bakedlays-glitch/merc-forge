@@ -6,17 +6,43 @@
  * editor-module-to-be.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { formatApiError } from "../lib/api";
 import {
   getMapForgeHealth,
   getSectorInfo,
+  getSectorNames,
   streamAtlasBuild,
   streamInstallMaps,
   type ScanEvent,
+  type SectorMapFile,
 } from "../lib/mapforge";
+import {
+  pushRecentSector,
+  readJournalEntry,
+  readRecentSectors,
+  type RecentSector,
+} from "../lib/brushBuckets";
+
+// ─── Strategic-grid geometry ────────────────────────────────────────────
+// JA2's surface strategic map is 16 rows (A–P, top→bottom) × 16 columns
+// (1–16, left→right). A sector code is <rowLetter><colNumber>, e.g. the
+// classic starting sector "A9" = row A, column 9. The .dat filenames use
+// exactly this code (A9.DAT), so the grid cell → file lookup is a direct
+// match on the derived code.
+const GRID_ROWS = "ABCDEFGHIJKLMNOP".split(""); // 16 rows
+const GRID_COLS = Array.from({ length: 16 }, (_, i) => i + 1); // 1..16
+
+/** `A9.DAT` → "A9"; `a9_b1.dat` → "A9" (basements share the surface
+ * sector's code). Mirrors building_library.sector_grid_from_name. Returns
+ * "" when the stem doesn't start with the <letter><number> pattern. */
+function sectorGridFromName(name: string): string {
+  const stem = name.replace(/\.[^.]*$/, "").toUpperCase();
+  const base = stem.split("_")[0] ?? "";
+  return /^[A-P]([1-9]|1[0-6])$/.test(base) ? base : "";
+}
 
 /** Live phase / progress state populated as the scan stream emits
  * events. Drives the inline progress UI under the Map Forge header. */
@@ -34,8 +60,15 @@ export default function MapForge() {
     queryFn: getMapForgeHealth,
   });
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [filter, setFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState<"all" | "loose" | "slf">("all");
+  // Strategic-grid vs flat-list view. Default to the strategic grid — it's
+  // the orientation most users want ("which sector is the bar in?").
+  const [view, setView] = useState<"grid" | "list">("grid");
+  // Recently-opened sectors (MRU, persisted). Seeded from localStorage and
+  // bumped whenever a sector is opened from this hub.
+  const [recent, setRecent] = useState<RecentSector[]>(() => readRecentSectors());
   // The scan endpoint streams progress; we surface the latest event
   // here so the UI can show real-time phase + per-SLF counters.
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -68,6 +101,18 @@ export default function MapForge() {
       qc.setQueryData(["mapforge", "installs", "maps"], fresh);
       setScanProgress(null);
     },
+  });
+
+  // SectorNames.xml grid→town-name map for the strategic grid's cell
+  // labels. Non-fatal if absent: the endpoint returns {} and the grid
+  // falls back to bare sector codes.
+  const sectorNames = useQuery({
+    queryKey: ["mapforge", "installs", "sector-names"],
+    queryFn: getSectorNames,
+    enabled: health.data?.renderer_available === true
+      && health.data.active_install_id !== null,
+    retry: false,
+    staleTime: 60 * 60 * 1000,
   });
 
   // Filter the map list by name substring + source (loose/slf/all). The
@@ -110,6 +155,53 @@ export default function MapForge() {
   const xmlPath = maps.data?.ja2set_xml ?? null;
   const MAX_CONCURRENT_PREFETCHES = 2;
   const HOVER_INTENT_MS = 250;
+
+  // Build the /mapforge/sector URL for a sector .dat. Tileset is omitted:
+  // the sector route auto-detects it from the .dat header (tileset=0
+  // sentinel) — same as the flat-list cards below. So a grid click only
+  // needs dat (+ xml when available).
+  const sectorHref = useCallback((datPath: string): string => {
+    const xmlQ = maps.data?.ja2set_xml
+      ? `&xml=${encodeURIComponent(maps.data.ja2set_xml)}`
+      : "";
+    return `/mapforge/sector?dat=${encodeURIComponent(datPath)}${xmlQ}`;
+  }, [maps.data?.ja2set_xml]);
+
+  // Record a sector in the recent-MRU then navigate to it. Used by grid
+  // cells + recent-row chips (the flat-list <Link>s record on click via
+  // a shared onClick — see below).
+  const openSector = useCallback((m: { path: string; name: string; grid?: string }) => {
+    const label = m.grid
+      ? `${m.name} (${m.grid})`
+      : m.name;
+    setRecent(pushRecentSector({
+      datPath: m.path,
+      label,
+      grid: m.grid,
+      openedAt: Date.now(),
+    }));
+    navigate(sectorHref(m.path));
+  }, [navigate, sectorHref]);
+
+  // Index the scanned .dat files by sector grid code (A9, C5, …) so the
+  // 16×16 grid can resolve each cell to a file in O(1). Basement maps
+  // (a9_b1.dat) collapse onto the surface cell — the surface .dat wins
+  // (loose before SLF is already the maps[] sort/merge order, but we
+  // prefer an EXACT code match over a basement-derived one regardless).
+  const sectorIndex = useMemo(() => {
+    const idx = new Map<string, SectorMapFile>();
+    if (!maps.data) return idx;
+    for (const m of maps.data.maps) {
+      const code = sectorGridFromName(m.name);
+      if (!code) continue;
+      const exact = m.name.replace(/\.[^.]*$/, "").toUpperCase() === code;
+      const prior = idx.get(code);
+      // Prefer an exact surface map (A9.DAT) over a basement (A9_B1.DAT);
+      // otherwise first-wins (maps[] is already loose-before-SLF ordered).
+      if (!prior || exact) idx.set(code, m);
+    }
+    return idx;
+  }, [maps.data]);
 
   const runPrefetch = useCallback((datPath: string) => {
     if (prefetched.current.has(datPath)) return;
@@ -253,15 +345,37 @@ export default function MapForge() {
                 </span>
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => rescan.mutate()}
-              disabled={rescan.isPending}
-              className="shrink-0 rounded border border-gray-700 bg-gray-900 px-3 py-1 text-xs hover:border-blue-500 hover:bg-gray-800 disabled:opacity-50"
-              title="Force a fresh scan of all loose Maps dirs + SLF archives."
-            >
-              {rescan.isPending ? "Rescanning…" : "Rescan"}
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              {/* View toggle: strategic 16×16 grid vs flat searchable list. */}
+              <div className="flex items-center overflow-hidden rounded border border-gray-700 text-xs">
+                {(["grid", "list"] as const).map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setView(v)}
+                    className={`px-2.5 py-1 ${
+                      view === v
+                        ? "bg-blue-900 text-blue-100"
+                        : "bg-gray-900 text-gray-400 hover:bg-gray-800"
+                    }`}
+                    title={v === "grid"
+                      ? "Strategic 16×16 sector grid"
+                      : "Flat searchable sector list"}
+                  >
+                    {v === "grid" ? "▦ Grid" : "≣ List"}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => rescan.mutate()}
+                disabled={rescan.isPending}
+                className="rounded border border-gray-700 bg-gray-900 px-3 py-1 text-xs hover:border-blue-500 hover:bg-gray-800 disabled:opacity-50"
+                title="Force a fresh scan of all loose Maps dirs + SLF archives."
+              >
+                {rescan.isPending ? "Rescanning…" : "Rescan"}
+              </button>
+            </div>
           </div>
           <details className="mb-3 text-[10px] text-gray-500">
             <summary className="cursor-pointer hover:text-gray-300">Paths</summary>
@@ -277,6 +391,52 @@ export default function MapForge() {
               No .dat files in any of: {maps.data.data_layers.join(", ")}
             </p>
           )}
+
+          {/* Recent sectors row — quick re-entry to lately-opened sectors,
+              shown in both views. Each chip flags an unsaved-edits journal
+              entry with a •. Stale entries (file rescanned away) still
+              navigate; the sector route shows its own not-found state. */}
+          {recent.length > 0 && (
+            <div className="mb-3">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-gray-500">
+                Recent
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {recent.map((r) => {
+                  const hasUnsaved = readJournalEntry(r.datPath) !== null;
+                  return (
+                    <button
+                      key={r.datPath}
+                      type="button"
+                      onClick={() => openSector({
+                        path: r.datPath, name: r.label, grid: r.grid,
+                      })}
+                      className="flex items-center gap-1 rounded-full border border-gray-700 bg-gray-900 px-2.5 py-1 text-xs hover:border-blue-500 hover:bg-gray-800"
+                      title={r.datPath}
+                    >
+                      {hasUnsaved && (
+                        <span
+                          className="h-1.5 w-1.5 rounded-full bg-amber-400"
+                          title="Has unsaved edits in this session"
+                        />
+                      )}
+                      <span className="font-mono text-blue-300">{r.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {view === "grid" ? (
+            <StrategicGrid
+              sectorIndex={sectorIndex}
+              names={sectorNames.data?.names ?? {}}
+              namesLoading={sectorNames.isLoading}
+              onOpen={openSector}
+            />
+          ) : (
+          <div>
           {/* Filter row */}
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <input
@@ -332,6 +492,15 @@ export default function MapForge() {
                 onMouseLeave={cancelHoverIntent}
                 onFocus={() => prefetchSector(m.path)}
                 onBlur={cancelHoverIntent}
+                onClick={() => {
+                  const grid = sectorGridFromName(m.name);
+                  setRecent(pushRecentSector({
+                    datPath: m.path,
+                    label: grid ? `${m.name} (${grid})` : m.name,
+                    grid: grid || undefined,
+                    openedAt: Date.now(),
+                  }));
+                }}
                 className="rounded border border-gray-700 bg-gray-900 px-3 py-2 text-sm hover:border-blue-500 hover:bg-gray-800"
                 title={m.source === "slf"
                   ? `Bundled inside ${m.slf_archive}`
@@ -355,9 +524,150 @@ export default function MapForge() {
               </Link>
             ))}
           </div>
+          </div>
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+// ─── Strategic sector grid ───────────────────────────────────────────
+// The 16×16 (A–P × 1–16) overview of the install's strategic map. Each
+// cell resolves to a sector .dat (when one exists on disk) and is tinted
+// by status:
+//   • has-map           — a .dat exists (blue-ish, clickable)
+//   • recently-edited   — has-map AND an unsaved-edits journal entry
+//                         (amber accent + dot)
+//   • untouched         — no .dat for this code (dim, non-clickable;
+//                         the sector route can still create one from the
+//                         flat list, but the grid only opens existing maps)
+function StrategicGrid({
+  sectorIndex,
+  names,
+  namesLoading,
+  onOpen,
+}: {
+  sectorIndex: Map<string, SectorMapFile>;
+  names: Record<string, string>;
+  namesLoading: boolean;
+  onOpen: (m: { path: string; name: string; grid: string }) => void;
+}) {
+  const haveAny = sectorIndex.size > 0;
+  return (
+    <div className="overflow-x-auto">
+      {/* Legend */}
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-[10px] text-gray-500">
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-3 w-3 rounded-sm border border-blue-700 bg-blue-950" />
+          Has map
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-3 w-3 rounded-sm border border-amber-600 bg-amber-950" />
+          Unsaved edits
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-3 w-3 rounded-sm border border-gray-800 bg-gray-950" />
+          No map
+        </span>
+        {namesLoading && <span className="text-gray-600">loading names…</span>}
+        {!haveAny && (
+          <span className="text-amber-400">
+            No sector .dat files resolved — switch to List view for the raw
+            file list.
+          </span>
+        )}
+      </div>
+
+      {/* 17-column grid: a leading row-label column + 16 sector columns. */}
+      <div
+        className="grid gap-px"
+        style={{ gridTemplateColumns: "1.5rem repeat(16, minmax(2.75rem, 1fr))" }}
+      >
+        {/* Header row: corner cell + 1..16 column numbers. */}
+        <div />
+        {GRID_COLS.map((c) => (
+          <div
+            key={`col-${c}`}
+            className="pb-1 text-center text-[10px] font-mono text-gray-500"
+          >
+            {c}
+          </div>
+        ))}
+
+        {/* Body rows. */}
+        {GRID_ROWS.map((rowLetter) => (
+          <GridRow
+            key={rowLetter}
+            rowLetter={rowLetter}
+            sectorIndex={sectorIndex}
+            names={names}
+            onOpen={onOpen}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// One row of the strategic grid (its row-letter label + 16 sector cells).
+// Split out so React only re-renders the touched row, and to keep the
+// fragment-of-cells tidy.
+function GridRow({
+  rowLetter,
+  sectorIndex,
+  names,
+  onOpen,
+}: {
+  rowLetter: string;
+  sectorIndex: Map<string, SectorMapFile>;
+  names: Record<string, string>;
+  onOpen: (m: { path: string; name: string; grid: string }) => void;
+}) {
+  return (
+    <>
+      <div className="flex items-center justify-center text-[10px] font-mono text-gray-500">
+        {rowLetter}
+      </div>
+      {GRID_COLS.map((c) => {
+        const code = `${rowLetter}${c}`;
+        const file = sectorIndex.get(code);
+        const name = names[code] ?? "";
+        const hasMap = file !== undefined;
+        const unsaved = hasMap && readJournalEntry(file.path) !== null;
+        const tint = !hasMap
+          ? "border-gray-800 bg-gray-950 text-gray-600"
+          : unsaved
+            ? "border-amber-600 bg-amber-950/60 text-amber-100 hover:border-amber-400 hover:bg-amber-900/60"
+            : "border-blue-800 bg-blue-950/50 text-blue-100 hover:border-blue-500 hover:bg-blue-900/50";
+        return (
+          <button
+            key={code}
+            type="button"
+            disabled={!hasMap}
+            onClick={() => {
+              if (file) onOpen({ path: file.path, name: file.name, grid: code });
+            }}
+            className={`flex aspect-square flex-col items-center justify-center gap-0.5 rounded-sm border px-0.5 text-center leading-tight transition-colors ${tint} ${
+              hasMap ? "cursor-pointer" : "cursor-default"
+            }`}
+            title={hasMap
+              ? `${code}${name ? ` — ${name}` : ""}${file.source === "slf" ? " (in SLF)" : ""}\n${file.path}`
+              : `${code} — no map`}
+          >
+            <span className="font-mono text-[10px]">{code}</span>
+            {name && (
+              <span className="line-clamp-2 w-full truncate text-[9px] opacity-80">
+                {name}
+              </span>
+            )}
+            {unsaved && (
+              <span className="h-1 w-1 rounded-full bg-amber-300" />
+            )}
+          </button>
+        );
+      })}
+    </>
   );
 }
 

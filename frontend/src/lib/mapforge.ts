@@ -233,6 +233,22 @@ export function getSectorInfo(datPath: string): Promise<SectorInfo> {
   );
 }
 
+// ─── Sector / town names (strategic hub grid, R6) ───────────────────────
+// Mirrors SectorNamesResult in sidecar/routes/mapforge.py. Powers the
+// strategic-grid sector picker's cell labels.
+export interface SectorNames {
+  install_id: string;
+  install_path: string;
+  /** SectorGrid (e.g. "C5") → explored town/sector name (e.g. "The Den").
+   * Empty when the install has no SectorNames.xml — grid falls back to
+   * bare sector codes. */
+  names: Record<string, string>;
+}
+
+export function getSectorNames(): Promise<SectorNames> {
+  return jsonGet<SectorNames>("/mapforge/installs/sector-names");
+}
+
 export function inspectTile(
   datPath: string,
   xmlPath: string,
