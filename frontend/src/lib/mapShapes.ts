@@ -19,7 +19,6 @@ export type ShapeKind =
   | "rect-fill"
   | "rect-outline"
   | "line"
-  | "room"
   | "diamond"
   | "cross"
   | "triangle"
@@ -196,7 +195,6 @@ export function hexagonTiles(a: Tile, b: Tile): Tile[] {
 export function shapeTiles(kind: ShapeKind, a: Tile, b: Tile): Tile[] {
   switch (kind) {
     case "rect-fill":
-    case "room":
       return rectFillTiles(a, b);
     case "rect-outline":
       return rectOutlineTiles(a, b);

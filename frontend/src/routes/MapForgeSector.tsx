@@ -128,10 +128,19 @@ import {
   type ClipboardRegion,
 } from "../lib/mapClipboard";
 
-/** UI tool modes. Inspect = click-to-pin; Pencil = click/drag to paint
- * the active brush; Shape = drag to define a rectangle / line / room that
- * commits as one undoable stroke. */
-type Tool = "inspect" | "pencil" | "shape" | "select" | "height";
+/** UI tool modes — they choose the REGION a stroke covers. Inspect =
+ * click-to-pin; Pencil = click/drag (brush radius); Shape = drag a
+ * rectangle/line/flood/…; Select = marquee + clipboard. (R4: Height is no
+ * longer a tool — it's a payload.) */
+type Tool = "inspect" | "pencil" | "shape" | "select";
+
+/** What a stroke DOES to the tiles its tool covers (R4 payloads): place the
+ * active brush, erase the non-ground layers, set per-tile height, or write a
+ * room id. Pencil + Shape both honor the payload. */
+type Payload = "tiles" | "erase" | "height" | "room";
+
+/** Non-ground layers cleared by the Erase payload — keeps the floor. */
+const ERASE_LAYERS: LayerName[] = ["objs", "shadows", "structs", "roofs", "onroofs"];
 
 /** Compile-time exhaustiveness guard. When a new `Tool` is added to the
  * union, any `if`/`switch` that forwards an unhandled value here stops
@@ -915,10 +924,11 @@ function MapForgeSectorInner() {
   // Optional override of which layer the pencil tool paints into.
   // null = use the brush's category-implied default (CATEGORY_TO_LAYER).
   const [paintLayer, setPaintLayer] = useState<LayerName | null>(null);
-  // Erase mode (R4): when on, the pencil clears the non-ground layers
-  // (objs/shadows/structs/roofs/onroofs) at the brush-radius tiles instead
-  // of painting — "wipe but keep the floor". Needs no armed brush.
-  const [eraseMode, setEraseMode] = useState(false);
+  // Payload (R4): what pencil/shape strokes DO — place the brush, erase the
+  // non-ground layers, set per-tile height, or write a room id. Replaces the
+  // old erase toggle + the Height tool + the Room shape-kind, so Erase /
+  // Height / Room now work with BOTH the pencil radius and the shape tools.
+  const [payload, setPayload] = useState<Payload>("tiles");
   // Brush radius in tiles. 1 = single tile (default), 2 = the clicked
   // tile + 4 neighbors (diamond of side 3), etc. The brush footprint
   // is Manhattan-distance so it stays diamond-shaped in iso space —
@@ -1220,7 +1230,7 @@ function MapForgeSectorInner() {
     // (building placement), the generator ghost is live, or a rectangle is
     // being picked.
     if (!brushGhost || !hovered || !renderMeta || tool !== "pencil"
-        || placingBuilding || ghostActive || pickingRect || eraseMode) {
+        || placingBuilding || ghostActive || pickingRect || payload !== "tiles") {
       cv.style.display = "none";
       return;
     }
@@ -1237,7 +1247,7 @@ function MapForgeSectorInner() {
     cv.style.transform =
       `translate(${p.x + brushGhost.originX}px, ${p.y + brushGhost.originY}px)`;
     cv.style.display = "block";
-  }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect, eraseMode]);
+  }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect, payload]);
 
   // Region pick for the Generate panel — drag/click two corners on the
   // canvas while the panel stays docked.
@@ -2183,7 +2193,6 @@ function MapForgeSectorInner() {
     if (!session || !renderer || session.read_only) return;
     const cols = info.data?.cols ?? renderer.getParsed().cols;
     const rows = info.data?.rows ?? renderer.getParsed().rows;
-    const ERASE_LAYERS: LayerName[] = ["objs", "shadows", "structs", "roofs", "onroofs"];
     const r = brushRadius - 1;
     const edits: SessionEdit[] = [];
     for (let dy = -r; dy <= r; dy++) {
@@ -2217,6 +2226,118 @@ function MapForgeSectorInner() {
     } finally {
       setEditsInFlight((n) => Math.max(0, n - 1));
     }
+  }
+
+  /** Paint the current room id onto the brush-radius tiles around `tile`
+   * (R4 Room payload, pencil). Runs inside the pencil's open stroke;
+   * dedup'd per tile via strokeRef. */
+  async function paintRoomAt(tile: { x: number; y: number }) {
+    if (!session || !renderer || session.read_only) return;
+    const cols = info.data?.cols ?? renderer.getParsed().cols;
+    const rows = info.data?.rows ?? renderer.getParsed().rows;
+    const r = brushRadius - 1;
+    const edits: SessionEdit[] = [];
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) + Math.abs(dy) > r) continue;
+        const x = tile.x + dx, y = tile.y + dy;
+        if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+        const key = `room:${x},${y}`;
+        if (!strokeRef.current) strokeRef.current = new Set();
+        if (strokeRef.current.has(key)) continue;
+        strokeRef.current.add(key);
+        renderer.recordRoomSnapshot(x, y);
+        renderer.applyLocalEdit({ x, y, op: "set_room", roomId });
+        edits.push({ x, y, op: "set_room", room_id: roomId });
+      }
+    }
+    if (edits.length === 0) return;
+    setRenderEpoch((e) => e + 1);
+    setEditsInFlight((n) => n + 1);
+    try {
+      const res = await applyEdits(session.session_id, edits);
+      setSession(res.session);
+    } catch (e) {
+      log?.append({ severity: "error", message: "Room sync failed — backend rejected an edit", detail: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
+  /** Stroke-label verb for the Height payload. */
+  function heightVerb(): string {
+    return heightMode === "set"
+      ? `Set height ${heightValue}`
+      : heightMode === "raise"
+        ? `Raise height +${heightValue}`
+        : `Lower height -${heightValue}`;
+  }
+
+  /** Apply the active payload to a list of tiles as ONE undoable stroke —
+   * shared by the Shape commit + Flood fill. Tiles/Room go through
+   * applyTileEdits (StrokeSpec ops); Erase/Height build the set_entries /
+   * set_height edits directly (mirrors doDeleteSelection's pattern). The
+   * `region` word leads the stroke label for tile placement ("Fill",
+   * "Line", …). */
+  function applyPayloadBatch(tiles: Tile[], region: string) {
+    if (!session || session.read_only || !renderer || tiles.length === 0) return;
+    if (payload === "tiles") {
+      if (!activeBrush) return;
+      const layer = (paintLayer ?? activeBrush.layer) as LayerName;
+      const name = activeBrush.sti_filename.replace(/\.sti$/i, "");
+      renderer.beginStroke(`${region} ${name} (${tiles.length} tiles)`);
+      void applyTileEdits(tiles, { op: "place", layer, slot: activeBrush.slot, sub: activeBrush.sub });
+      renderer.endStroke();
+      bumpHistory();
+      return;
+    }
+    if (payload === "room") {
+      renderer.beginStroke(
+        roomId === 0
+          ? `Clear room (${tiles.length} tiles)`
+          : `Mark room ${roomId} (${tiles.length} tiles)`,
+      );
+      void applyTileEdits(tiles, { op: "set_room", roomId });
+      renderer.endStroke();
+      bumpHistory();
+      return;
+    }
+    // erase / height — build the edits + apply as one transactional batch.
+    const parsed = renderer.getParsed();
+    const cols = parsed.cols;
+    const edits: SessionEdit[] = [];
+    renderer.beginStroke(
+      payload === "erase"
+        ? `Erase (${tiles.length} tiles)`
+        : `${heightVerb()} (${tiles.length} tiles)`,
+    );
+    for (const t of tiles) {
+      if (payload === "erase") {
+        for (const l of ERASE_LAYERS) {
+          renderer.recordSnapshot(t.x, t.y, l);
+          renderer.applyLocalEdit({ x: t.x, y: t.y, op: "set_entries", layer: l, entries: [] });
+          edits.push({ x: t.x, y: t.y, op: "set_entries", layer: l, entries: [] });
+        }
+      } else {
+        const cur = parsed.heights[t.y * cols + t.x] ?? 0;
+        const next = heightMode === "set"
+          ? Math.max(0, Math.min(255, heightValue))
+          : heightMode === "raise"
+            ? Math.max(0, Math.min(255, cur + heightValue))
+            : Math.max(0, Math.min(255, cur - heightValue));
+        renderer.recordHeightSnapshot(t.x, t.y);
+        renderer.applyLocalEdit({ x: t.x, y: t.y, op: "set_height", height: next });
+        edits.push({ x: t.x, y: t.y, op: "set_height", height: next });
+      }
+    }
+    renderer.endStroke();
+    bumpHistory();
+    setRenderEpoch((e) => e + 1);
+    setEditsInFlight((n) => n + 1);
+    applyEdits(session.session_id, edits)
+      .then((res) => setSession(res.session))
+      .catch((e) => log?.append({ severity: "error", message: "Edit sync failed — backend rejected the batch.", detail: e instanceof Error ? e.message : String(e) }))
+      .finally(() => setEditsInFlight((n) => Math.max(0, n - 1)));
   }
 
   async function paintHeight(tile: { x: number; y: number }) {
@@ -2521,14 +2642,24 @@ function MapForgeSectorInner() {
     if (tool === "inspect") {
       // Inspect pins on click (onCanvasClick) — nothing to do on mousedown.
     } else if (tool === "pencil") {
-      if (eraseMode) {
+      // The pencil applies the active PAYLOAD over its brush-radius tiles.
+      strokeRef.current = new Set();
+      if (payload === "erase") {
         if (session?.read_only) return;
-        strokeRef.current = new Set();
         renderer.beginStroke(`Erase (brush ${brushRadius})`);
         void eraseAt(tile);
+      } else if (payload === "height") {
+        if (session?.read_only) return;
+        renderer.beginStroke(heightVerb());
+        void paintHeight(tile);
+      } else if (payload === "room") {
+        if (session?.read_only) return;
+        renderer.beginStroke(roomId === 0
+          ? `Clear room (brush ${brushRadius})`
+          : `Room ${roomId} (brush ${brushRadius})`);
+        void paintRoomAt(tile);
       } else {
         if (!activeBrush) return;
-        strokeRef.current = new Set();
         // Stroke label reflects what the user actually did: "Stamp 2_HELI
         // (3 tiles)" for footprint paints, "Paint w_dec01" for singles.
         const footprint = renderer.getFootprint(activeBrush.slot);
@@ -2545,14 +2676,14 @@ function MapForgeSectorInner() {
       // Flood fill is a click action (not a bbox drag) — fill from the
       // clicked seed immediately and bail (no anchor / drag preview).
       if (shapeKind === "flood") {
-        if (!activeBrush) return;
+        if (payload === "tiles" && !activeBrush) return;
         doFloodFill(tile);
         return;
       }
-      // Shapes need a brush except the room tool (writes a room id, not
-      // a tile). Anchor the drag; the commit happens on mouseup. A
-      // non-null shapeAnchor also drives the live preview overlay.
-      if (shapeKind !== "room" && !activeBrush) return;
+      // The Tiles payload needs an armed brush; Erase / Height / Room don't.
+      // Anchor the drag; the commit happens on mouseup. A non-null
+      // shapeAnchor also drives the live preview overlay.
+      if (payload === "tiles" && !activeBrush) return;
       setShapeAnchor(tile);
       setShapeCursor(tile);
     } else if (tool === "select") {
@@ -2566,19 +2697,6 @@ function MapForgeSectorInner() {
         setSelectCursor(tile);
         setSelectRect(null);
       }
-    } else if (tool === "height") {
-      // Height brush: open a stroke + step the first tile. The drag
-      // continues in onCanvasMove; mouseup closes the stroke (strokeRef
-      // is non-null, so the existing endStroke block fires).
-      if (session?.read_only) return;
-      strokeRef.current = new Set();
-      const verb = heightMode === "set"
-        ? `Set height ${heightValue}`
-        : heightMode === "raise"
-          ? `Raise height +${heightValue}`
-          : `Lower height -${heightValue}`;
-      renderer.beginStroke(verb);
-      void paintHeight(tile);
     } else {
       assertNever(tool);
     }
@@ -2637,7 +2755,9 @@ function MapForgeSectorInner() {
       tool === "pencil" && tile
       && e.buttons === 1 && strokeRef.current !== null
     ) {
-      if (eraseMode) void eraseAt(tile);
+      if (payload === "erase") void eraseAt(tile);
+      else if (payload === "height") void paintHeight(tile);
+      else if (payload === "room") void paintRoomAt(tile);
       else if (activeBrush) paintBrush(tile, e.shiftKey);
     }
     // Shape drag: track the cursor tile so the preview overlay updates
@@ -2648,11 +2768,6 @@ function MapForgeSectorInner() {
     // Select drag: track the marquee end-point while the button is held.
     if (tool === "select" && tile && e.buttons === 1 && selectAnchor) {
       setSelectCursor(tile);
-    }
-    // Height brush drag: step each freshly entered tile (strokeRef dedupes
-    // so a tile already touched this stroke isn't stepped again).
-    if (tool === "height" && tile && e.buttons === 1 && strokeRef.current !== null) {
-      void paintHeight(tile);
     }
   }
 
@@ -2715,29 +2830,14 @@ function MapForgeSectorInner() {
     ) {
       return;
     }
-    if (shapeKind === "room") {
-      renderer.beginStroke(
-        roomId === 0
-          ? `Clear room (${tiles.length} tiles)`
-          : `Mark room ${roomId} (${tiles.length} tiles)`,
-      );
-      void applyTileEdits(tiles, { op: "set_room", roomId });
-    } else {
-      if (!activeBrush) return;
-      const layer = (paintLayer ?? activeBrush.layer) as LayerName;
-      const name = activeBrush.sti_filename.replace(/\.sti$/i, "");
-      const verb = shapeKind === "line"
-        ? "Line"
-        : shapeKind === "rect-outline"
-          ? "Outline"
-          : "Fill";
-      renderer.beginStroke(`${verb} ${name} (${tiles.length} tiles)`);
-      void applyTileEdits(tiles, {
-        op: "place", layer, slot: activeBrush.slot, sub: activeBrush.sub,
-      });
-    }
-    renderer.endStroke();
-    bumpHistory();
+    // The shape kind picked the REGION; the active payload decides what to
+    // do with it (place / erase / height / room).
+    const region = shapeKind === "line"
+      ? "Line"
+      : shapeKind === "rect-outline"
+        ? "Outline"
+        : "Fill";
+    applyPayloadBatch(tiles, region);
   }
 
   /** Copy the committed selection rectangle into the clipboard. Reads the
@@ -3030,17 +3130,23 @@ function MapForgeSectorInner() {
    * the active brush (same `place` op as rect-fill) in ONE undoable stroke.
    * Capped for safety; confirms on big fills. */
   function doFloodFill(seed: Tile) {
-    if (!session || session.read_only || !renderer || !activeBrush) return;
+    if (!session || session.read_only || !renderer) return;
+    if (payload === "tiles" && !activeBrush) return;
     const parsed = renderer.getParsed();
     const cols = parsed.cols, rows = parsed.rows;
-    const layer = (paintLayer ?? activeBrush.layer) as LayerName;
+    // Region = tiles connected to the seed that share its top slot on the
+    // reference layer — the brush's layer for the Tiles payload, else land
+    // (flood the connected ground area for erase / height / room).
+    const layer: LayerName = (payload === "tiles" && activeBrush)
+      ? ((paintLayer ?? activeBrush.layer) as LayerName)
+      : "land";
     const topSlotAt = (x: number, y: number): number => {
       const arr = (parsed[layer] as number[][][])[y * cols + x] ?? [];
       const last = arr[arr.length - 1];
       return last ? (last[0] ?? -1) : -1;  // -1 = empty
     };
     const target = topSlotAt(seed.x, seed.y);
-    if (target === activeBrush.slot) {
+    if (payload === "tiles" && activeBrush && target === activeBrush.slot) {
       log?.append({ severity: "info", message: "Flood fill: the seed already holds this brush." });
       return;
     }
@@ -3061,18 +3167,12 @@ function MapForgeSectorInner() {
       stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
     }
     if (region.length === 0) return;
-    const name = activeBrush.sti_filename.replace(/\.sti$/i, "");
     if (
       region.length > 2000
-      && !window.confirm(`Flood-fill ${region.length} tiles with ${name}?`)
+      && !window.confirm(`Flood-fill ${region.length} tiles?`)
     ) return;
-    renderer.beginStroke(`Fill ${region.length} tiles (${name})`);
-    void applyTileEdits(region, {
-      op: "place", layer, slot: activeBrush.slot, sub: activeBrush.sub,
-    });
-    renderer.endStroke();
-    bumpHistory();
-    log?.append({ severity: "info", message: `Flood-filled ${region.length} tiles with ${name}.` });
+    applyPayloadBatch(region, "Fill");
+    log?.append({ severity: "info", message: `Flood-filled ${region.length} tiles.` });
   }
 
   /** Revert the last `n` strokes (History-panel click). Sequential so each
@@ -3774,7 +3874,7 @@ function MapForgeSectorInner() {
     if (shapeKind === "line") count = Math.max(w, h);
     else if (shapeKind === "rect-outline") {
       count = w === 1 || h === 1 ? w * h : 2 * (w + h) - 4;
-    } else if (shapeKind === "rect-fill" || shapeKind === "room") {
+    } else if (shapeKind === "rect-fill") {
       count = w * h;
     } else {
       // diamond / cross / triangle / hexagon — exact count from the geometry
@@ -3791,10 +3891,10 @@ function MapForgeSectorInner() {
   // non-zero-height tiles — tinted by height, numbered when zoomed in.
   // Recomputed on every edit (renderEpoch) so it tracks the brush live.
   const heightOverlay = useMemo<Array<{ x: number; y: number; h: number }> | null>(() => {
-    // Shown while the height TOOL is active — or while a generator
+    // Shown while the Height PAYLOAD is active — or while a generator
     // ghost containing heights is up (heights are invisible in the iso
     // render; without this a cliff preview looks like a no-op).
-    if ((tool !== "height" && !ghostHasHeights) || !renderer) return null;
+    if ((payload !== "height" && !ghostHasHeights) || !renderer) return null;
     const parsed = renderer.getParsed();
     const heights = parsed?.heights;
     if (!heights) return null;
@@ -3808,7 +3908,7 @@ function MapForgeSectorInner() {
       }
     }
     return out;
-  }, [tool, renderer, renderEpoch, ghostHasHeights]);
+  }, [payload, renderer, renderEpoch, ghostHasHeights]);
 
   function resetView() { setZoom(1); setPan({ x: 0, y: 0 }); }
 
@@ -4071,8 +4171,9 @@ function MapForgeSectorInner() {
                   }));
               })()}
               brushRadiusPreview={(() => {
-                // Height brush: plain radius footprint (no brush/stamp logic).
-                if (tool === "height") {
+                // Erase / Height / Room payloads: plain radius footprint
+                // (no brush/stamp logic — the pencil just applies the op).
+                if (tool === "pencil" && payload !== "tiles") {
                   if (!hovered || brushRadius <= 1) return null;
                   const r = brushRadius - 1;
                   const cols = info.data?.cols ?? 0;
@@ -4525,6 +4626,13 @@ function MapForgeSectorInner() {
             <ToolSelector
               tool={tool} setTool={setTool}
               hasBrush={activeBrush !== null}
+              payload={payload}
+            />
+            <PayloadSelector
+              tool={tool}
+              payload={payload}
+              setPayload={setPayload}
+              hasBrush={activeBrush !== null}
             />
             <BrushChip
               brush={activeBrush}
@@ -4541,8 +4649,6 @@ function MapForgeSectorInner() {
               setPaintLayer={setPaintLayer}
               brushRadius={brushRadius}
               setBrushRadius={setBrushRadius}
-              eraseMode={eraseMode}
-              setEraseMode={setEraseMode}
             />
             <ShapeOptions
               tool={tool}
@@ -4552,12 +4658,6 @@ function MapForgeSectorInner() {
               hasBrush={activeBrush !== null}
               paintLayer={paintLayer}
               setPaintLayer={setPaintLayer}
-              roomId={roomId}
-              setRoomId={setRoomId}
-              rooms={info.data?.rooms ?? []}
-              suggestedRoomId={
-                (info.data?.rooms.reduce((m, r) => Math.max(m, r.room_id), 0) ?? 0) + 1
-              }
             />
             <SelectOptions
               tool={tool}
@@ -4575,11 +4675,20 @@ function MapForgeSectorInner() {
               onCancelPaste={() => setPasteMode(false)}
             />
             <HeightOptions
-              tool={tool}
+              payload={payload}
               heightMode={heightMode}
               setHeightMode={setHeightMode}
               heightValue={heightValue}
               setHeightValue={setHeightValue}
+            />
+            <RoomOptions
+              payload={payload}
+              roomId={roomId}
+              setRoomId={setRoomId}
+              rooms={info.data?.rooms ?? []}
+              suggestedRoomId={
+                (info.data?.rooms.reduce((m, r) => Math.max(m, r.room_id), 0) ?? 0) + 1
+              }
             />
             <span className="flex-1" />
             <LayerVisibilityToggles
@@ -5297,7 +5406,6 @@ const SHAPE_KINDS: ReadonlyArray<{ kind: ShapeKind; label: string }> = [
   { kind: "cross", label: "✛ Cross" },
   { kind: "triangle", label: "▲ Triangle" },
   { kind: "hexagon", label: "⬡ Hex" },
-  { kind: "room", label: "⌂ Room" },
 ];
 const SHAPE_HINTS: Record<ShapeKind, string> = {
   "rect-fill": "Drag a box → fill the whole area with the active tile",
@@ -5308,17 +5416,99 @@ const SHAPE_HINTS: Record<ShapeKind, string> = {
   "cross": "Drag a box → a plus/cross through the center",
   "triangle": "Drag a box → filled triangle, apex at top",
   "hexagon": "Drag a box → filled flat-top hexagon",
-  "room": "Drag a box → mark it as a room (engine hides the roof inside)",
 };
 
+/** R4 payload selector — what a pencil/shape stroke DOES (place the active
+ * brush, erase the non-ground layers, set height, or write a room id).
+ * Shown for the pencil + shape tools. */
+function PayloadSelector({
+  tool, payload, setPayload, hasBrush,
+}: {
+  tool: Tool;
+  payload: Payload;
+  setPayload: (p: Payload) => void;
+  hasBrush: boolean;
+}) {
+  if (tool !== "pencil" && tool !== "shape") return null;
+  const items: Array<{ id: Payload; label: string; title: string }> = [
+    { id: "tiles", label: "🖌 Tiles", title: "Place the active brush" + (hasBrush ? "" : " — pick a tile first") },
+    { id: "erase", label: "🧽 Erase", title: "Clear objects / structures / roofs — keeps the floor" },
+    { id: "height", label: "⛰ Height", title: "Raise / lower / set per-tile terrain height" },
+    { id: "room", label: "⌂ Room", title: "Write a room id (engine hides the roof inside)" },
+  ];
+  const active: Record<Payload, string> = {
+    tiles: "bg-emerald-900 text-emerald-100",
+    erase: "bg-red-900 text-red-100",
+    height: "bg-orange-900 text-orange-100",
+    room: "bg-sky-900 text-sky-100",
+  };
+  return (
+    <div>
+      <span className="block text-xs text-gray-400">Payload</span>
+      <div className="flex overflow-hidden rounded border border-gray-700">
+        {items.map((it) => (
+          <button
+            key={it.id}
+            type="button"
+            onClick={() => setPayload(it.id)}
+            title={it.title}
+            className={`px-2 py-1 text-xs ${
+              payload === it.id ? active[it.id] : "bg-gray-900 text-gray-300 hover:bg-gray-800"
+            }`}
+          >
+            {it.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** R4 Room-payload controls — the room id written by pencil/shape strokes
+ * when the Room payload is active. */
+function RoomOptions({
+  payload, roomId, setRoomId, rooms, suggestedRoomId,
+}: {
+  payload: Payload;
+  roomId: number;
+  setRoomId: (n: number) => void;
+  rooms: RoomSummary[];
+  suggestedRoomId: number;
+}) {
+  if (payload !== "room") return null;
+  return (
+    <div>
+      <span className="block text-xs text-gray-400">Room id</span>
+      <select
+        value={roomId}
+        onChange={(e) => setRoomId(parseInt(e.target.value, 10) || 0)}
+        className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs"
+        title="Room id written by the stroke. New = a fresh id; Clear = mark as outdoors (room 0)."
+      >
+        {!new Set<number>([suggestedRoomId, 0, ...rooms.map((r) => r.room_id)]).has(roomId) && (
+          <option value={roomId}>Room {roomId}</option>
+        )}
+        <option value={suggestedRoomId}>New room ({suggestedRoomId})</option>
+        {rooms.map((r) => (
+          <option key={r.room_id} value={r.room_id}>
+            Room {r.room_id} ({r.tile_count})
+          </option>
+        ))}
+        <option value={0}>Clear (outdoors)</option>
+      </select>
+    </div>
+  );
+}
+
 function ToolSelector({
-  tool, setTool, hasBrush,
+  tool, setTool, hasBrush, payload,
 }: {
   tool: Tool;
   setTool: (t: Tool) => void;
   hasBrush: boolean;
+  payload: Payload;
 }) {
-  // Minimal — just the Inspect/Pencil/Shape toggle. Pencil-only controls
+  // Minimal — just the Inspect/Pencil/Shape/Select toggle. Per-tool controls
   // (Paint to layer, Brush size) live in BrushOptions; shape controls in
   // ShapeOptions — so this component's width is constant across tools.
   const activeClass: Record<Tool, string> = {
@@ -5326,21 +5516,18 @@ function ToolSelector({
     pencil: "bg-emerald-900 text-emerald-100",
     shape: "bg-teal-900 text-teal-100",
     select: "bg-purple-900 text-purple-100",
-    height: "bg-orange-900 text-orange-100",
   };
   const toolLabel: Record<Tool, string> = {
     inspect: "⌖ Inspect", pencil: "✎ Pencil", shape: "▦ Shape", select: "⬚ Select",
-    height: "⛰ Height",
   };
   return (
     <div>
       <span className="block text-xs text-gray-400">Tool</span>
       <div className="flex overflow-hidden rounded border border-gray-700">
-        {(["inspect", "pencil", "shape", "select", "height"] as const).map((t) => {
-          // Pencil requires a brush; the shape tool's room sub-tool works
-          // without one, and select/inspect/height need no brush — so only
-          // pencil is ever hard-disabled here.
-          const disabled = t === "pencil" && !hasBrush;
+        {(["inspect", "pencil", "shape", "select"] as const).map((t) => {
+          // Pencil needs a brush only for the Tiles payload; Erase / Height /
+          // Room work brush-free. Other tools never need one.
+          const disabled = t === "pencil" && payload === "tiles" && !hasBrush;
           return (
             <button
               key={t}
@@ -5353,17 +5540,15 @@ function ToolSelector({
                   : "bg-gray-900 text-gray-300 hover:bg-gray-800"
               } disabled:cursor-not-allowed disabled:opacity-40`}
               title={
-                t === "pencil" && !hasBrush
-                  ? "Pick a tile from the palette first"
+                disabled
+                  ? "Pick a tile from the palette first (or switch payload to Erase / Height / Room)"
                   : t === "pencil"
-                    ? "Paint the active brush (click or drag)"
+                    ? "Apply the payload over the brush radius (click or drag)"
                     : t === "shape"
-                      ? "Drag to define a rectangle / line / room"
+                      ? "Drag to define a rectangle / line / flood region"
                       : t === "select"
                         ? "Drag a rectangle to copy a region; paste it elsewhere"
-                        : t === "height"
-                          ? "Raise / lower / set per-tile terrain height (drag to sculpt)"
-                          : "Click tiles to inspect them"
+                        : "Click tiles to inspect them"
               }
             >
               {toolLabel[t]}
@@ -5382,7 +5567,6 @@ function ToolSelector({
  * brush itself, not next to the Tool toggle. */
 function BrushOptions({
   tool, activeBrush, paintLayer, setPaintLayer, brushRadius, setBrushRadius,
-  eraseMode, setEraseMode,
 }: {
   tool: Tool;
   activeBrush: ActiveBrush | null;
@@ -5390,31 +5574,11 @@ function BrushOptions({
   setPaintLayer: (l: LayerName | null) => void;
   brushRadius: number;
   setBrushRadius: (r: number) => void;
-  eraseMode: boolean;
-  setEraseMode: (v: boolean) => void;
 }) {
   if (tool !== "pencil") return null;
   return (
     <div className="flex items-end gap-2">
       <div>
-        <span className="block text-xs text-gray-400">Mode</span>
-        <button
-          type="button"
-          onClick={() => setEraseMode(!eraseMode)}
-          aria-pressed={eraseMode}
-          className={`rounded border px-2 py-1 text-xs ${
-            eraseMode
-              ? "border-red-500 bg-red-950/60 text-red-200"
-              : "border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800"
-          }`}
-          title={eraseMode
-            ? "Erasing: the pencil clears objects / structures / roofs (keeps the floor). Click to paint again."
-            : "Erase mode: clear objects / structures / roofs at the brush — keeps the floor. Works with brush size."}
-        >
-          {eraseMode ? "🧽 Erasing" : "🧽 Erase"}
-        </button>
-      </div>
-      <div className={eraseMode ? "opacity-40" : ""}>
         <span className="block text-xs text-gray-400">Paint to layer</span>
         <select
           value={paintLayer ?? ""}
@@ -5455,12 +5619,12 @@ function BrushOptions({
   );
 }
 
-/** Shape-mode-only controls: which shape to draw + its target (a layer
- * for fill/outline/line, or a room id for the room tool). Hidden in other
- * tools so the toolbar width stays stable. Mirrors BrushOptions. */
+/** Shape-mode-only controls: which shape to draw + the Tiles-payload target
+ * layer. (Room id / height options moved to the payload selectors.) Hidden
+ * in other tools so the toolbar width stays stable. Mirrors BrushOptions. */
 function ShapeOptions({
   tool, shapeKind, setShapeKind, activeBrush, hasBrush,
-  paintLayer, setPaintLayer, roomId, setRoomId, rooms, suggestedRoomId,
+  paintLayer, setPaintLayer,
 }: {
   tool: Tool;
   shapeKind: ShapeKind;
@@ -5469,10 +5633,6 @@ function ShapeOptions({
   hasBrush: boolean;
   paintLayer: LayerName | null;
   setPaintLayer: (l: LayerName | null) => void;
-  roomId: number;
-  setRoomId: (n: number) => void;
-  rooms: RoomSummary[];
-  suggestedRoomId: number;
 }) {
   if (tool !== "shape") return null;
   const wallHint = (shapeKind === "rect-outline" || shapeKind === "line")
@@ -5500,52 +5660,27 @@ function ShapeOptions({
         </div>
       </div>
 
-      {shapeKind === "room" ? (
-        <div>
-          <span className="block text-xs text-gray-400">Room id</span>
-          <select
-            value={roomId}
-            onChange={(e) => setRoomId(parseInt(e.target.value, 10) || 0)}
-            className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs"
-            title="Room id written to the dragged region. New = a fresh id; Clear = mark as outdoors (room 0)."
-          >
-            {/* Fallback so the select value always matches a rendered
-                option (e.g. default id 1 in a sector whose rooms don't
-                include it) — otherwise the box silently desyncs. */}
-            {!new Set<number>([suggestedRoomId, 0, ...rooms.map((r) => r.room_id)]).has(roomId) && (
-              <option value={roomId}>Room {roomId}</option>
-            )}
-            <option value={suggestedRoomId}>New room ({suggestedRoomId})</option>
-            {rooms.map((r) => (
-              <option key={r.room_id} value={r.room_id}>
-                Room {r.room_id} ({r.tile_count})
-              </option>
-            ))}
-            <option value={0}>Clear (outdoors)</option>
-          </select>
-        </div>
-      ) : (
-        <div>
-          <span className="block text-xs text-gray-400">Paint to layer</span>
-          <select
-            value={paintLayer ?? ""}
-            onChange={(e) =>
-              setPaintLayer(e.target.value === "" ? null : e.target.value as LayerName)
-            }
-            className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs"
-            title="Override which layer the shape paints into. Default = picked from the brush's category."
-          >
-            <option value="">auto ({activeBrush?.layer ?? "—"})</option>
-            {ALL_LAYERS.map((l) => (
-              <option key={l} value={l}>{LAYER_SHORT[l]}</option>
-            ))}
-          </select>
-        </div>
-      )}
+      <div>
+        <span className="block text-xs text-gray-400">Paint to layer</span>
+        <select
+          value={paintLayer ?? ""}
+          onChange={(e) =>
+            setPaintLayer(e.target.value === "" ? null : e.target.value as LayerName)
+          }
+          className="rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs"
+          title="Override which layer the shape paints into (Tiles payload). Default = picked from the brush's category."
+        >
+          <option value="">auto ({activeBrush?.layer ?? "—"})</option>
+          {ALL_LAYERS.map((l) => (
+            <option key={l} value={l}>{LAYER_SHORT[l]}</option>
+          ))}
+        </select>
+      </div>
 
-      {shapeKind !== "room" && !hasBrush && (
+      {!hasBrush && (
         <p className="max-w-[12rem] self-center text-[10px] text-amber-400">
-          Pick a tile from the palette to fill the shape with.
+          Tiles payload: pick a tile to fill the shape with (Erase / Height /
+          Room work without one).
         </p>
       )}
       {wallHint && (
@@ -5701,15 +5836,15 @@ function SelectOptions({
  * (a step for raise/lower, an absolute level for set). Hidden in other
  * tools so the toolbar width stays stable. Mirrors SelectOptions. */
 function HeightOptions({
-  tool, heightMode, setHeightMode, heightValue, setHeightValue,
+  payload, heightMode, setHeightMode, heightValue, setHeightValue,
 }: {
-  tool: Tool;
+  payload: Payload;
   heightMode: "raise" | "lower" | "set";
   setHeightMode: (m: "raise" | "lower" | "set") => void;
   heightValue: number;
   setHeightValue: (v: number) => void;
 }) {
-  if (tool !== "height") return null;
+  if (payload !== "height") return null;
   const modes: Array<{ id: "raise" | "lower" | "set"; label: string; title: string }> = [
     { id: "raise", label: "▲ Raise", title: "Add the step to each tile's current height (clamped at 255)" },
     { id: "lower", label: "▼ Lower", title: "Subtract the step from each tile's current height (clamped at 0)" },
