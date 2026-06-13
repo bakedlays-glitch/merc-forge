@@ -81,7 +81,7 @@ try:
         parse_dat_file, parse_dat_full,
     )
     from mercwizard_core.mapforge_engine.dat_writer import (  # noqa: E402
-        write_dat_bytes,
+        write_dat_bytes, build_empty_dat_bytes,
     )
     from mercwizard_core.mapforge_engine.dat_edit_ops import (  # noqa: E402
         replace_layer_entry, add_layer_entry, remove_layer_entry,
@@ -2944,6 +2944,143 @@ def save_session(session_id: str):
         bytes_written=len(new_bytes),
         backup_path=backup_str,
     )
+
+
+# ─── New sector + Save-a-copy-as (R6 "create / clone sectors") ─────────
+class NewSectorBody(BaseModel):
+    """Create a fresh empty .dat at `dat_path`. `tileset` is written into
+    the header (and detected on open). `overwrite` must be True to replace
+    an existing file — the default refuses, so an accidental path collision
+    can't clobber a real map."""
+    dat_path: str
+    tileset: int
+    rows: int = 160
+    cols: int = 160
+    overwrite: bool = False
+
+
+class NewSectorResult(BaseModel):
+    dat_path: str
+    tileset: int
+    rows: int
+    cols: int
+    bytes_written: int
+
+
+@router.post("/new-sector", response_model=NewSectorResult)
+def new_sector(body: NewSectorBody):
+    """Emit a minimal valid empty 160×160 sector .dat at `dat_path`.
+
+    Every tile gets a single FIRSTTEXTURE ground entry; all other layers
+    are empty, room 0, height 0, flags 0 (no appendix beyond the 32-byte
+    MAPCREATE tail). The bytes round-trip through the editor's own parser
+    (build_empty_dat_bytes is pinned byte-exact by the save tests) so the
+    sector opens cleanly. The caller typically follows this with POST
+    /mapforge/sessions to start editing it.
+
+    Engine-validity note: the tail's edge/center gridnos are 0. That's the
+    correct freshly-created state — the in-game editor recomputes scroll
+    bounds + entry points on its first save; the bytes load fine."""
+    _require_renderer()
+    p = Path(body.dat_path)
+    if p.suffix.lower() != ".dat":
+        raise HTTPException(400, {"error": "BAD_SUFFIX",
+            "message": f"Expected .dat, got {p.suffix or '(none)'}"})
+    if p.exists() and not body.overwrite:
+        raise HTTPException(409, {"error": "FILE_EXISTS",
+            "message": (f"{p} already exists. Pass overwrite=true to replace "
+                        "it (this destroys the existing map).")})
+    if body.rows <= 0 or body.cols <= 0 or body.rows > 1024 or body.cols > 1024:
+        raise HTTPException(400, {"error": "BAD_DIMENSIONS",
+            "message": f"implausible dimensions {body.rows}x{body.cols}"})
+    try:
+        data = build_empty_dat_bytes(
+            tileset=body.tileset, rows=body.rows, cols=body.cols)
+    except ValueError as e:
+        raise HTTPException(400, {"error": "BAD_PARAMS", "message": str(e)})
+    # Atomic write (tmp + replace) so a crash mid-write can't leave a
+    # truncated .dat behind. Create the parent dir if it doesn't exist yet.
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = p.with_suffix(p.suffix + ".mwtmp")
+        tmp_path.write_bytes(data)
+        tmp_path.replace(p)
+    except OSError as e:
+        raise HTTPException(500, {"error": "WRITE_FAILED",
+            "message": f"{type(e).__name__}: {e}"})
+    return NewSectorResult(
+        dat_path=str(p),
+        tileset=body.tileset,
+        rows=body.rows,
+        cols=body.cols,
+        bytes_written=len(data),
+    )
+
+
+class SaveCopyAsBody(BaseModel):
+    """Write the session's CURRENT state to a NEW .dat path. The original
+    file the session was opened from is never touched. `overwrite` must be
+    True to replace an existing destination."""
+    dat_path: str
+    overwrite: bool = False
+
+
+class SaveCopyAsResult(BaseModel):
+    dat_path: str
+    bytes_written: int
+
+
+@router.post("/sessions/{session_id}/save-copy-as", response_model=SaveCopyAsResult)
+def save_copy_as(session_id: str, body: SaveCopyAsBody):
+    """Write the session's current in-memory state to a NEW .dat path
+    WITHOUT touching the original file or re-baselining the session.
+
+    Unlike /save this never overwrites `sess.dat_path` and never resets
+    `sess.dirty` — it's a snapshot-to-a-copy. The same pre-write
+    consistency guard runs so a corrupt state can't reach disk. Read-only
+    (SLF-bundled) sessions ARE allowed here, since we write to a brand-new
+    loose path the user chose, not back into the archive."""
+    _require_renderer()
+    sess = _session_store.get(session_id)
+    dest = Path(body.dat_path)
+    if dest.suffix.lower() != ".dat":
+        raise HTTPException(400, {"error": "BAD_SUFFIX",
+            "message": f"Expected .dat, got {dest.suffix or '(none)'}"})
+    # Refuse to clobber the session's OWN source (that's what /save is for —
+    # /save keeps backups; this path doesn't) or any existing file unless
+    # the caller explicitly confirmed.
+    try:
+        same_as_source = dest.resolve() == sess.dat_path.resolve()
+    except OSError:
+        same_as_source = str(dest) == str(sess.dat_path)
+    if same_as_source:
+        raise HTTPException(409, {"error": "SAME_AS_SOURCE",
+            "message": ("Destination is the session's own source file. Use "
+                        "the normal Save (which keeps backups) instead.")})
+    if dest.exists() and not body.overwrite:
+        raise HTTPException(409, {"error": "FILE_EXISTS",
+            "message": (f"{dest} already exists. Pass overwrite=true to "
+                        "replace it.")})
+    with sess._lock:
+        desync = _validate_parsed_consistency(sess.parsed)
+        if desync is not None:
+            raise HTTPException(500, {
+                "error": "PARSED_STATE_CORRUPT",
+                "message": (
+                    "MercForge's in-memory map state is inconsistent — saving "
+                    "would produce a .dat the game can't load. The copy is "
+                    f"BLOCKED. Specific desync: {desync}"),
+            })
+        try:
+            new_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = dest.with_suffix(dest.suffix + ".mwtmp")
+            tmp_path.write_bytes(new_bytes)
+            tmp_path.replace(dest)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, {"error": "WRITE_FAILED",
+                "message": f"{type(e).__name__}: {e}"})
+    return SaveCopyAsResult(dat_path=str(dest), bytes_written=len(new_bytes))
 
 
 # ──────────────────────────────────────────────────────────────────────────

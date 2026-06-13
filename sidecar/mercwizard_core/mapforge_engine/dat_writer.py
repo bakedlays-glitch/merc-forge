@@ -191,3 +191,83 @@ def write_dat_file(parsed: Dict[str, Any], original_bytes: bytes, out_path) -> i
     data = write_dat_bytes(parsed, original_bytes)
     Path(out_path).write_bytes(data)
     return len(data)
+
+
+# ── Fresh-map synthesis (R6 "New sector") ──────────────────────────────
+# write_dat_bytes() requires `original_bytes` because it passes the heights
+# region + appendix through verbatim. A brand-new empty map has neither —
+# every height is WORLD_BASE_HEIGHT (0) and there is no appendix (flags==0).
+# So we synthesize the bytes directly here, matching the exact region layout
+# that parse_dat_full reads back and that the engine's LoadWorld writes for a
+# flat sector. This is the production twin of tests/test_mapforge_library.py
+# `_build_minimal_dat`, generalized to a full sector with a ground texture on
+# every tile. Defaults mirror a real shipped sector (major 7.0 / minor 31 /
+# flags 0 / FIRSTTEXTURE sub 1 ground), verified against a9.dat (tileset 71).
+
+GROUND_SLOT = 0   # FIRSTTEXTURE — the base ground tile-type
+GROUND_SUB = 1    # dominant ground sub in shipped sectors (a9.dat: 22,492 tiles)
+
+
+def build_empty_dat_bytes(
+    tileset: int,
+    rows: int = 160,
+    cols: int = 160,
+    *,
+    major: float = 7.0,
+    minor: int = 31,
+    ground_slot: int = GROUND_SLOT,
+    ground_sub: int = GROUND_SUB,
+) -> bytes:
+    """Synthesize a minimal but valid empty JA2 1.13 sector .dat.
+
+    Every tile gets a single land-layer ground texture entry
+    (ground_slot/ground_sub). All other layers (objs/structs/shadows/
+    roofs/onroofs) are empty, room is 0, height is 0, world_flags are 0.
+    flags==0 so the appendix is just the 32-byte MAPCREATE_STRUCT tail
+    (all zero center/edge gridnos) and no items/lights/soldiers sections.
+
+    The result round-trips byte-for-byte through parse_dat_full +
+    write_dat_bytes and loads in the editor. It matches the region layout
+    a real shipped flat sector uses (major 7.0 / minor 31, verified against
+    a9.dat). Engine-validity note: the tail's edge/center gridnos are 0 —
+    fine for a freshly-created map (the in-game editor recomputes them on
+    first save); see the endpoint's docstring.
+
+    Raises ValueError on out-of-range arguments.
+    """
+    if not (4.0 <= major <= 9.0):
+        raise ValueError(f"implausible major version {major!r}")
+    if rows <= 0 or cols <= 0 or rows > 1024 or cols > 1024:
+        raise ValueError(f"implausible dimensions {rows}x{cols}")
+    if major < 7.0:
+        raise ValueError("build_empty_dat_bytes only emits the modern "
+                         "(major>=7.0) header format")
+    world_max = rows * cols
+    gs = ground_slot & 0xFF
+    gsub = ground_sub & 0xFF
+    room_bytes_per_tile = 2 if minor >= 29 else 1
+
+    out = bytearray()
+    # Header (major>=7.0): f major, B minor, i rows, i cols, I flags, I tileset,
+    # then 4 pass-through bytes (uiSoldierSize) → header_len == 25.
+    out += struct.pack("<f", float(major))
+    out += bytes([minor & 0xFF])
+    out += struct.pack("<i", rows)
+    out += struct.pack("<i", cols)
+    out += struct.pack("<I", 0)            # flags == 0 → tail is parseable
+    out += struct.pack("<I", tileset & 0xFFFFFFFF)
+    out += bytes(4)                        # uiSoldierSize — zeroed
+    # Heights region: 2 bytes/tile, all 0 (flat ground, no runtime garbage).
+    out += bytes(2 * world_max)
+    # Layer-count nibbles per tile: b0 = land(1) | world_flags(0),
+    # b1 = obj(0) | struct(0), b2 = shadow(0) | roof(0), b3 = onroof(0)|unused(0).
+    one_land_tile = bytes([0x01, 0x00, 0x00, 0x00])
+    out += one_land_tile * world_max
+    # Land pass: one (ground_slot, ground_sub) per tile.
+    out += bytes([gs, gsub]) * world_max
+    # obj / struct / shadow / roof / onroof passes: empty.
+    # Room info: 0 for every tile.
+    out += bytes(room_bytes_per_tile * world_max)
+    # MapInformation tail (major>=7.0): 32-byte MAPCREATE_STRUCT, all zero.
+    out += bytes(32)
+    return bytes(out)

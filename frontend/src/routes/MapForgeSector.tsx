@@ -44,8 +44,10 @@ import {
   getSession,
   getSessionParsed,
   getStiJsd,
+  newSector,
   openSession,
   prefetchPaletteSheet,
+  saveCopyAs,
   saveSession,
   streamAtlasBuild,
   validateSession,
@@ -3432,6 +3434,132 @@ function MapForgeSectorInner() {
     }
   };
 
+  // ─── New sector + Save-a-copy-as (R6 "create / clone sectors") ─────
+  // Path-derivation helper: split datPath into its directory (with the
+  // OS-native separator) so a prompt default lands a sibling .dat next
+  // to the current sector. Falls back to a bare filename when there's
+  // no directory component.
+  const siblingDatPath = (filename: string): string => {
+    const m = datPath.match(/^(.*[\\/])[^\\/]*$/);
+    return (m ? m[1] : "") + filename;
+  };
+
+  // "New sector…" — prompt for a destination .dat + tileset, write a
+  // fresh empty 160×160 sector server-side, then navigate to it (which
+  // opens a session on the new file). Guards: refuse the create on a
+  // path collision unless the user confirms an overwrite.
+  const createNewSector = async () => {
+    if (localDirty) {
+      const ok = window.confirm(
+        "You have unsaved edits in this sector. Creating a new sector "
+        + "navigates away and discards them.\n\n"
+        + "OK = discard + create. Cancel = stay so you can Save first.",
+      );
+      if (!ok) return;
+    }
+    const dest = window.prompt(
+      "New sector — full path for the new .dat file:",
+      siblingDatPath("NEW.dat"),
+    );
+    if (!dest) return;
+    const tsRaw = window.prompt(
+      "Tileset index for the new sector (number):",
+      String(tileset || 0),
+    );
+    if (tsRaw === null) return;
+    const ts = parseInt(tsRaw, 10);
+    if (Number.isNaN(ts) || ts < 0) {
+      log?.append({ severity: "error", message: `Invalid tileset: ${tsRaw}` });
+      return;
+    }
+    const navigateToNew = () => {
+      const np = new URLSearchParams();
+      np.set("dat", dest);
+      if (xmlPath) np.set("xml", xmlPath);
+      np.set("tileset", String(ts));
+      navigate(`/mapforge/sector?${np.toString()}`);
+    };
+    try {
+      await newSector(dest, ts);
+      log?.append({ severity: "success", message: `Created empty sector ${dest}` });
+      navigateToNew();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // The backend signals a collision with a 409 FILE_EXISTS — offer
+      // an explicit overwrite confirmation rather than silently clobbering.
+      if (msg.includes("FILE_EXISTS")) {
+        const ok = window.confirm(
+          `${dest} already exists. Overwrite it with a fresh empty sector? `
+          + "This destroys the existing map.",
+        );
+        if (!ok) return;
+        try {
+          await newSector(dest, ts, { overwrite: true });
+          log?.append({ severity: "success", message: `Overwrote ${dest} with empty sector` });
+          navigateToNew();
+        } catch (e2) {
+          log?.append({
+            severity: "error",
+            message: "New sector failed",
+            detail: e2 instanceof Error ? e2.message : String(e2),
+          });
+        }
+        return;
+      }
+      log?.append({
+        severity: "error",
+        message: "New sector failed",
+        detail: msg,
+      });
+    }
+  };
+
+  // "Save a copy as…" — write the CURRENT session state to a new .dat
+  // without touching the original. Stays on the current sector afterward
+  // (the copy is a snapshot; the session keeps editing the source).
+  const saveCopyAsNow = async () => {
+    if (!session) {
+      log?.append({ severity: "warn", message: "No session open." });
+      return;
+    }
+    const dest = window.prompt(
+      "Save a copy as — full path for the new .dat file:",
+      siblingDatPath(`${(datPath.split(/[\\/]/).pop() ?? "sector").replace(/\.dat$/i, "")}_copy.dat`),
+    );
+    if (!dest) return;
+    const doCopy = async (overwrite: boolean) => {
+      const res = await saveCopyAs(session.session_id, dest, { overwrite });
+      log?.append({
+        severity: "success",
+        message: `Saved a copy (${(res.bytes_written / 1024).toFixed(1)} KB) to ${res.dat_path}`,
+      });
+    };
+    try {
+      await doCopy(false);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("FILE_EXISTS")) {
+        const ok = window.confirm(`${dest} already exists. Overwrite it?`);
+        if (!ok) return;
+        try {
+          await doCopy(true);
+        } catch (e2) {
+          log?.append({
+            severity: "error",
+            message: "Save a copy failed",
+            detail: e2 instanceof Error ? e2.message : String(e2),
+          });
+        }
+        return;
+      }
+      log?.append({
+        severity: "error",
+        message: "Save a copy failed",
+        detail: msg,
+      });
+    }
+  };
+
   // ─── Console command registry ──────────────────────────────────────
   // Built once per render (cheap — small dict). The console's submit
   // path looks up by name; commands receive a `ctx` with log + print
@@ -4570,6 +4698,26 @@ function MapForgeSectorInner() {
                 }}
               />
             )}
+            {/* File menu — create a fresh empty sector, or snapshot the
+                current state to a new .dat without touching the original.
+                Both prompt for a path + (new sector) tileset, refuse to
+                clobber without confirmation, and write through the sidecar
+                (atomic tmp+replace). */}
+            <ToolbarMenu label="File">
+              <ToolbarMenuItem
+                title="Create a fresh empty 160×160 sector .dat (ground texture on every tile) and open it"
+                onClick={() => void createNewSector()}
+              >
+                + New sector…
+              </ToolbarMenuItem>
+              <ToolbarMenuItem
+                disabled={!session}
+                title="Write the current map state to a NEW .dat (the original file is left untouched)"
+                onClick={() => void saveCopyAsNow()}
+              >
+                Save a copy as…
+              </ToolbarMenuItem>
+            </ToolbarMenu>
             <ToolbarDivider />
             {session && !session.read_only && (
               <button

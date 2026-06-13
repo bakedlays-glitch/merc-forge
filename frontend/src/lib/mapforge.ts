@@ -759,6 +759,54 @@ export function saveSession(sessionId: string): Promise<SaveResult> {
   return jsonPost<SaveResult>(`/mapforge/sessions/${sessionId}/save`, {});
 }
 
+// ─── New sector + Save-a-copy-as (R6 "create / clone sectors") ──────────
+export interface NewSectorResult {
+  dat_path: string;
+  tileset: number;
+  rows: number;
+  cols: number;
+  bytes_written: number;
+}
+
+/** Create a fresh empty 160×160 sector .dat at `datPath`. Every tile gets
+ * a single ground texture; all other layers are empty. The backend refuses
+ * to overwrite an existing file unless `overwrite` is true. After it
+ * resolves, open the new path with `openSession` to start editing. */
+export function newSector(
+  datPath: string,
+  tileset: number,
+  opts?: { rows?: number; cols?: number; overwrite?: boolean },
+): Promise<NewSectorResult> {
+  return jsonPost<NewSectorResult>("/mapforge/new-sector", {
+    dat_path: datPath,
+    tileset,
+    rows: opts?.rows ?? 160,
+    cols: opts?.cols ?? 160,
+    overwrite: opts?.overwrite ?? false,
+  });
+}
+
+export interface SaveCopyAsResult {
+  dat_path: string;
+  bytes_written: number;
+}
+
+/** Write the session's CURRENT in-memory state to a NEW .dat path. The
+ * original file the session was opened from is never touched and the
+ * session stays on its original path (still dirty). The backend refuses
+ * to overwrite an existing destination unless `overwrite` is true, and
+ * refuses a destination equal to the session's own source. */
+export function saveCopyAs(
+  sessionId: string,
+  datPath: string,
+  opts?: { overwrite?: boolean },
+): Promise<SaveCopyAsResult> {
+  return jsonPost<SaveCopyAsResult>(
+    `/mapforge/sessions/${sessionId}/save-copy-as`,
+    { dat_path: datPath, overwrite: opts?.overwrite ?? false },
+  );
+}
+
 // ────────────────────────────────────────────────────────────────────────
 //  Generators — first-class map generation subsystem (task #114)
 // ────────────────────────────────────────────────────────────────────────
