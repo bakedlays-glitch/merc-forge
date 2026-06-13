@@ -704,6 +704,15 @@ function MapForgeSectorInner() {
       return [activeBrush, ...filtered].slice(0, 8);
     });
   }, [activeBrush]);
+  // Arming a brush from ANY surface (palette, recent rail, just-added,
+  // eyedropper, inspector) selects the pencil too — a pick means the user
+  // wants to paint with it. Centralized so no pick site can forget: the
+  // palette + rail picks used to set the brush but leave the tool on
+  // Inspect, so the user's first click silently did nothing.
+  const armBrush = useCallback((b: ActiveBrush | null) => {
+    setActiveBrush(b);
+    if (b) setTool("pencil");
+  }, []);
   // Paint stroke buffer — accumulates tiles during a drag so we don't
   // re-apply the same edit twice. Each tile in the stroke fires its
   // own applyEdits round-trip in the background; the local renderer
@@ -2831,16 +2840,13 @@ function MapForgeSectorInner() {
       // the others on this layer.
       const top = entries[entries.length - 1];
       if (!top) continue;
-      setActiveBrush({
+      armBrush({
         slot: top.slot,
         sub: top.sub,
         category: "(eyedropped)",
         layer,
         sti_filename: top.sti_filename ?? `slot ${top.slot}`,
       });
-      // Switch to pencil so the next click paints. The user picked
-      // a tile → they want to paint with it.
-      setTool("pencil");
       // Build a delta-aware log line so the user can see what
       // changed (slot, sub, or both) instead of just "eyedropped X".
       const stiLabel = top.sti_filename ?? `slot ${top.slot}`;
@@ -3478,7 +3484,7 @@ function MapForgeSectorInner() {
         renderer={renderer}
         activeBrush={activeBrush}
         onPick={(b) => {
-          setActiveBrush(b);
+          armBrush(b);
           if (b) {
             log?.append({
               severity: "info",
@@ -3525,7 +3531,7 @@ function MapForgeSectorInner() {
         recentBrushes={recentBrushes}
         recentAdditions={recentAdditions}
         onPick={(b) => {
-          setActiveBrush(b);
+          armBrush(b);
           log?.append({
             severity: "info",
             message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
@@ -3533,7 +3539,7 @@ function MapForgeSectorInner() {
           });
         }}
         onPickAddition={(a) => {
-          setActiveBrush({
+          armBrush({
             slot: a.slot,
             sub: 0,
             category: "Library",
@@ -3804,13 +3810,12 @@ function MapForgeSectorInner() {
       pinned={pinned}
       onPin={setPinned}
       onPickAsBrush={(slot, sub, layer, sti_filename) => {
-        setActiveBrush({
+        armBrush({
           slot, sub, layer,
           category: "(picked from tile)",
           sti_filename,
           forceSingleTile: true,
         });
-        setTool("pencil");
         log?.append({
           severity: "info",
           message: `Brush ← ${sti_filename} (slot ${slot} sub ${sub} → ${layer}, single-tile)`,
