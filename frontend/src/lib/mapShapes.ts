@@ -23,7 +23,10 @@ export type ShapeKind =
   | "diamond"
   | "cross"
   | "triangle"
-  | "hexagon";
+  | "hexagon"
+  // Flood fill is click-driven (not a bbox drag) — handled specially in
+  // MapForgeSector, so shapeTiles() returns [] for it (default branch).
+  | "flood";
 
 /** Normalize two corners into [x0,y0,x1,y1] with x0<=x1, y0<=y1. */
 export function normalizeRect(

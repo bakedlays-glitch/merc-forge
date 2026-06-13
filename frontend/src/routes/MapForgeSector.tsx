@@ -2542,6 +2542,13 @@ function MapForgeSectorInner() {
         paintBrush(tile, e.shiftKey);
       }
     } else if (tool === "shape") {
+      // Flood fill is a click action (not a bbox drag) — fill from the
+      // clicked seed immediately and bail (no anchor / drag preview).
+      if (shapeKind === "flood") {
+        if (!activeBrush) return;
+        doFloodFill(tile);
+        return;
+      }
       // Shapes need a brush except the room tool (writes a room id, not
       // a tile). Anchor the drag; the commit happens on mouseup. A
       // non-null shapeAnchor also drives the live preview overlay.
@@ -3016,6 +3023,56 @@ function MapForgeSectorInner() {
     if (!session || session.read_only || !selectRect) return;
     await doCut();
     setPasteMode(true);
+  }
+
+  /** Flood fill (R4): from the clicked seed, find its 4-connected region of
+   * same-top-slot tiles on the brush's target layer, and fill them all with
+   * the active brush (same `place` op as rect-fill) in ONE undoable stroke.
+   * Capped for safety; confirms on big fills. */
+  function doFloodFill(seed: Tile) {
+    if (!session || session.read_only || !renderer || !activeBrush) return;
+    const parsed = renderer.getParsed();
+    const cols = parsed.cols, rows = parsed.rows;
+    const layer = (paintLayer ?? activeBrush.layer) as LayerName;
+    const topSlotAt = (x: number, y: number): number => {
+      const arr = (parsed[layer] as number[][][])[y * cols + x] ?? [];
+      const last = arr[arr.length - 1];
+      return last ? (last[0] ?? -1) : -1;  // -1 = empty
+    };
+    const target = topSlotAt(seed.x, seed.y);
+    if (target === activeBrush.slot) {
+      log?.append({ severity: "info", message: "Flood fill: the seed already holds this brush." });
+      return;
+    }
+    const seen = new Set<number>();
+    const region: Tile[] = [];
+    const stack: Array<[number, number]> = [[seed.x, seed.y]];
+    const CAP = 6000;
+    while (stack.length > 0) {
+      const popped = stack.pop()!;
+      const x = popped[0], y = popped[1];
+      if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+      const g = y * cols + x;
+      if (seen.has(g)) continue;
+      if (topSlotAt(x, y) !== target) continue;
+      seen.add(g);
+      region.push({ x, y });
+      if (region.length > CAP) break;
+      stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+    }
+    if (region.length === 0) return;
+    const name = activeBrush.sti_filename.replace(/\.sti$/i, "");
+    if (
+      region.length > 2000
+      && !window.confirm(`Flood-fill ${region.length} tiles with ${name}?`)
+    ) return;
+    renderer.beginStroke(`Fill ${region.length} tiles (${name})`);
+    void applyTileEdits(region, {
+      op: "place", layer, slot: activeBrush.slot, sub: activeBrush.sub,
+    });
+    renderer.endStroke();
+    bumpHistory();
+    log?.append({ severity: "info", message: `Flood-filled ${region.length} tiles with ${name}.` });
   }
 
   /**
@@ -5139,6 +5196,7 @@ const LAYER_SHORT: Record<LayerName, string> = {
 const SHAPE_KINDS: ReadonlyArray<{ kind: ShapeKind; label: string }> = [
   { kind: "rect-fill", label: "▦ Fill" },
   { kind: "rect-outline", label: "▢ Outline" },
+  { kind: "flood", label: "🪣 Flood" },
   { kind: "line", label: "╱ Line" },
   { kind: "diamond", label: "◆ Diamond" },
   { kind: "cross", label: "✛ Cross" },
@@ -5149,6 +5207,7 @@ const SHAPE_KINDS: ReadonlyArray<{ kind: ShapeKind; label: string }> = [
 const SHAPE_HINTS: Record<ShapeKind, string> = {
   "rect-fill": "Drag a box → fill the whole area with the active tile",
   "rect-outline": "Drag a box → paint just the perimeter (walls / fences)",
+  "flood": "Click a tile → fill its connected same-tile area with the active brush",
   "line": "Drag A→B → a straight run of the active tile (roads, fences)",
   "diamond": "Drag a box → filled diamond inscribed in it",
   "cross": "Drag a box → a plus/cross through the center",
