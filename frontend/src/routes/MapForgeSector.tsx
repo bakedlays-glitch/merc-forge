@@ -124,6 +124,7 @@ import {
   sliceRegion,
   pasteEdits,
   stripBuddyShadows,
+  CLIP_LAYERS,
   type ClipboardRegion,
 } from "../lib/mapClipboard";
 
@@ -791,6 +792,25 @@ function MapForgeSectorInner() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [pasteMode]);
+  // Delete / Backspace clears the committed marquee selection (R4). Own
+  // effect (gated on a live selection) so it doesn't re-bind the global
+  // dispatcher; the input-focus guard keeps it out of text fields.
+  useEffect(() => {
+    if (tool !== "select" || !selectRect) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        void doDeleteSelection();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // doDeleteSelection reads live state via stable session_id/renderer +
+    // the selectRect in deps; re-binding only on tool/selection change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, selectRect]);
   // Room id written by the "Mark region as room" shape. The toolbar lets
   // the user retarget an existing room or pick 0 to clear membership.
   const [roomId, setRoomId] = useState(1);
@@ -2851,6 +2871,96 @@ function MapForgeSectorInner() {
     }
   }
 
+  /** Clear the marquee selection — wipe all 6 layers + room + height on
+   * every tile in the rect, as ONE undoable stroke. Mirrors doPaste's
+   * snapshot → local mirror → transactional applyEdits → revert-on-reject
+   * pattern. (R4 editor verb: Delete / area-erase.) */
+  async function doDeleteSelection() {
+    if (!session || session.read_only || !renderer || !selectRect) return;
+    const cols = info.data?.cols ?? renderer.getParsed().cols;
+    const rows = info.data?.rows ?? renderer.getParsed().rows;
+    const x0 = Math.max(0, Math.min(selectRect.a.x, selectRect.b.x));
+    const y0 = Math.max(0, Math.min(selectRect.a.y, selectRect.b.y));
+    const x1 = Math.min(cols - 1, Math.max(selectRect.a.x, selectRect.b.x));
+    const y1 = Math.min(rows - 1, Math.max(selectRect.a.y, selectRect.b.y));
+    if (x0 > x1 || y0 > y1) return;
+    const nTiles = (x1 - x0 + 1) * (y1 - y0 + 1);
+    if (
+      nTiles > 500
+      && !window.confirm(
+        `Clear ${nTiles} tiles? This removes their terrain, objects, `
+        + "structures, rooms and heights.",
+      )
+    ) return;
+    const edits: SessionEdit[] = [];
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        for (const l of CLIP_LAYERS) {
+          edits.push({ x, y, op: "set_entries", layer: l, entries: [] });
+        }
+        edits.push({ x, y, op: "set_room", room_id: 0 });
+        edits.push({ x, y, op: "set_height", height: 0 });
+      }
+    }
+    setEditsInFlight((n) => n + 1);
+    let strokeCommitted = false;
+    try {
+      renderer.beginStroke(`Clear ${x1 - x0 + 1}×${y1 - y0 + 1} (${nTiles} tiles)`);
+      for (const ed of edits) {
+        if (ed.op === "set_entries" && ed.layer) renderer.recordSnapshot(ed.x, ed.y, ed.layer);
+        else if (ed.op === "set_room") renderer.recordRoomSnapshot(ed.x, ed.y);
+        else if (ed.op === "set_height") renderer.recordHeightSnapshot(ed.x, ed.y);
+        renderer.applyLocalEdit({
+          x: ed.x, y: ed.y, op: ed.op,
+          layer: ed.layer, entries: ed.entries,
+          roomId: ed.room_id, height: ed.height,
+        });
+      }
+      renderer.endStroke();
+      strokeCommitted = true;
+      bumpHistory();
+      setRenderEpoch((e) => e + 1);
+      const res = await applyEdits(session.session_id, edits);
+      setSession(res.session);
+      log?.append({ severity: "info", message: `Cleared ${nTiles} tiles.` });
+    } catch (e) {
+      // applyEdits is transactional — revert the optimistic local mirror
+      // (no backend round-trip; the server is already at pre-clear state).
+      if (strokeCommitted) {
+        const entry = renderer.discardLastUndo();
+        if (entry) {
+          for (const s of entry.snapshots) renderer.applyLocalEdit({ x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries });
+          for (const r of entry.roomSnapshots) renderer.applyLocalEdit({ x: r.x, y: r.y, op: "set_room", roomId: r.roomId });
+          for (const h of entry.heightSnapshots) renderer.applyLocalEdit({ x: h.x, y: h.y, op: "set_height", height: h.height });
+          bumpHistory();
+          setRenderEpoch((e2) => e2 + 1);
+        }
+      }
+      log?.append({
+        severity: "error",
+        message: "Clear failed — the edit batch was rejected; reverted local changes.",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
+  /** Cut = copy the selection to the clipboard, then clear it. */
+  async function doCut() {
+    if (!session || session.read_only || !selectRect) return;
+    await doCopy();
+    await doDeleteSelection();
+  }
+
+  /** Move = cut, then arm paste so the next map click drops the cut region
+   * at a new spot (the existing paste ghost previews it under the cursor). */
+  async function doMove() {
+    if (!session || session.read_only || !selectRect) return;
+    await doCut();
+    setPasteMode(true);
+  }
+
   /**
    * Advance the active brush to the next/previous sub-frame and log
    * the change. Used by three surfaces:
@@ -4321,6 +4431,9 @@ function MapForgeSectorInner() {
               activeTileset={tileset}
               busy={editsInFlight > 0}
               onCopy={() => void doCopy()}
+              onCut={() => void doCut()}
+              onDelete={() => void doDeleteSelection()}
+              onMove={() => void doMove()}
               onArmPaste={() => setPasteMode(true)}
               onCancelPaste={() => setPasteMode(false)}
             />
@@ -5218,7 +5331,7 @@ function ShapeOptions({
  * (cross-tileset slot remap is deferred). */
 function SelectOptions({
   tool, hasSelection, clipboard, pasteMode, readOnly, activeTileset, busy,
-  onCopy, onArmPaste, onCancelPaste,
+  onCopy, onCut, onDelete, onMove, onArmPaste, onCancelPaste,
 }: {
   tool: Tool;
   hasSelection: boolean;
@@ -5228,6 +5341,9 @@ function SelectOptions({
   activeTileset: number;
   busy: boolean;
   onCopy: () => void;
+  onCut: () => void;
+  onDelete: () => void;
+  onMove: () => void;
   onArmPaste: () => void;
   onCancelPaste: () => void;
 }) {
@@ -5250,11 +5366,33 @@ function SelectOptions({
           >
             ⧉ Copy
           </button>
+          <button
+            type="button"
+            onClick={onCut}
+            disabled={!hasSelection || readOnly || busy}
+            className="border-l border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasSelection
+              ? "Cut the selection to the clipboard (copy, then clear)"
+              : "Drag a rectangle on the map first"}
+          >
+            ✂ Cut
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={!hasSelection || readOnly || busy}
+            className="border-l border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasSelection
+              ? "Clear the selection — wipe all layers, rooms + heights (Delete / Backspace)"
+              : "Drag a rectangle on the map first"}
+          >
+            🗑 Delete
+          </button>
           {pasteMode ? (
             <button
               type="button"
               onClick={onCancelPaste}
-              className="bg-amber-900 px-2 py-1 text-xs text-amber-100 hover:bg-amber-800"
+              className="border-l border-gray-700 bg-amber-900 px-2 py-1 text-xs text-amber-100 hover:bg-amber-800"
               title="Cancel paste (Esc)"
             >
               ✕ Cancel
@@ -5264,7 +5402,7 @@ function SelectOptions({
               type="button"
               onClick={onArmPaste}
               disabled={!canPaste}
-              className="bg-purple-900 px-2 py-1 text-xs text-purple-100 hover:bg-purple-800 disabled:cursor-not-allowed disabled:opacity-40"
+              className="border-l border-gray-700 bg-purple-900 px-2 py-1 text-xs text-purple-100 hover:bg-purple-800 disabled:cursor-not-allowed disabled:opacity-40"
               title={
                 clipboard === null
                   ? "Copy a region first"
@@ -5278,6 +5416,17 @@ function SelectOptions({
               ⎘ Paste
             </button>
           )}
+          <button
+            type="button"
+            onClick={onMove}
+            disabled={!hasSelection || readOnly || busy}
+            className="border-l border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-40"
+            title={hasSelection
+              ? "Move the selection: cuts it, then click the map to drop it at a new spot"
+              : "Drag a rectangle on the map first"}
+          >
+            ✥ Move
+          </button>
         </div>
       </div>
 
