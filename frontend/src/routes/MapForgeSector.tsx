@@ -41,6 +41,7 @@ import {
   fetchStiFrameBlobUrl,
   getAtlasManifest,
   getSectorInfo,
+  getSession,
   getSessionParsed,
   getStiJsd,
   openSession,
@@ -113,6 +114,7 @@ import {
   usePersistentBrushBucket, usePersistentClipboard, sameBrush,
   RECENT_BRUSHES_KEY, FAVORITE_BRUSHES_KEY,
   RECENT_BRUSHES_CAP, FAVORITE_BRUSHES_CAP,
+  readJournalEntry, writeJournalEntry, clearJournalEntry,
 } from "../lib/brushBuckets";
 import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 import {
@@ -496,36 +498,102 @@ function MapForgeSectorInner() {
     let cancelled = false;
     let openedId: string | null = null;
     const initialTileset = tilesetParam !== null ? parseInt(tilesetParam, 10) : 0;
-    openSession(datPath, xmlPath, initialTileset)
-      .then((s) => {
+
+    // Adopt a session as the live one: wire openedId, mirror state, warm
+    // the palette sheet. Shared by the fresh-open and recovery paths.
+    const adopt = (s: SessionInfo) => {
+      openedId = s.session_id;
+      setSession(s);
+      // Fire-and-forget preload of the palette sprite sheet. The
+      // sheet is what the Asset Browser needs, and its cold bake is
+      // the dominant wait when the user opens "Browse assets" for the
+      // first time on a tileset. prefetchPaletteSheet warms BOTH the
+      // sidecar disk cache AND the browser-side blob URL (shared,
+      // app-lifetime cache), so the viewer's open is a true cache hit
+      // with zero network — not just a warm disk cache the browser
+      // still has to download from. Errors are swallowed — a failed
+      // preload just falls back to the on-demand bake.
+      // User feedback: "Can you make it load faster and/or preload?"
+      prefetchPaletteSheet(xmlPath, s.tileset).catch(() => {});
+    };
+
+    (async () => {
+      // ─── Recovery probe (R6) ───────────────────────────────────────
+      // The sidecar never evicts a DIRTY session, so unsaved edits made
+      // before a reload/crash survive in-memory until the sidecar
+      // process restarts. If our journal has a breadcrumb for THIS
+      // datPath, probe whether that session is still live + dirty and,
+      // if so, RECONNECT to it instead of opening a fresh (empty)
+      // session — recovering the user's uncommitted work. A missing,
+      // closed, clean, or mismatched session must never crash the open
+      // flow: on any failure we fall through to the normal fresh open.
+      const journal = readJournalEntry(datPath);
+      if (journal?.sessionId) {
+        try {
+          const live = await getSession(journal.sessionId);
+          if (cancelled) return;
+          const sameSector = live.dat_path === datPath;
+          if (sameSector && live.dirty && !live.read_only) {
+            adopt(live);
+            log?.append({
+              severity: "success",
+              message: `Recovered ${live.edit_count} unsaved edit`
+                + `${live.edit_count === 1 ? "" : "s"} from before the reload.`,
+              detail: "Reconnected to the in-memory editing session. "
+                + "Save to write them to disk.",
+            });
+            return;
+          }
+          // Live but not recoverable (saved/clean, read-only, or a
+          // different sector reusing the id) — drop the stale breadcrumb.
+          clearJournalEntry(datPath);
+        } catch {
+          if (cancelled) return;
+          // 404 / network — the session is gone (sidecar restarted, most
+          // likely). Clear the stale entry and tell the user their
+          // pre-reload edits couldn't be recovered. Non-blocking.
+          clearJournalEntry(datPath);
+          log?.append({
+            severity: "warn",
+            message: `Couldn't recover ${journal.editCount} unsaved edit`
+              + `${journal.editCount === 1 ? "" : "s"} — the editor or `
+              + "sidecar was restarted.",
+            detail: "The in-memory session that held them is gone. "
+              + "Opening a fresh session from the file on disk.",
+          });
+        }
+      }
+      if (cancelled) return;
+      // ─── Normal fresh open ─────────────────────────────────────────
+      try {
+        const s = await openSession(datPath, xmlPath, initialTileset);
         if (cancelled) {
           closeSession(s.session_id).catch(() => {});
           return;
         }
-        openedId = s.session_id;
-        setSession(s);
-        // Fire-and-forget preload of the palette sprite sheet. The
-        // sheet is what the Asset Browser needs, and its cold bake is
-        // the dominant wait when the user opens "Browse assets" for the
-        // first time on a tileset. prefetchPaletteSheet warms BOTH the
-        // sidecar disk cache AND the browser-side blob URL (shared,
-        // app-lifetime cache), so the viewer's open is a true cache hit
-        // with zero network — not just a warm disk cache the browser
-        // still has to download from. Errors are swallowed — a failed
-        // preload just falls back to the on-demand bake.
-        // User feedback: "Can you make it load faster and/or preload?"
-        prefetchPaletteSheet(xmlPath, s.tileset).catch(() => {});
-      })
-      .catch((err) => {
+        adopt(s);
+      } catch (err) {
         if (cancelled) return;
         setSessionError(err instanceof Error ? err.message : String(err));
-      });
+      }
+    })();
+
     return () => {
       cancelled = true;
-      if (openedId) closeSession(openedId).catch(() => {});
+      if (openedId) {
+        // Deliberately closing the session here destroys its in-memory
+        // edits, so the journal breadcrumb pointing at it is now dead —
+        // clear it (the dirty-tracking effect re-writes a fresh one if a
+        // new session becomes dirty). This is what makes the journal a
+        // RELOAD/CRASH recovery (cleanup doesn't run on a hard reload) and
+        // not a phantom "couldn't recover" toast after a clean nav-away.
+        closeSession(openedId).catch(() => {});
+        clearJournalEntry(datPath);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- sessionRestartEpoch
-    // is intentionally in deps so a sidecar restart re-fires the open.
+    // is intentionally in deps so a sidecar restart re-fires the open;
+    // `log` is a stable context value, omitted to avoid re-fire churn.
   }, [datPath, xmlPath, tilesetParam, sessionRestartEpoch]);
 
   // Preload the palette sprite sheet whenever the RESOLVED tileset
@@ -964,6 +1032,26 @@ function MapForgeSectorInner() {
   // confirm via their own handlers; this covers the Tauri window X and
   // F5, which previously discarded unsaved edits silently).
   useUnsavedGuard(localDirty);
+  // Edit journal (R6 recovery). While the session is dirty, persist a
+  // breadcrumb (sessionId + edit count) keyed by datPath so a reload/
+  // crash can reconnect to the still-live in-memory session on reopen
+  // (the sidecar never evicts a dirty session). Cleared the instant the
+  // session goes clean (saved → on disk, nothing to recover) or when
+  // there's no editable session. The recovery probe in the open-session
+  // effect clears stale entries whose session is gone. Date.now() is
+  // fine here — this is frontend app code, not a workflow script.
+  useEffect(() => {
+    if (session && !session.read_only && localDirty) {
+      writeJournalEntry(datPath, {
+        sessionId: session.session_id,
+        editCount: session.edit_count,
+        savedAt: Date.now(),
+      });
+    } else if (!localDirty) {
+      // Clean (or never-dirtied) → nothing unsaved to recover.
+      clearJournalEntry(datPath);
+    }
+  }, [datPath, session, localDirty]);
   // Pending tileset switch — set when the user clicks a tileset
   // option while the sector has unsaved changes. Holds the requested
   // value until the confirm modal resolves; null when no prompt
@@ -4401,9 +4489,11 @@ function MapForgeSectorInner() {
               back-link · map name · dirty dot │ Undo / Redo / Save │
               Generate / Validate / Radar (dock-tab openers) │ Tileset ·
               Room │ spacer │ Panels▾ · Layout▾ · Settings · Help ·
-              Focus. ONE accent total: the Save button keeps emerald
-              while dirty (the dirty dot echoes it); everything else is
-              neutral — groups read via the thin dividers, not hue. */}
+              Focus. The Save button keeps emerald while dirty; the
+              "● N unsaved" badge is subtle amber (distinct from the
+              save-affordance accent — it's a STATUS, not an action);
+              everything else is neutral — groups read via the thin
+              dividers, not hue. */}
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <a
               href="/mapforge"
@@ -4434,10 +4524,18 @@ function MapForgeSectorInner() {
             </h1>
             {localDirty && (
               <span
-                className="text-xs leading-none text-emerald-400"
-                title="Unsaved changes — Save writes them to disk"
+                className="flex items-center gap-1 text-xs leading-none text-amber-400"
+                title={
+                  "You have unsaved edits — they live in memory (and survive "
+                  + "a reload) until you Save them to disk."
+                }
               >
-                ●
+                <span aria-hidden="true">●</span>
+                {session && session.edit_count > 0 && (
+                  <span className="font-medium tabular-nums">
+                    {session.edit_count} unsaved
+                  </span>
+                )}
               </span>
             )}
             <ToolbarDivider />

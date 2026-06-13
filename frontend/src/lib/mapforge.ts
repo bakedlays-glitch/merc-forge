@@ -735,6 +735,16 @@ export function closeSession(sessionId: string): Promise<{ closed: string }> {
   return jsonDelete<{ closed: string }>(`/mapforge/sessions/${sessionId}`);
 }
 
+/** Fetch the live SessionInfo for an existing session. Throws (HTTP 404
+ * "SESSION_NOT_FOUND") when the session is gone — e.g. the sidecar
+ * restarted, dropping every in-memory session. Used by the recovery-on-
+ * reopen flow to decide whether a journaled session is still live (its
+ * unsaved edits survive in the never-evict-dirty sidecar store) or stale
+ * (clear the journal). */
+export function getSession(sessionId: string): Promise<SessionInfo> {
+  return jsonGet<SessionInfo>(`/mapforge/sessions/${encodeURIComponent(sessionId)}`);
+}
+
 export function applyEdits(
   sessionId: string,
   edits: SessionEdit[],

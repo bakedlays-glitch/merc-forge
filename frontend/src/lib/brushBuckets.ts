@@ -88,6 +88,75 @@ function writeClipboard(key: string, clip: ClipboardRegion | null): void {
   }
 }
 
+// ─── Edit-journal: dirty-session recovery across reload/crash (R6) ─────
+// The sidecar never evicts a DIRTY session (committed), so a session with
+// unsaved edits survives in-memory until the sidecar process itself
+// restarts. We persist a tiny per-datPath breadcrumb — the sessionId +
+// edit count — so that on reopening the SAME sector we can probe whether
+// that session is still live server-side and RECONNECT to it (recovering
+// the user's unsaved work) instead of opening a fresh one.
+//
+// Keyed by datPath (one entry per sector file). Cleared on save (clean)
+// and on session close. Stale entries (sidecar restarted → session gone)
+// are cleared by the recovery probe. Same quota/parse try-catch as the
+// brush/clipboard buckets — a journal failure is non-fatal (the user just
+// loses cross-reload recovery, never data already on disk).
+export const JOURNAL_KEY = "mapforge.journal.v1";
+
+export interface JournalEntry {
+  /** The live sidecar session id holding the unsaved edits. */
+  sessionId: string;
+  /** edit_count at last write — used only to phrase the recovery banner
+   * ("Recovered N unsaved edits"); the authoritative count comes from the
+   * reconnected SessionInfo. */
+  editCount: number;
+  /** Epoch ms the entry was last written (Date.now() — frontend app code,
+   * allowed; only workflow SCRIPTS forbid wall-clock). Advisory only. */
+  savedAt: number;
+}
+
+export function readJournalEntry(datPath: string | undefined): JournalEntry | null {
+  if (!datPath) return null;
+  try {
+    const raw = localStorage.getItem(JOURNAL_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, JournalEntry>;
+    return parsed[datPath] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeJournalEntry(
+  datPath: string | undefined,
+  entry: JournalEntry,
+): void {
+  if (!datPath) return;
+  try {
+    const raw = localStorage.getItem(JOURNAL_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, JournalEntry>) : {};
+    parsed[datPath] = entry;
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(parsed));
+  } catch {
+    // Quota or parse — non-fatal; recovery just won't be available.
+  }
+}
+
+export function clearJournalEntry(datPath: string | undefined): void {
+  if (!datPath) return;
+  try {
+    const raw = localStorage.getItem(JOURNAL_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Record<string, JournalEntry>;
+    if (datPath in parsed) {
+      delete parsed[datPath];
+      localStorage.setItem(JOURNAL_KEY, JSON.stringify(parsed));
+    }
+  } catch {
+    // Non-fatal.
+  }
+}
+
 /**
  * `[clipboard, setClipboard]` persisted per (xmlPath, tileset). Rehydrates
  * on tileset switch; a same-tileset sector switch keeps the same key, so the
