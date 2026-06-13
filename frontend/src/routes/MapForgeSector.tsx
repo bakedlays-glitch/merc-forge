@@ -1394,6 +1394,29 @@ function MapForgeSectorInner() {
   const dragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // On-screen size of the canvas VIEWPORT container (the overflow-hidden
+  // box that crops the pan/zoomed render). The minimap navigator needs
+  // it to draw the "what's visible" rectangle. A ref-callback (re)wires a
+  // ResizeObserver whenever the node attaches — the dock can tear the
+  // canvas panel down + rebuild it, swapping the underlying DOM node, so
+  // a plain useRef + mount-effect would go stale.
+  const [canvasViewportSize, setCanvasViewportSize] = useState({ w: 0, h: 0 });
+  const canvasViewportRoRef = useRef<ResizeObserver | null>(null);
+  const setCanvasViewportEl = useCallback((el: HTMLDivElement | null) => {
+    canvasViewportRoRef.current?.disconnect();
+    canvasViewportRoRef.current = null;
+    if (!el) return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      setCanvasViewportSize((prev) =>
+        prev.w === r.width && prev.h === r.height ? prev : { w: r.width, h: r.height }
+      );
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    canvasViewportRoRef.current = ro;
+  }, []);
 
   // ─── Demo hook (?demo=1) ────────────────────────────────────────────
   // Scripted-demo automation surface for the YouTube demo runner
@@ -4247,6 +4270,7 @@ function MapForgeSectorInner() {
 
   const renderCanvasPanel = () => (
     <div
+      ref={setCanvasViewportEl}
       className="relative h-full w-full overflow-hidden bg-gray-950"
       style={{ cursor: pickingRect || placingBuilding ? "crosshair" : undefined }}
       onWheel={onWheel}
@@ -4524,6 +4548,27 @@ function MapForgeSectorInner() {
         busy={editsInFlight > 0}
         onRevert={(n) => void revertUndo(n)}
         onRedo={(n) => void redoForward(n)}
+      />
+    ),
+    minimap: () => (
+      <MinimapPanel
+        renderer={renderer}
+        renderMeta={renderMeta}
+        renderEpoch={renderEpoch}
+        zoom={zoom}
+        pan={pan}
+        viewportW={canvasViewportSize.w}
+        viewportH={canvasViewportSize.h}
+        onRecenter={(tileX, tileY) => {
+          if (!renderMeta) return;
+          const p = tileToCanvasPixel(tileX, tileY, renderMeta);
+          const cx = p.x + renderMeta.tileW / 2;
+          const cy = p.y + renderMeta.tileH / 2;
+          setPan({
+            x: (renderMeta.canvasW / 2 - cx) * zoom,
+            y: (renderMeta.canvasH / 2 - cy) * zoom,
+          });
+        }}
       />
     ),
     log: renderLogPanel,
@@ -5566,6 +5611,219 @@ const LAYER_SHORT: Record<LayerName, string> = {
   land: "Land", objs: "Obj", shadows: "Shad",
   structs: "Struct", roofs: "Roof", onroofs: "OnRf",
 };
+
+// ─── R6 minimap navigator ─────────────────────────────────────────────
+/** In-editor overview navigator (NOT the in-game radar STI). Draws a
+ * cheap FLAT top-down map of the whole sector — one small cell per tile,
+ * colored by its top occupied layer (roof → struct → land) — and overlays
+ * the current viewport as a draggable quadrilateral. Click or drag the
+ * overview to re-center the main canvas on that tile.
+ *
+ * Cheap by design: a single fillRect-per-tile pass on a small <canvas>,
+ * re-run only on `renderEpoch` (one committed stroke). It deliberately
+ * does NOT reuse the iso renderer — a flat colored grid is plenty for
+ * navigation and stays fast even on a 160×160 sector.
+ */
+function MinimapPanel({
+  renderer, renderMeta, renderEpoch, zoom, pan,
+  viewportW, viewportH, onRecenter,
+}: {
+  renderer: IsoRenderer | null;
+  renderMeta: RenderMeta | null;
+  renderEpoch: number;
+  zoom: number;
+  pan: { x: number; y: number };
+  viewportW: number;
+  viewportH: number;
+  onRecenter: (tileX: number, tileY: number) => void;
+}) {
+  const mapCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Box the overview into a fixed-width column; the panel scrolls if the
+  // dock column is narrower. CELL px-per-tile is clamped so a 160-wide
+  // sector lands around ~320px (2px/tile) but tiny sectors still read.
+  const [dims, setDims] = useState<{ cols: number; rows: number; cell: number } | null>(null);
+  const draggingRef = useRef(false);
+
+  // (Re)paint the flat overview whenever the sector geometry / content
+  // changes (renderEpoch) or the renderer swaps.
+  useEffect(() => {
+    const cv = mapCanvasRef.current;
+    if (!cv || !renderer) {
+      setDims(null);
+      return;
+    }
+    const parsed = renderer.getParsed();
+    const cols = parsed.cols;
+    const rows = parsed.rows;
+    if (cols <= 0 || rows <= 0) {
+      setDims(null);
+      return;
+    }
+    // Target ~320px on the longer axis, clamped to 1..3 px/tile, integer.
+    const cell = Math.max(1, Math.min(3, Math.round(320 / Math.max(cols, rows))));
+    const w = cols * cell;
+    const h = rows * cell;
+    cv.width = w;
+    cv.height = h;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    // Background (matches the iso render's tan-ish void, darkened).
+    ctx.fillStyle = "#1c1814";
+    ctx.fillRect(0, 0, w, h);
+    const land = parsed.land;
+    const structs = parsed.structs;
+    const roofs = parsed.roofs;
+    const objs = parsed.objs;
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const gn = y * cols + x;
+        let color: string | null = null;
+        // Layer priority for the flat overview, top-down: a roof hides
+        // everything below it; else a structure; else an object accent;
+        // else the floor. Hue is derived from the top slot so distinct
+        // terrains read differently without a palette lookup.
+        const roofCell = roofs[gn];
+        const structCell = structs[gn];
+        const objCell = objs[gn];
+        const landCell = land[gn];
+        if (roofCell && roofCell.length > 0) {
+          color = "#6b5847"; // roofs — muted brown
+        } else if (structCell && structCell.length > 0) {
+          const slot = structCell[0]?.[0] ?? 0;
+          // Greys with a slot-driven tint so walls/furniture vary.
+          const v = 90 + ((slot * 37) % 90);
+          color = `rgb(${v},${Math.max(60, v - 25)},${Math.max(55, v - 35)})`;
+        } else if (landCell && landCell.length > 0) {
+          const slot = landCell[landCell.length - 1]?.[0] ?? 0;
+          // Earthy greens/tans driven by the top land slot.
+          const hue = (slot * 53) % 70 + 30; // 30..100 (greens→yellow)
+          color = `hsl(${hue}, 32%, 34%)`;
+          if (objCell && objCell.length > 0) {
+            // Object accent — slightly lighter dot over the floor.
+            color = `hsl(${hue}, 40%, 46%)`;
+          }
+        }
+        if (color) {
+          ctx.fillStyle = color;
+          ctx.fillRect(x * cell, y * cell, cell, cell);
+        }
+      }
+    }
+    setDims({ cols, rows, cell });
+  }, [renderer, renderEpoch]);
+
+  // Viewport quadrilateral on the overview. The main canvas wrapper maps
+  // canvas-px point p to screen = containerCenter + pan + (p − canvasCenter)·zoom,
+  // so the visible canvas-px box is centered at (canvasCenter − pan/zoom)
+  // with half-extents (viewport/2)/zoom. We project the four screen-rect
+  // corners back to TILE coords (iso inverse) — an axis-aligned screen
+  // rect becomes a diamond on the flat grid — then to overview pixels.
+  const viewportPoly = (() => {
+    if (!dims || !renderMeta || zoom <= 0 || viewportW <= 0 || viewportH <= 0) {
+      return null;
+    }
+    const { cell } = dims;
+    const ccx = renderMeta.canvasW / 2;
+    const ccy = renderMeta.canvasH / 2;
+    const vcx = ccx - pan.x / zoom;
+    const vcy = ccy - pan.y / zoom;
+    const halfW = viewportW / 2 / zoom;
+    const halfH = viewportH / 2 / zoom;
+    const cornersPx: Array<[number, number]> = [
+      [vcx - halfW, vcy - halfH],
+      [vcx + halfW, vcy - halfH],
+      [vcx + halfW, vcy + halfH],
+      [vcx - halfW, vcy + halfH],
+    ];
+    // CONTINUOUS iso inverse (mirror of imagePixelToTile without its
+    // round + on-grid null-guard) so corners stay fractional and can hang
+    // off the sector edge — otherwise an off-edge corner collapses to 0.
+    const hw = renderMeta.tileW / 2;
+    const hh = renderMeta.tileH / 2;
+    const pts = cornersPx.map(([px, py]) => {
+      const A = (px + renderMeta.ixMin) / hw;
+      const B = (py + renderMeta.iyMin) / hh;
+      const tx = (A + B) / 2 - 1;
+      const ty = (B - A) / 2;
+      return { x: (tx + 0.5) * cell, y: (ty + 0.5) * cell };
+    });
+    return pts;
+  })();
+
+  const recenterFromEvent = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const cv = mapCanvasRef.current;
+    if (!cv || !dims) return;
+    const rect = cv.getBoundingClientRect();
+    // The canvas may be scaled by CSS (object-fit / max-width); map client
+    // px → canvas px → tile via the cell size.
+    const scaleX = cv.width / rect.width;
+    const scaleY = cv.height / rect.height;
+    const cx = (e.clientX - rect.left) * scaleX;
+    const cy = (e.clientY - rect.top) * scaleY;
+    const tx = Math.max(0, Math.min(dims.cols - 1, Math.floor(cx / dims.cell)));
+    const ty = Math.max(0, Math.min(dims.rows - 1, Math.floor(cy / dims.cell)));
+    onRecenter(tx, ty);
+  };
+
+  if (!renderer || !renderMeta) {
+    return (
+      <div className="p-3 text-xs italic text-gray-500">
+        No sector open. The minimap shows a downscaled overview of the
+        whole sector — click or drag it to jump the main view.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 p-2">
+      <div className="text-[10px] uppercase tracking-wider text-gray-400">
+        Overview {dims ? `(${dims.cols}×${dims.rows})` : ""}
+      </div>
+      <div className="relative inline-block w-fit max-w-full">
+        <canvas
+          ref={mapCanvasRef}
+          className="block max-w-full cursor-pointer select-none border border-gray-800 bg-gray-950"
+          style={{ imageRendering: "pixelated", touchAction: "none" }}
+          onPointerDown={(e) => {
+            draggingRef.current = true;
+            e.currentTarget.setPointerCapture(e.pointerId);
+            recenterFromEvent(e);
+          }}
+          onPointerMove={(e) => {
+            if (draggingRef.current) recenterFromEvent(e);
+          }}
+          onPointerUp={(e) => {
+            draggingRef.current = false;
+            try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+          }}
+          onPointerLeave={() => { draggingRef.current = false; }}
+        />
+        {/* Viewport rectangle overlay — an SVG sized to match the canvas
+            (in canvas-px units) and CSS-scaled with it via 100% w/h. */}
+        {viewportPoly && dims && (
+          <svg
+            className="pointer-events-none absolute left-0 top-0"
+            width="100%"
+            height="100%"
+            viewBox={`0 0 ${dims.cols * dims.cell} ${dims.rows * dims.cell}`}
+            preserveAspectRatio="none"
+          >
+            <polygon
+              points={viewportPoly.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="rgba(96,165,250,0.14)"
+              stroke="rgba(147,197,253,0.95)"
+              strokeWidth={Math.max(1, dims.cell)}
+              strokeLinejoin="round"
+            />
+          </svg>
+        )}
+      </div>
+      <div className="text-[10px] leading-tight text-gray-500">
+        Click or drag to recenter the main view. Zoom {zoom.toFixed(2)}×.
+      </div>
+    </div>
+  );
+}
 
 // Shape-kind segmented control options + per-kind tooltip.
 /** R4 history panel: the undo + redo stacks as clickable stroke lists.

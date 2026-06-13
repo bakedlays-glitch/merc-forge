@@ -28,6 +28,11 @@ export type DockPanelId =
   | "tilesetViewer"
   | "inspector"
   | "history"
+  // "minimap" is the in-editor overview navigator: a downscaled flat
+  // top-down map of the whole sector + a draggable viewport rectangle
+  // that re-centers the main canvas (R6, 2026-06-13). NOT the in-game
+  // radar STI (that's radar.py / generateRadar).
+  | "minimap"
   | "log"
   | "validate"
   | "generate";

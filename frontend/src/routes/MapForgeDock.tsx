@@ -59,13 +59,14 @@ export const PANEL_TITLE: Record<DockPanelId, string> = {
   tilesetViewer: "Tileset Viewer",
   inspector: "Inspector",
   history: "History",
+  minimap: "Minimap",
   log: "Log",
   validate: "Validation",
   generate: "Generate",
 };
 export const PANEL_ORDER: DockPanelId[] = [
   "canvas", "assets", "tilesetViewer", "inspector",
-  "history", "log", "validate", "generate",
+  "history", "minimap", "log", "validate", "generate",
 ];
 
 /** Re-add a closed panel. Used by the command bar's Panels▾ menu. */
@@ -125,6 +126,10 @@ function buildDefaultLayout(api: DockviewApi) {
     id: "history", component: "default", title: PANEL_TITLE.history,
     position: { referencePanel: "inspector", direction: "within" }, inactive: true,
   });
+  api.addPanel({
+    id: "minimap", component: "default", title: PANEL_TITLE.minimap,
+    position: { referencePanel: "inspector", direction: "within" }, inactive: true,
+  });
   const log = api.addPanel({
     id: "log", component: "default", title: PANEL_TITLE.log,
     position: { referencePanel: "canvas", direction: "below" },
@@ -148,8 +153,9 @@ const LAYOUT_STORAGE_KEY = "mapforge.dockLayout";
 // default inactive tabs of the inspector group. v8: the "palette" rail
 // and "variants" sub-frame panels were folded into the "assets" panel,
 // now the consolidated "Brush Box" (R3). v9: added the "history" panel
-// (R4 undo/redo stroke list with click-to-revert).
-const LAYOUT_VERSION = 9;
+// (R4 undo/redo stroke list with click-to-revert). v10: added the
+// "minimap" overview navigator panel (R6).
+const LAYOUT_VERSION = 10;
 
 function saveLayout(api: DockviewApi): void {
   try {
