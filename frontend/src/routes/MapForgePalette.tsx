@@ -208,39 +208,13 @@ export function MapForgePalette({
   // (frame 0) but the actual usable frames are 2-4. Null when no
   // tile is expanded.
   const [expandedSlot, setExpandedSlot] = useState<number | null>(null);
-  // Accordion model: at most one category is open at a time. Solves
-  // the "Other has 200 slots and blocks every other category once
-  // you open it" scroll wall. Initial state is null (nothing open) —
-  // the user picks what to drill into.
-  //
-  // Exception: when the search filter is active, ALL categories show
-  // their matching slots simultaneously so the user can see hits
-  // across the whole tileset. Filter takes priority over the
-  // accordion's single-expand rule.
-  const [expandedCategory, setExpandedCategory] =
-    useState<string | null>(null);
-  // Per-category refs so we can scrollIntoView the just-opened
-  // category header up to the top of the sidebar — otherwise opening
-  // a category near the bottom of the list leaves the header off-
-  // screen and the user has to scroll back up to see what they
-  // expanded.
-  const categoryRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
-
-  function toggleCategory(c: string) {
-    setExpandedCategory((prev) => {
-      const next = prev === c ? null : c;
-      // Defer the scroll until after React has rendered the new
-      // expanded state — otherwise we'd scroll to the header BEFORE
-      // its children mount, which the browser computes wrong.
-      if (next !== null) {
-        requestAnimationFrame(() => {
-          const el = categoryRefs.current.get(next);
-          if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
-        });
-      }
-      return next;
-    });
-  }
+  // Chip model: one category is "selected" at a time and its grid fills
+  // the body. (When a search filter is active we instead show matches
+  // across ALL categories — the chip selection is moot then.) Replaced
+  // the old accordion, whose single-expand rule turned the big "Other"
+  // bucket into a scroll wall. null = fall back to the first non-empty
+  // category.
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
 
   const byCategory = useMemo(() => {
     if (!palette.data) return null;
@@ -361,67 +335,90 @@ export function MapForgePalette({
             Adjust in Settings if your <code>ja2.exe</code> supports more.
           </div>
         )}
-        {palette.data && byCategory && sheetUrl && sheetMeta.data
-            && palette.data.category_order.map((cat) => {
-          const slots = byCategory[cat];
-          if (!slots || slots.length === 0) return null;
-          // Filter-active mode shows everything regardless of which
-          // category the user expanded; otherwise the accordion rule
-          // applies (only `expandedCategory` is open). Use the
-          // debounced filter so the expand-all behavior tracks what
-          // byCategory just filtered on, not the in-flight keystroke.
+        {palette.data && byCategory && sheetUrl && sheetMeta.data && (() => {
+          const order = palette.data.category_order;
+          const nonEmpty = order.filter((c) => (byCategory[c]?.length ?? 0) > 0);
+          if (nonEmpty.length === 0) {
+            return (
+              <p className="p-2 text-[11px] italic text-gray-500">
+                No slots match.
+              </p>
+            );
+          }
           const filterActive = debouncedFilter.trim().length > 0;
-          const isExpanded = filterActive || expandedCategory === cat;
-          return (
-            <div
-              key={cat}
-              className="mb-2"
-              ref={(el) => {
-                if (el) categoryRefs.current.set(cat, el);
-                else categoryRefs.current.delete(cat);
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => toggleCategory(cat)}
-                title={`${isExpanded ? "Collapse" : "Expand"} ${CATEGORY_LABELS[cat] ?? cat} (${slots.length} slot${slots.length === 1 ? "" : "s"})${filterActive ? " — filter active, all categories shown" : ""}`}
-                className={`sticky top-0 z-10 flex w-full items-center justify-between rounded px-1.5 py-1 text-left text-xs font-semibold ${
-                  isExpanded
-                    ? "bg-gray-900 text-gray-100 ring-1 ring-gray-700"
-                    : "bg-gray-950 text-gray-300 hover:bg-gray-900"
-                }`}
-              >
-                <span>
-                  {isExpanded ? "▾" : "▸"} {CATEGORY_LABELS[cat] ?? cat}
-                </span>
-                <span className="text-[10px] text-gray-500">{slots.length}</span>
-              </button>
-              {isExpanded && (
-                <CategoryGrid
-                  slots={slots}
-                  cellBySlot={cellBySlot}
-                  sheetUrl={sheetUrl}
-                  sheetW={sheetMeta.data!.sheet_w}
-                  sheetH={sheetMeta.data!.sheet_h}
-                  expandedSlot={expandedSlot}
-                  activeBrush={activeBrush}
-                  renderer={renderer}
-                  onExpandToggle={(slot) => setExpandedSlot(
-                    expandedSlot === slot ? null : slot,
-                  )}
-                  onPickSub={(slot, sub, sti_filename, category) => {
-                    onPick({
-                      slot, sub, category,
-                      layer: CATEGORY_TO_LAYER[category] ?? "structs",
-                      sti_filename,
-                    });
-                    setExpandedSlot(null);
-                  }}
-                />
+          // The selected chip if it still has slots, else the first
+          // non-empty category (selection survives filtering when possible).
+          const effectiveCat =
+            selectedCategory && (byCategory[selectedCategory]?.length ?? 0) > 0
+              ? selectedCategory
+              : nonEmpty[0]!; // nonEmpty is non-empty (guarded above)
+          const renderGrid = (cat: string) => (
+            <CategoryGrid
+              slots={byCategory[cat]!}
+              cellBySlot={cellBySlot}
+              sheetUrl={sheetUrl}
+              sheetW={sheetMeta.data!.sheet_w}
+              sheetH={sheetMeta.data!.sheet_h}
+              expandedSlot={expandedSlot}
+              activeBrush={activeBrush}
+              renderer={renderer}
+              onExpandToggle={(slot) => setExpandedSlot(
+                expandedSlot === slot ? null : slot,
               )}
-            </div>
+              onPickSub={(slot, sub, sti_filename, category) => {
+                onPick({
+                  slot, sub, category,
+                  layer: CATEGORY_TO_LAYER[category] ?? "structs",
+                  sti_filename,
+                });
+                setExpandedSlot(null);
+              }}
+            />
           );
-        })}
+          return (
+            <>
+              {/* Category chips — click to jump to a family. Counts reflect
+                  the current filter. Hidden while searching, where the body
+                  shows every matching category instead. */}
+              {!filterActive && (
+                <div className="mb-1 flex flex-wrap gap-1">
+                  {nonEmpty.map((cat) => {
+                    const isActive = cat === effectiveCat;
+                    return (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setSelectedCategory(cat)}
+                        title={`${CATEGORY_LABELS[cat] ?? cat} — ${byCategory[cat]!.length} slot${byCategory[cat]!.length === 1 ? "" : "s"}`}
+                        className={`rounded-full border px-2 py-0.5 text-[10px] ${
+                          isActive
+                            ? "border-blue-500 bg-blue-900/50 text-blue-100"
+                            : "border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800"
+                        }`}
+                      >
+                        {CATEGORY_LABELS[cat] ?? cat}
+                        <span className="ml-1 text-gray-500">{byCategory[cat]!.length}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {/* Body: the selected chip's grid, or — while searching —
+                  every matching category stacked with a small header. */}
+              {filterActive
+                ? nonEmpty.map((cat) => (
+                    <div key={cat} className="mb-2">
+                      <div className="px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                        {CATEGORY_LABELS[cat] ?? cat}
+                        <span className="ml-1 text-gray-600">{byCategory[cat]!.length}</span>
+                      </div>
+                      {renderGrid(cat)}
+                    </div>
+                  ))
+                : renderGrid(effectiveCat)}
+            </>
+          );
+        })()}
       </div>
     </div>
   );

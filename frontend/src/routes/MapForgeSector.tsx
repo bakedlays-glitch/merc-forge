@@ -581,14 +581,12 @@ function MapForgeSectorInner() {
     if (existing) {
       existing.api.setActive();
     } else {
-      // The user closed the panel's tab — re-add it beside Palette.
+      // The user closed the Brush Box tab — re-add it left of the canvas.
       api.addPanel({
         id: "assets",
         component: "default",
         title: PANEL_TITLE.assets,
-        position: api.getPanel("palette")
-          ? { referencePanel: "palette", direction: "within" }
-          : undefined,
+        position: { referencePanel: "canvas", direction: "left" },
       });
     }
   }, []);
@@ -3506,34 +3504,87 @@ function MapForgeSectorInner() {
   // below is left untouched as the safe fallback); Phase 3 will retire
   // the fixed layout and dedupe. The canvas copy fills its panel
   // (h-full) instead of the fixed layout's 70vh.
-  // Browse Assets (dock panel) = the full MapForgePalette brush picker
-  // (categorized, searchable, sub-frame picker), wired to set the active
-  // brush. This is the brush-picking surface; the read-only cross-tileset
-  // "Tileset Viewer" (MapForgeTilesetBrowser) is a SEPARATE panel. The
-  // compact rail's "Browse assets" button focuses this panel.
-  const renderAssetsPanel = () => (
+  // Brush Box (dock panel "assets") = the consolidated picker (R3): the
+  // Favorites + Recent + Just-added rail folded in ON TOP of the full
+  // searchable, categorized MapForgePalette grid (with the in-place
+  // sub-frame picker). The read-only cross-tileset "Tileset Viewer"
+  // (MapForgeTilesetBrowser) stays a SEPARATE panel. Every pick arms the
+  // pencil via armBrush.
+  const renderBrushBoxPanel = () => (
     xmlPath ? (
-      <MapForgeAssetBrowserBody
-        xmlPath={xmlPath}
-        tileset={tileset}
-        renderer={renderer}
-        activeBrush={activeBrush}
-        onPick={(b) => {
-          armBrush(b);
-          if (b) {
-            log?.append({
-              severity: "info",
-              message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
-                     + `· slot ${b.slot} sub ${b.sub} → ${b.layer}`,
-            });
-          }
-        }}
-        showShadowSlots={settings.showShadowSlots || !settings.autoPairShadows}
-        engineMaxTileSlot={settings.engineMaxTileSlot}
-      />
+      <div className="flex h-full flex-col bg-gray-950">
+        {/* Favorites → Recent → Just-added (the old rail), capped so the
+            Browse grid below always stays in view. */}
+        <div className="max-h-[45%] shrink-0 overflow-y-auto border-b border-gray-800">
+          <MapForgePaletteRail
+            embedded
+            renderer={renderer}
+            activeBrush={activeBrush}
+            recentBrushes={recentBrushes}
+            recentAdditions={recentAdditions}
+            favorites={favorites}
+            onToggleFavorite={toggleFavorite}
+            onPick={(b) => {
+              armBrush(b);
+              log?.append({
+                severity: "info",
+                message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
+                       + `· slot ${b.slot} sub ${b.sub} → ${b.layer} (recent)`,
+              });
+            }}
+            onPickAddition={(a) => {
+              armBrush({
+                slot: a.slot,
+                sub: 0,
+                category: "Library",
+                layer: "land",
+                sti_filename: a.sti_filename,
+              });
+              log?.append({
+                severity: "info",
+                message: `Brush: ${a.sti_filename.replace(/\.sti$/i, "")} `
+                       + `· slot ${a.slot} sub 0 (just-added)`,
+              });
+            }}
+            onOpenInTilesetEditor={(a) => {
+              if (localDirty) {
+                const ok = window.confirm(
+                  "You have unsaved edits in this sector. Open Tileset "
+                  + "Editor anyway and discard them?\n\n"
+                  + "OK = discard + go. Cancel = stay here so you can Save first."
+                );
+                if (!ok) return;
+              }
+              navigate(`/tileset-editor/${a.tileset}?slot=${a.slot}`);
+            }}
+            onOpenViewer={onBrowseAssets}
+          />
+        </div>
+        {/* Browse: search + category chips + thumbnail grid (in-place sub picker). */}
+        <div className="min-h-0 flex-1">
+          <MapForgeAssetBrowserBody
+            xmlPath={xmlPath}
+            tileset={tileset}
+            renderer={renderer}
+            activeBrush={activeBrush}
+            onPick={(b) => {
+              armBrush(b);
+              if (b) {
+                log?.append({
+                  severity: "info",
+                  message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
+                         + `· slot ${b.slot} sub ${b.sub} → ${b.layer}`,
+                });
+              }
+            }}
+            showShadowSlots={settings.showShadowSlots || !settings.autoPairShadows}
+            engineMaxTileSlot={settings.engineMaxTileSlot}
+          />
+        </div>
+      </div>
     ) : (
       <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-500">
-        No Ja2Set.dat.xml — asset browser unavailable
+        No Ja2Set.dat.xml — Brush Box unavailable
       </div>
     )
   );
@@ -3554,58 +3605,6 @@ function MapForgeSectorInner() {
     ) : (
       <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-500">
         No Ja2Set.dat.xml — tileset viewer unavailable
-      </div>
-    )
-  );
-
-  const renderPalettePanel = () => (
-    xmlPath ? (
-      <MapForgePaletteRail
-        renderer={renderer}
-        activeBrush={activeBrush}
-        recentBrushes={recentBrushes}
-        recentAdditions={recentAdditions}
-        favorites={favorites}
-        onToggleFavorite={toggleFavorite}
-        onPick={(b) => {
-          armBrush(b);
-          log?.append({
-            severity: "info",
-            message: `Brush: ${b.sti_filename.replace(/\.sti$/i, "")} `
-                   + `· slot ${b.slot} sub ${b.sub} → ${b.layer} (recent)`,
-          });
-        }}
-        onPickAddition={(a) => {
-          armBrush({
-            slot: a.slot,
-            sub: 0,
-            category: "Library",
-            layer: "land",
-            sti_filename: a.sti_filename,
-          });
-          log?.append({
-            severity: "info",
-            message: `Brush: ${a.sti_filename.replace(/\.sti$/i, "")} `
-                   + `· slot ${a.slot} sub 0 (just-added)`,
-          });
-        }}
-        onOpenInTilesetEditor={(a) => {
-          if (localDirty) {
-            const ok = window.confirm(
-              "You have unsaved edits in this sector. Open Tileset "
-              + "Editor anyway and discard them?\n\n"
-              + "OK = discard + go. Cancel = stay here so you can Save first."
-            );
-            if (!ok) return;
-          }
-          navigate(`/tileset-editor/${a.tileset}?slot=${a.slot}`);
-        }}
-        onOpenViewer={onBrowseAssets}
-        hideBrowseButton
-      />
-    ) : (
-      <div className="rounded border border-gray-700 bg-gray-950 p-3 text-xs text-gray-500">
-        No Ja2Set.dat.xml — palette unavailable
       </div>
     )
   );
@@ -3869,47 +3868,11 @@ function MapForgeSectorInner() {
 
   const renderLogPanel = () => <MapForgeLogFull />;
 
-  const renderVariantsDockPanel = () => {
-    // In the dock, the variant grid fills the whole panel and wraps to
-    // fit the width — no max-h cap (that's only for the compact header
-    // strip), so there's no stranded scrollbar + dead space below.
-    const subs = activeBrush && renderer ? renderer.listValidSubs(activeBrush.slot) : [];
-    if (!activeBrush || !renderer || subs.length <= 1) {
-      return (
-        <p className="p-3 text-[11px] italic text-gray-500">
-          Pick a multi-sub brush (floor, wall, road…) to see its variants.
-        </p>
-      );
-    }
-    return (
-      <div className="h-full w-full overflow-y-auto p-2">
-        <VariantTileGrid
-          subs={subs}
-          currentSub={activeBrush.sub}
-          slot={activeBrush.slot}
-          renderer={renderer}
-          onPickSub={(sub) => {
-            if (sub === activeBrush.sub) return;
-            setActiveBrush({ ...activeBrush, sub });
-            log?.append({
-              severity: "info",
-              message: `Sub ${activeBrush.sub} → ${sub} `
-                     + `(${activeBrush.sti_filename.replace(/\.sti$/i, "")})`,
-            });
-          }}
-          tileSize={40}
-        />
-      </div>
-    );
-  };
-
   const dockPanels = {
     canvas: renderCanvasPanel,
-    palette: renderPalettePanel,
-    assets: renderAssetsPanel,
+    assets: renderBrushBoxPanel,
     tilesetViewer: renderTilesetViewerPanel,
     inspector: renderInspectorPanel,
-    variants: renderVariantsDockPanel,
     log: renderLogPanel,
     validate: () => (datPath ? (
       <MapForgeValidateBody
@@ -5436,7 +5399,7 @@ function BrushChip({
             ? `MULTI-TILE STAMP (${footprint.tiles.length} pieces) — one click drops the whole footprint. Shift+click to drop just sub 1.\n`
             : "")
           + `Pencil click paints this. Right-click on a tile = eyedropper.\n`
-          + `Switch sub-frame: , / . keys, or click a thumbnail in the Variants strip.`
+          + `Switch sub-frame: , / . keys, or click a multi-frame tile in the Brush Box to pick a sub.`
         }
       >
         <AtlasFrameThumb
@@ -5469,57 +5432,6 @@ function BrushChip({
           title="Clear the active brush (you'll need to pick another before painting)"
         >✕</button>
       </div>
-    </div>
-  );
-}
-
-/** The subs→thumbnail grid for the docked Variants panel. The caller
- * owns the container (scroll / size caps) and the `tileSize`. The
- * sub-number label scales with the tile so big thumbnails stay
- * legible. */
-function VariantTileGrid({
-  subs, currentSub, slot, renderer, onPickSub, tileSize,
-}: {
-  subs: number[];
-  currentSub: number;
-  slot: number;
-  renderer: IsoRenderer | null;
-  onPickSub: (sub: number) => void;
-  tileSize: number;
-}) {
-  return (
-    <div className="flex flex-wrap items-start gap-1">
-      {subs.map((sub) => {
-        const isCurrent = sub === currentSub;
-        return (
-          <button
-            key={sub}
-            type="button"
-            onClick={() => onPickSub(sub)}
-            title={`Sub ${sub}`}
-            className={`flex flex-col items-center rounded border p-0.5 hover:bg-gray-800 ${
-              isCurrent
-                ? "border-emerald-500 bg-emerald-950/50"
-                : "border-gray-700 bg-gray-900"
-            }`}
-          >
-            <AtlasFrameThumb
-              renderer={renderer}
-              slot={slot}
-              sub={sub}
-              size={tileSize}
-            />
-            <span
-              className={`mt-px leading-none ${
-                isCurrent ? "text-emerald-300" : "text-gray-500"
-              }`}
-              style={{ fontSize: Math.max(8, Math.round(tileSize / 5)) }}
-            >
-              {sub}
-            </span>
-          </button>
-        );
-      })}
     </div>
   );
 }

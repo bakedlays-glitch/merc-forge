@@ -55,17 +55,15 @@ const DOCK_COMPONENTS = { default: DockSlot };
 
 export const PANEL_TITLE: Record<DockPanelId, string> = {
   canvas: "Canvas",
-  palette: "Palette",
-  assets: "Browse Assets",
+  assets: "Brush Box",
   tilesetViewer: "Tileset Viewer",
   inspector: "Inspector",
-  variants: "Variants",
   log: "Log",
   validate: "Validation",
   generate: "Generate",
 };
 export const PANEL_ORDER: DockPanelId[] = [
-  "canvas", "palette", "assets", "tilesetViewer", "inspector", "variants",
+  "canvas", "assets", "tilesetViewer", "inspector",
   "log", "validate", "generate",
 ];
 
@@ -78,11 +76,11 @@ export function reopenDockPanel(api: DockviewApi, id: DockPanelId): void {
   api.addPanel({ id, component: "default", title: PANEL_TITLE[id] });
 }
 
-/** Lay out (or re-lay-out) the default arrangement: narrow palette
- * column (Palette / Browse Assets / Tileset Viewer tabs + Variants
- * beneath) | big canvas | inspector group (with Validation + Generate
- * pre-created as inactive tabs), log along the bottom. Clears any
- * existing panels first so it doubles as "Reset layout". A user-saved
+/** Lay out (or re-lay-out) the default arrangement: Brush Box column
+ * (the consolidated picker, with the read-only Tileset Viewer as an
+ * inactive tab) | big canvas | inspector group (with Validation +
+ * Generate pre-created as inactive tabs), log along the bottom. Clears
+ * any existing panels first so it doubles as "Reset layout". A user-saved
  * default ("Set as default") wins over this procedural layout. */
 function buildDefaultLayout(api: DockviewApi) {
   // A user-saved default ("Set as default") wins over the built-in layout —
@@ -96,23 +94,15 @@ function buildDefaultLayout(api: DockviewApi) {
   }
   for (const p of [...api.panels]) api.removePanel(p);
   api.addPanel({ id: "canvas", component: "default", title: PANEL_TITLE.canvas });
-  // Left column: Palette + Browse Assets + Tileset Viewer as tabs on
-  // top, Variants beneath.
-  const palette = api.addPanel({
-    id: "palette", component: "default", title: PANEL_TITLE.palette,
+  // Left column: the Brush Box, with the read-only Tileset Viewer as an
+  // inactive tab beside it.
+  const brushbox = api.addPanel({
+    id: "assets", component: "default", title: PANEL_TITLE.assets,
     position: { referencePanel: "canvas", direction: "left" },
   });
   api.addPanel({
-    id: "assets", component: "default", title: PANEL_TITLE.assets,
-    position: { referencePanel: "palette", direction: "within" }, inactive: true,
-  });
-  api.addPanel({
     id: "tilesetViewer", component: "default", title: PANEL_TITLE.tilesetViewer,
-    position: { referencePanel: "palette", direction: "within" }, inactive: true,
-  });
-  const variants = api.addPanel({
-    id: "variants", component: "default", title: PANEL_TITLE.variants,
-    position: { referencePanel: "palette", direction: "below" },
+    position: { referencePanel: "assets", direction: "within" }, inactive: true,
   });
   // Right column: Inspector with Validation + Generate pre-created as
   // INACTIVE tabs in the same group — the command bar's Generate /
@@ -136,8 +126,7 @@ function buildDefaultLayout(api: DockviewApi) {
   });
   // Proportions. Best-effort — wrapped so a future dockview that renames
   // setSize can't break the whole layout build.
-  try { palette.group.api.setSize({ width: 220 }); } catch { /* best effort */ }
-  try { variants.group.api.setSize({ height: 260 }); } catch { /* best effort */ }
+  try { brushbox.group.api.setSize({ width: 280 }); } catch { /* best effort */ }
   try { inspector.group.api.setSize({ width: 360 }); } catch { /* best effort */ }
   try { log.group.api.setSize({ height: 140 }); } catch { /* best effort */ }
 }
@@ -151,8 +140,10 @@ const LAYOUT_STORAGE_KEY = "mapforge.dockLayout";
 // Bump when the panel id set changes. v7: the tool / layers / view
 // panels were removed (their content moved to the fixed command +
 // tool-options bars above the dock), and Validation/Generate became
-// default inactive tabs of the inspector group.
-const LAYOUT_VERSION = 7;
+// default inactive tabs of the inspector group. v8: the "palette" rail
+// and "variants" sub-frame panels were folded into the "assets" panel,
+// now the consolidated "Brush Box" (R3).
+const LAYOUT_VERSION = 8;
 
 function saveLayout(api: DockviewApi): void {
   try {

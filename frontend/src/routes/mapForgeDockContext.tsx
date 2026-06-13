@@ -21,11 +21,12 @@ import { createContext, useContext, type ReactNode } from "react";
  * publishes + the default layout in MapForgeDock. */
 export type DockPanelId =
   | "canvas"
-  | "palette"
+  // "assets" is the consolidated Brush Box (Favorites + Recent + the
+  // searchable categorized grid). The old separate "palette" rail and
+  // "variants" sub-frame panels were folded in (R3 Brush Box, 2026-06-13).
   | "assets"
   | "tilesetViewer"
   | "inspector"
-  | "variants"
   | "log"
   | "validate"
   | "generate";

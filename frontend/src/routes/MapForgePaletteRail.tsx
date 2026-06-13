@@ -68,6 +68,11 @@ export interface MapForgePaletteRailProps {
    * Assets panel/tab, so the rail button is redundant there; the legacy
    * layout (default false) keeps it as the only way to open the browser. */
   hideBrowseButton?: boolean;
+  /** Embedded mode: render as a content-sized section inside another
+   * panel (the consolidated Brush Box) rather than a standalone h-full
+   * column — drops the outer border, the bottom flex spacer, and the
+   * Browse button. */
+  embedded?: boolean;
 }
 
 export function MapForgePaletteRail({
@@ -75,11 +80,13 @@ export function MapForgePaletteRail({
   favorites, onToggleFavorite,
   onPick, onPickAddition, onOpenInTilesetEditor,
   onOpenViewer, recentPoppedOut = false, onTogglePopOutRecent,
-  hideBrowseButton = false,
+  hideBrowseButton = false, embedded = false,
 }: MapForgePaletteRailProps) {
   return (
-    <div className="flex h-full flex-col rounded border border-gray-700 bg-gray-950 p-2 gap-2">
-      {!hideBrowseButton && (
+    <div className={`flex flex-col gap-2 p-2 ${
+      embedded ? "" : "h-full rounded border border-gray-700 bg-gray-950"
+    }`}>
+      {!hideBrowseButton && !embedded && (
         <button
           type="button"
           onClick={onOpenViewer}
@@ -174,9 +181,9 @@ export function MapForgePaletteRail({
         </div>
       )}
 
-      {/* Flex spacer at the bottom keeps both sections stuck to the
+      {/* Flex spacer (standalone only) keeps both sections stuck to the
           top even when their lists are short. */}
-      <div className="flex-1" />
+      {!embedded && <div className="flex-1" />}
     </div>
   );
 }
