@@ -103,7 +103,7 @@ from mercwizard_core.mapforge_engine.validate import (  # noqa: E402
 )
 from mercwizard_core.vfs import parse_vfs_config, VfsConfigError  # noqa: E402
 # tile_families is pure (a static enum table) — import alongside validate.
-from mercwizard_core.mapforge.tile_families import slot_family  # noqa: E402
+from mercwizard_core.mapforge.tile_families import slot_family, MAX_TILE_SLOT  # noqa: E402
 
 
 # ─── Install-relative tileset asset resolution ─────────────────────────
@@ -1282,6 +1282,12 @@ def tileset_palette(
     for slot_idx in sorted(slot_map):
         name = slot_map[slot_idx]
         if not name:
+            continue
+        # Skip slots above the real tile-content boundary. Slots 123+ are
+        # GUNS / P*ITEMS / cursors / effects (TileTypeDefines past
+        # SECONDREVEALEDHIGHROOFS) — never paintable map tiles. They'd only
+        # land in "Other"; dropping them keeps the brush palette terrain-only.
+        if slot_idx > MAX_TILE_SLOT:
             continue
         frames = cache.get(name)
         # JSD heuristic: matching .jsd lives next to the .sti (or in
