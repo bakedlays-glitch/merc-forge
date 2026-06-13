@@ -15,6 +15,7 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import type { ActiveBrush } from "../routes/MapForgePalette";
+import type { ClipboardRegion } from "./mapClipboard";
 
 export const RECENT_BRUSHES_KEY = "mapforge.recentBrushes.v1";
 export const FAVORITE_BRUSHES_KEY = "mapforge.favoriteBrushes.v1";
@@ -55,6 +56,56 @@ function writeBucket(storageKey: string, key: string, list: ActiveBrush[]): void
   } catch {
     // Quota or JSON parse — non-fatal; user loses persistence only.
   }
+}
+
+// ─── Per-(xmlPath, tileset) copy/paste clipboard (R6) ──────────────────
+// One ClipboardRegion per bucket, so a region copied in one sector can be
+// pasted in another sector of the SAME tileset (cross-tileset paste is
+// disabled anyway). Survives reloads. Big regions that blow the localStorage
+// quota silently fall back to in-session-only (the write try/catch).
+export const CLIPBOARD_KEY = "mapforge.clipboard.v1";
+
+function readClipboard(key: string): ClipboardRegion | null {
+  try {
+    const raw = localStorage.getItem(CLIPBOARD_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, ClipboardRegion>;
+    return parsed[key] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeClipboard(key: string, clip: ClipboardRegion | null): void {
+  try {
+    const raw = localStorage.getItem(CLIPBOARD_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, ClipboardRegion>) : {};
+    if (clip === null) delete parsed[key];
+    else parsed[key] = clip;
+    localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(parsed));
+  } catch {
+    // Quota (huge region) or parse — non-fatal; clipboard stays in-session.
+  }
+}
+
+/**
+ * `[clipboard, setClipboard]` persisted per (xmlPath, tileset). Rehydrates
+ * on tileset switch; a same-tileset sector switch keeps the same key, so the
+ * clipboard persists for cross-sector paste.
+ */
+export function usePersistentClipboard(
+  xmlPath: string | undefined,
+  tileset: number,
+): [ClipboardRegion | null, Dispatch<SetStateAction<ClipboardRegion | null>>] {
+  const key = bucketKey(xmlPath, tileset);
+  const [clip, setClip] = useState<ClipboardRegion | null>(() => readClipboard(key));
+  useEffect(() => {
+    setClip(readClipboard(key));
+  }, [key]);
+  useEffect(() => {
+    writeClipboard(key, clip);
+  }, [key, clip]);
+  return [clip, setClip];
 }
 
 /**

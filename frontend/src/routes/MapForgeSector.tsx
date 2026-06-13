@@ -110,7 +110,7 @@ import {
 } from "../lib/mapforgeSettings";
 import { findShadowSlot, isShadowOnlySlot } from "../lib/jaSlotPairs";
 import {
-  usePersistentBrushBucket, sameBrush,
+  usePersistentBrushBucket, usePersistentClipboard, sameBrush,
   RECENT_BRUSHES_KEY, FAVORITE_BRUSHES_KEY,
   RECENT_BRUSHES_CAP, FAVORITE_BRUSHES_CAP,
 } from "../lib/brushBuckets";
@@ -762,26 +762,25 @@ function MapForgeSectorInner() {
   // where the marquee drag started, cursor = the live end-point. Both
   // null when no select drag is in progress. selectRect is the COMMITTED
   // rectangle (set on mouseup) — it persists so the Copy button has a
-  // region to slice. clipboard holds the last copied region (cleared on
-  // sector/tileset/session change). pasteMode = modal "click the map to
+  // region to slice. clipboard holds the last copied region — PERSISTED per
+  // (xmlPath, tileset) (R6), so a region copied in one sector pastes in
+  // another sector of the same tileset. pasteMode = modal "click the map to
   // drop the clipboard"; the next canvas click places the paste.
   const [selectAnchor, setSelectAnchor] = useState<Tile | null>(null);
   const [selectCursor, setSelectCursor] = useState<Tile | null>(null);
   const [selectRect, setSelectRect] = useState<{ a: Tile; b: Tile } | null>(null);
-  const [clipboard, setClipboard] = useState<ClipboardRegion | null>(null);
+  const [clipboard, setClipboard] = usePersistentClipboard(xmlPath, tileset);
   const [pasteMode, setPasteMode] = useState(false);
   // Synchronous re-entrancy latch for paste (see doPaste). A ref, not
   // state, because it must read/write within a single event tick.
   const pasteBusyRef = useRef(false);
-  // Clipboard + selection lifecycle. The route never remounts on a
-  // `?tileset=` / `?dat=` change (same component, new search params) and
-  // a session id is reused across the sidecar restart epoch, so a stale
-  // clipboard would otherwise survive into a different sector/tileset.
-  // Key on the RAW `tilesetParam` — NOT the resolved `tileset` memo,
-  // which flickers 0→N while the session opens and would spuriously
-  // clear a just-copied region.
+  // Selection lifecycle. The route never remounts on a `?tileset=` /
+  // `?dat=` change (same component, new search params), so the
+  // sector-specific marquee + armed-paste state must be reset by hand. The
+  // clipboard is NOT reset here — it's persisted per (xmlPath, tileset)
+  // (usePersistentClipboard) so a copied region survives a same-tileset
+  // sector switch (cross-sector paste) and rehydrates on a tileset change.
   useEffect(() => {
-    setClipboard(null);
     setSelectRect(null);
     setSelectAnchor(null);
     setSelectCursor(null);
