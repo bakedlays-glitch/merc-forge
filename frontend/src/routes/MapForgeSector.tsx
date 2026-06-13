@@ -915,6 +915,10 @@ function MapForgeSectorInner() {
   // Optional override of which layer the pencil tool paints into.
   // null = use the brush's category-implied default (CATEGORY_TO_LAYER).
   const [paintLayer, setPaintLayer] = useState<LayerName | null>(null);
+  // Erase mode (R4): when on, the pencil clears the non-ground layers
+  // (objs/shadows/structs/roofs/onroofs) at the brush-radius tiles instead
+  // of painting — "wipe but keep the floor". Needs no armed brush.
+  const [eraseMode, setEraseMode] = useState(false);
   // Brush radius in tiles. 1 = single tile (default), 2 = the clicked
   // tile + 4 neighbors (diamond of side 3), etc. The brush footprint
   // is Manhattan-distance so it stays diamond-shaped in iso space —
@@ -1216,7 +1220,7 @@ function MapForgeSectorInner() {
     // (building placement), the generator ghost is live, or a rectangle is
     // being picked.
     if (!brushGhost || !hovered || !renderMeta || tool !== "pencil"
-        || placingBuilding || ghostActive || pickingRect) {
+        || placingBuilding || ghostActive || pickingRect || eraseMode) {
       cv.style.display = "none";
       return;
     }
@@ -1233,7 +1237,7 @@ function MapForgeSectorInner() {
     cv.style.transform =
       `translate(${p.x + brushGhost.originX}px, ${p.y + brushGhost.originY}px)`;
     cv.style.display = "block";
-  }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect]);
+  }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect, eraseMode]);
 
   // Region pick for the Generate panel — drag/click two corners on the
   // canvas while the panel stays docked.
@@ -2170,6 +2174,51 @@ function MapForgeSectorInner() {
    * click/drag steps each tile exactly once. Snapshot → local apply →
    * background applyEdits, mirroring paintBrush; bumps renderEpoch so the
    * height overlay refreshes. */
+  /** Erase the non-ground layers at the brush-radius tiles around `tile`
+   * (R4 "wipe but keep the floor"): clears objs/shadows/structs/roofs/
+   * onroofs via set_entries []. Runs inside the pencil's open stroke
+   * (begin/endStroke handled by the canvas handlers), dedup'd per tile via
+   * strokeRef. Mirrors paintHeight's snapshot → local → applyEdits path. */
+  async function eraseAt(tile: { x: number; y: number }) {
+    if (!session || !renderer || session.read_only) return;
+    const cols = info.data?.cols ?? renderer.getParsed().cols;
+    const rows = info.data?.rows ?? renderer.getParsed().rows;
+    const ERASE_LAYERS: LayerName[] = ["objs", "shadows", "structs", "roofs", "onroofs"];
+    const r = brushRadius - 1;
+    const edits: SessionEdit[] = [];
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) + Math.abs(dy) > r) continue;
+        const x = tile.x + dx, y = tile.y + dy;
+        if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+        const key = `erase:${x},${y}`;
+        if (!strokeRef.current) strokeRef.current = new Set();
+        if (strokeRef.current.has(key)) continue;
+        strokeRef.current.add(key);
+        for (const l of ERASE_LAYERS) {
+          renderer.recordSnapshot(x, y, l);
+          renderer.applyLocalEdit({ x, y, op: "set_entries", layer: l, entries: [] });
+          edits.push({ x, y, op: "set_entries", layer: l, entries: [] });
+        }
+      }
+    }
+    if (edits.length === 0) return;
+    setRenderEpoch((e) => e + 1);
+    setEditsInFlight((n) => n + 1);
+    try {
+      const res = await applyEdits(session.session_id, edits);
+      setSession(res.session);
+    } catch (e) {
+      log?.append({
+        severity: "error",
+        message: "Erase sync failed — backend rejected an edit",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
   async function paintHeight(tile: { x: number; y: number }) {
     if (!session || !renderer || session.read_only) return;
     const cols = info.data?.cols ?? 0;
@@ -2472,19 +2521,26 @@ function MapForgeSectorInner() {
     if (tool === "inspect") {
       // Inspect pins on click (onCanvasClick) — nothing to do on mousedown.
     } else if (tool === "pencil") {
-      if (!activeBrush) return;
-      strokeRef.current = new Set();
-      // Stroke label reflects what the user actually did: "Stamp 2_HELI
-      // (3 tiles)" for footprint paints, "Paint w_dec01" for singles.
-      const footprint = renderer.getFootprint(activeBrush.slot);
-      const willStamp = footprint !== null
-        && ((settings.paintMode === "stamp") !== e.shiftKey);
-      const label = willStamp && footprint
-        ? `Stamp ${activeBrush.sti_filename.replace(/\.sti$/i, "")} `
-          + `(${footprint.tiles.length} tile${footprint.tiles.length === 1 ? "" : "s"})`
-        : `Paint ${activeBrush.sti_filename.replace(/\.sti$/i, "")}`;
-      renderer.beginStroke(label);
-      paintBrush(tile, e.shiftKey);
+      if (eraseMode) {
+        if (session?.read_only) return;
+        strokeRef.current = new Set();
+        renderer.beginStroke(`Erase (brush ${brushRadius})`);
+        void eraseAt(tile);
+      } else {
+        if (!activeBrush) return;
+        strokeRef.current = new Set();
+        // Stroke label reflects what the user actually did: "Stamp 2_HELI
+        // (3 tiles)" for footprint paints, "Paint w_dec01" for singles.
+        const footprint = renderer.getFootprint(activeBrush.slot);
+        const willStamp = footprint !== null
+          && ((settings.paintMode === "stamp") !== e.shiftKey);
+        const label = willStamp && footprint
+          ? `Stamp ${activeBrush.sti_filename.replace(/\.sti$/i, "")} `
+            + `(${footprint.tiles.length} tile${footprint.tiles.length === 1 ? "" : "s"})`
+          : `Paint ${activeBrush.sti_filename.replace(/\.sti$/i, "")}`;
+        renderer.beginStroke(label);
+        paintBrush(tile, e.shiftKey);
+      }
     } else if (tool === "shape") {
       // Shapes need a brush except the room tool (writes a room id, not
       // a tile). Anchor the drag; the commit happens on mouseup. A
@@ -2571,10 +2627,11 @@ function MapForgeSectorInner() {
     // Inherit the Shift state from the live mousemove so the user can
     // toggle stamp/manual mid-drag if they want to (rare but coherent).
     if (
-      tool === "pencil" && activeBrush && tile
+      tool === "pencil" && tile
       && e.buttons === 1 && strokeRef.current !== null
     ) {
-      paintBrush(tile, e.shiftKey);
+      if (eraseMode) void eraseAt(tile);
+      else if (activeBrush) paintBrush(tile, e.shiftKey);
     }
     // Shape drag: track the cursor tile so the preview overlay updates
     // live while the left button is held after an anchor.
@@ -4406,6 +4463,8 @@ function MapForgeSectorInner() {
               setPaintLayer={setPaintLayer}
               brushRadius={brushRadius}
               setBrushRadius={setBrushRadius}
+              eraseMode={eraseMode}
+              setEraseMode={setEraseMode}
             />
             <ShapeOptions
               tool={tool}
@@ -5169,6 +5228,7 @@ function ToolSelector({
  * brush itself, not next to the Tool toggle. */
 function BrushOptions({
   tool, activeBrush, paintLayer, setPaintLayer, brushRadius, setBrushRadius,
+  eraseMode, setEraseMode,
 }: {
   tool: Tool;
   activeBrush: ActiveBrush | null;
@@ -5176,11 +5236,31 @@ function BrushOptions({
   setPaintLayer: (l: LayerName | null) => void;
   brushRadius: number;
   setBrushRadius: (r: number) => void;
+  eraseMode: boolean;
+  setEraseMode: (v: boolean) => void;
 }) {
   if (tool !== "pencil") return null;
   return (
     <div className="flex items-end gap-2">
       <div>
+        <span className="block text-xs text-gray-400">Mode</span>
+        <button
+          type="button"
+          onClick={() => setEraseMode(!eraseMode)}
+          aria-pressed={eraseMode}
+          className={`rounded border px-2 py-1 text-xs ${
+            eraseMode
+              ? "border-red-500 bg-red-950/60 text-red-200"
+              : "border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800"
+          }`}
+          title={eraseMode
+            ? "Erasing: the pencil clears objects / structures / roofs (keeps the floor). Click to paint again."
+            : "Erase mode: clear objects / structures / roofs at the brush — keeps the floor. Works with brush size."}
+        >
+          {eraseMode ? "🧽 Erasing" : "🧽 Erase"}
+        </button>
+      </div>
+      <div className={eraseMode ? "opacity-40" : ""}>
         <span className="block text-xs text-gray-400">Paint to layer</span>
         <select
           value={paintLayer ?? ""}
