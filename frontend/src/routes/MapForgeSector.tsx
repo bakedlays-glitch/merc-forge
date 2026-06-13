@@ -66,6 +66,7 @@ import {
   PROGRESS_PHASE_LABELS,
   type ProgressPhase,
   type RenderMeta,
+  type GhostRegionTile,
 } from "../lib/IsoRenderer";
 import { IsoRendererGL } from "../lib/IsoRendererGL";
 import { type ActiveBrush } from "./MapForgePalette";
@@ -1148,6 +1149,71 @@ function MapForgeSectorInner() {
       + `${p.y + placementGhost.originY}px)`;
     cv.style.display = "block";
   }, [placementGhost, hovered, placementStampBusy, renderMeta]);
+
+  // ── Brush hover ghost (R3 W6) ────────────────────────────────────────
+  // The armed brush rendered as a translucent sprite at the hovered tile —
+  // the same engine the building-placement ghost uses (renderRegionToCanvas).
+  // For a multi-tile struct in stamp mode it shows the whole footprint
+  // (variant-snapped to match what a click places); otherwise the single
+  // (slot, sub) sprite. The radius / footprint OUTLINE overlays still draw
+  // as a complement. Rendered ONCE per brush change; only retranslated per
+  // hovered tile. A dedicated canvas so it never fights the placement ghost.
+  const brushGhostCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const brushGhost = useMemo(() => {
+    if (!activeBrush || !renderer) return null;
+    const layer = activeBrush.layer as LayerName;
+    const empty = (): Record<LayerName, number[][]> =>
+      ({ land: [], objs: [], shadows: [], structs: [], roofs: [], onroofs: [] });
+    const footprint = activeBrush.forceSingleTile
+      ? null
+      : renderer.getFootprint(activeBrush.slot);
+    // Default-mode preview (no Shift inversion): stamp when the slot has a
+    // footprint AND paintMode is "stamp". Mirrors paintBrush's placement +
+    // its variant-anchor sub snap.
+    const stamp = footprint !== null && settings.paintMode === "stamp";
+    let tiles: GhostRegionTile[];
+    if (stamp && footprint) {
+      const stride = footprint.tiles.length;
+      const subDelta = Math.floor((activeBrush.sub - 1) / stride) * stride;
+      tiles = footprint.tiles.map((ft) => {
+        const layers = empty();
+        layers[layer] = [[activeBrush.slot, ft.sub + subDelta]];
+        return { dx: ft.bX, dy: ft.bY, layers };
+      });
+    } else {
+      const layers = empty();
+      layers[layer] = [[activeBrush.slot, activeBrush.sub]];
+      tiles = [{ dx: 0, dy: 0, layers }];
+    }
+    return renderer.renderRegionToCanvas(tiles, 0.6);
+    // renderEpoch: re-render after an atlas hot-swap (cellMap changed).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBrush, renderer, settings.paintMode, renderEpoch]);
+  useEffect(() => {
+    const cv = brushGhostCanvasRef.current;
+    if (!cv) return;
+    // Pencil-only, and hidden while another overlay owns the ghost canvas
+    // (building placement), the generator ghost is live, or a rectangle is
+    // being picked.
+    if (!brushGhost || !hovered || !renderMeta || tool !== "pencil"
+        || placingBuilding || ghostActive || pickingRect) {
+      cv.style.display = "none";
+      return;
+    }
+    if (cv.width !== brushGhost.canvas.width
+        || cv.height !== brushGhost.canvas.height) {
+      cv.width = brushGhost.canvas.width;
+      cv.height = brushGhost.canvas.height;
+    }
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(brushGhost.canvas, 0, 0);
+    const p = tileToCanvasPixel(hovered.x, hovered.y, renderMeta);
+    cv.style.transform =
+      `translate(${p.x + brushGhost.originX}px, ${p.y + brushGhost.originY}px)`;
+    cv.style.display = "block";
+  }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect]);
 
   // Region pick for the Generate panel — drag/click two corners on the
   // canvas while the panel stays docked.
@@ -3802,6 +3868,13 @@ function MapForgeSectorInner() {
                 to the main canvas for hover + the stamp click. */}
             <canvas
               ref={ghostCanvasRef}
+              className="pointer-events-none absolute left-0 top-0 z-20"
+              style={{ imageRendering: "pixelated", display: "none" }}
+            />
+            {/* Brush hover ghost (R3) — the armed brush sprite at the
+                cursor; same z / pointer rules as the placement ghost. */}
+            <canvas
+              ref={brushGhostCanvasRef}
               className="pointer-events-none absolute left-0 top-0 z-20"
               style={{ imageRendering: "pixelated", display: "none" }}
             />
