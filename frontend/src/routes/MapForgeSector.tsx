@@ -108,6 +108,11 @@ import {
   type MapForgeSettings,
 } from "../lib/mapforgeSettings";
 import { findShadowSlot, isShadowOnlySlot } from "../lib/jaSlotPairs";
+import {
+  usePersistentBrushBucket, sameBrush,
+  RECENT_BRUSHES_KEY, FAVORITE_BRUSHES_KEY,
+  RECENT_BRUSHES_CAP, FAVORITE_BRUSHES_CAP,
+} from "../lib/brushBuckets";
 import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 import {
   shapeTiles,
@@ -617,7 +622,26 @@ function MapForgeSectorInner() {
   // and hide the page header chrome. Transient (not persisted), so a
   // reload always starts un-focused.
   const [focusMode, setFocusMode] = useState(false);
-  const [recentBrushes, setRecentBrushes] = useState<ActiveBrush[]>([]);
+  // Recent picks + Favorites — persisted per (xmlPath, tileset), the same
+  // bucket model as "Just added" (recentAdditions). Recent was RAM-only
+  // before (lost on reload); Favorites is new and addressable by number
+  // keys 1-9.
+  const [recentBrushes, setRecentBrushes] =
+    usePersistentBrushBucket(RECENT_BRUSHES_KEY, xmlPath, tileset);
+  const [favorites, setFavorites] =
+    usePersistentBrushBucket(FAVORITE_BRUSHES_KEY, xmlPath, tileset);
+  const toggleFavorite = useCallback((b: ActiveBrush) => {
+    setFavorites((prev) =>
+      prev.some((f) => sameBrush(f, b))
+        ? prev.filter((f) => !sameBrush(f, b))
+        // Newest pin wins when the 1-9 bar is full (oldest drops off).
+        : [...prev, b].slice(-FAVORITE_BRUSHES_CAP),
+    );
+  }, [setFavorites]);
+  // Ref mirror so the global keydown listener reads favorites without
+  // re-binding on every pin/unpin (matches the toggleBrowseAssetsRef pattern).
+  const favoritesRef = useRef<ActiveBrush[]>([]);
+  useEffect(() => { favoritesRef.current = favorites; }, [favorites]);
 
   // ─── Recent additions panel (user request) ──────────────
   // "Just added" is a parallel surface to "Recent picks": when the user
@@ -692,17 +716,16 @@ function MapForgeSectorInner() {
   const [activeBrush, setActiveBrush] = useState<ActiveBrush | null>(null);
   // Track recent picks for the rail's quick-switch grid. On every
   // activeBrush change (non-null), prepend to the list and dedupe by
-  // (slot, sub). Cap at 8 so the rail's 2×4 grid stays full but
-  // doesn't overflow. Eyedropper picks count too — they go through
-  // setActiveBrush like any other pick.
+  // (slot, sub). Cap at RECENT_BRUSHES_CAP, rolling over LRU-style.
+  // Eyedropper picks count too — they go through setActiveBrush (via
+  // armBrush) like any other pick. The list is persisted per tileset by
+  // usePersistentBrushBucket.
   useEffect(() => {
     if (!activeBrush) return;
-    setRecentBrushes((prev) => {
-      const filtered = prev.filter(
-        (b) => !(b.slot === activeBrush.slot && b.sub === activeBrush.sub)
-      );
-      return [activeBrush, ...filtered].slice(0, 8);
-    });
+    const brush = activeBrush;
+    setRecentBrushes((prev) =>
+      [brush, ...prev.filter((b) => !sameBrush(b, brush))].slice(0, RECENT_BRUSHES_CAP)
+    );
   }, [activeBrush]);
   // Arming a brush from ANY surface (palette, recent rail, just-added,
   // eyedropper, inspector) selects the pencil too — a pick means the user
@@ -3125,6 +3148,18 @@ function MapForgeSectorInner() {
         setShowHelp((h) => !h);
         return;
       }
+      // Number keys 1-9 arm the matching Favorites brush (Brush Box
+      // favorites row). Special-cased here rather than as 9 rebindable
+      // registry actions; skipped with any modifier so Ctrl+1 etc. stay
+      // free for the browser. 0 is left to the reset-view binding.
+      if (/^[1-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const fav = favoritesRef.current[Number(e.key) - 1];
+        if (fav) {
+          e.preventDefault();
+          armBrush(fav);
+        }
+        return;
+      }
       // Encode the event into our canonical combo format + look up.
       const combo = (() => {
         const mods: string[] = [];
@@ -3530,6 +3565,8 @@ function MapForgeSectorInner() {
         activeBrush={activeBrush}
         recentBrushes={recentBrushes}
         recentAdditions={recentAdditions}
+        favorites={favorites}
+        onToggleFavorite={toggleFavorite}
         onPick={(b) => {
           armBrush(b);
           log?.append({

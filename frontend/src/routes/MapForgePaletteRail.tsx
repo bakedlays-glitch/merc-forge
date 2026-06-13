@@ -19,6 +19,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { IsoRenderer } from "../lib/IsoRenderer";
 import { getLibraryStiThumbBlobUrl, type RecentAddition } from "../lib/mapforge";
+import { sameBrush } from "../lib/brushBuckets";
 import type { ActiveBrush } from "./MapForgePalette";
 
 export interface MapForgePaletteRailProps {
@@ -34,6 +35,11 @@ export interface MapForgePaletteRailProps {
    * (install, tileset) cycle. Index 0 = most recent. Persisted in
    * localStorage by the parent — survives page reloads. */
   recentAdditions: RecentAddition[];
+  /** Pinned favorite brushes for this (xmlPath, tileset). Shown in a
+   * dedicated row with number badges (1-9 = the keyboard accelerators). */
+  favorites: ActiveBrush[];
+  /** Pin/unpin a brush as a favorite (star toggle on any brush tile). */
+  onToggleFavorite: (b: ActiveBrush) => void;
   /** Re-select a recent brush. Fires the same onPick path as the
    * full palette so the parent's setActiveBrush + log emission run
    * exactly once per pick regardless of which UI surfaced the click. */
@@ -66,6 +72,7 @@ export interface MapForgePaletteRailProps {
 
 export function MapForgePaletteRail({
   renderer, activeBrush, recentBrushes, recentAdditions,
+  favorites, onToggleFavorite,
   onPick, onPickAddition, onOpenInTilesetEditor,
   onOpenViewer, recentPoppedOut = false, onTogglePopOutRecent,
   hideBrowseButton = false,
@@ -81,6 +88,27 @@ export function MapForgePaletteRail({
         >
           📚 Browse assets <span className="text-[9px] text-blue-300">(A)</span>
         </button>
+      )}
+
+      {/* Favorites — pinned brushes with number-key accelerators (1-9).
+          Star any tile to pin it here. Hidden until the first pin. */}
+      {favorites.length > 0 && (
+        <div className="flex flex-col gap-0.5">
+          <span className="text-[10px] uppercase tracking-wider text-amber-400">
+            Favorites <span className="text-gray-600">(1-9)</span>
+          </span>
+          <RecentBrushGrid
+            recentBrushes={favorites}
+            renderer={renderer}
+            activeBrush={activeBrush}
+            onPick={onPick}
+            size={44}
+            cols={2}
+            favoriteBrushes={favorites}
+            onToggleFavorite={onToggleFavorite}
+            showFavoriteNumbers
+          />
+        </div>
       )}
 
       {/* Retracts entirely when popped out (item 3) — the palette lives
@@ -115,6 +143,8 @@ export function MapForgePaletteRail({
               onPick={onPick}
               size={44}
               cols={2}
+              favoriteBrushes={favorites}
+              onToggleFavorite={onToggleFavorite}
             />
           )}
         </div>
@@ -157,6 +187,7 @@ export function MapForgePaletteRail({
  * number — Tailwind's grid-cols-N is build-time only. */
 export function RecentBrushGrid({
   recentBrushes, renderer, activeBrush, onPick, size = 44, cols = 2,
+  favoriteBrushes, onToggleFavorite, showFavoriteNumbers = false,
 }: {
   recentBrushes: ActiveBrush[];
   renderer: IsoRenderer | null;
@@ -166,6 +197,13 @@ export function RecentBrushGrid({
   /** Fixed column count, or <= 0 for responsive auto-fill keyed to
    * `size` (used by the resizable pop-out panel so tiles reflow). */
   cols?: number;
+  /** Current favorites — drives each tile's pin (★/☆) state. */
+  favoriteBrushes?: ActiveBrush[];
+  /** When set, each tile shows a star button to pin/unpin. */
+  onToggleFavorite?: (b: ActiveBrush) => void;
+  /** When true, tiles show their 1-based index as a number badge — the
+   * keyboard accelerator (1-9). Used by the Favorites row. */
+  showFavoriteNumbers?: boolean;
 }) {
   const template = cols > 0
     ? `repeat(${cols}, minmax(0, 1fr))`
@@ -175,7 +213,7 @@ export function RecentBrushGrid({
       className="grid gap-1"
       style={{ gridTemplateColumns: template }}
     >
-      {recentBrushes.map((b) => (
+      {recentBrushes.map((b, i) => (
         <RecentBrushTile
           key={`${b.slot}-${b.sub}`}
           brush={b}
@@ -186,6 +224,9 @@ export function RecentBrushGrid({
             && activeBrush?.sub === b.sub
           }
           onClick={() => onPick(b)}
+          isFavorite={favoriteBrushes?.some((f) => sameBrush(f, b)) ?? false}
+          onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(b) : undefined}
+          favoriteNumber={showFavoriteNumbers && i < 9 ? i + 1 : undefined}
         />
       ))}
     </ul>
@@ -199,12 +240,18 @@ export function RecentBrushGrid({
  * larger). */
 function RecentBrushTile({
   brush, renderer, isActive, onClick, size = 44,
+  isFavorite = false, onToggleFavorite, favoriteNumber,
 }: {
   brush: ActiveBrush;
   renderer: IsoRenderer | null;
   isActive: boolean;
   onClick: () => void;
   size?: number;
+  isFavorite?: boolean;
+  /** When set, the tile shows a ★/☆ button to pin/unpin this brush. */
+  onToggleFavorite?: () => void;
+  /** When set, shows a number badge (the keyboard accelerator 1-9). */
+  favoriteNumber?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [missing, setMissing] = useState(false);
@@ -218,13 +265,14 @@ function RecentBrushTile({
 
   const stiLabel = brush.sti_filename.replace(/\.sti$/i, "");
   return (
-    <li>
+    <li className="relative">
       <button
         type="button"
         onClick={onClick}
         title={
           `${brush.sti_filename}\n`
           + `slot ${brush.slot} sub ${brush.sub} → ${brush.layer}`
+          + (favoriteNumber ? `\nPress ${favoriteNumber} to arm` : "")
         }
         className={`flex w-full flex-col items-center rounded border p-1 text-[8px] hover:bg-gray-800 ${
           isActive
@@ -255,6 +303,27 @@ function RecentBrushTile({
         </span>
         <span className="text-gray-600">s{brush.slot}/{brush.sub}</span>
       </button>
+      {favoriteNumber !== undefined && (
+        <span
+          className="pointer-events-none absolute left-0.5 top-0.5 rounded bg-amber-700/90 px-1 text-[8px] font-semibold leading-none text-amber-50"
+          title={`Press ${favoriteNumber} to arm`}
+        >
+          {favoriteNumber}
+        </span>
+      )}
+      {onToggleFavorite && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+          title={isFavorite ? "Unpin from Favorites" : "Pin to Favorites"}
+          aria-label={isFavorite ? "Unpin from Favorites" : "Pin to Favorites"}
+          className={`absolute right-0 top-0 rounded px-0.5 text-[11px] leading-none ${
+            isFavorite ? "text-amber-300" : "text-gray-600 hover:text-amber-300"
+          }`}
+        >
+          {isFavorite ? "★" : "☆"}
+        </button>
+      )}
     </li>
   );
 }
