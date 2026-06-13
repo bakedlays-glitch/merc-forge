@@ -34,6 +34,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   veg: "Vegetation",
   scatter: "Scatter / Decals",
   vehicle: "Vehicles",
+  shadow: "Shadows",
   other: "Other / Uncategorized",
 };
 
@@ -50,6 +51,7 @@ export const CATEGORY_TO_LAYER: Record<string, string> = {
   veg: "objs",
   scatter: "objs",
   vehicle: "structs",
+  shadow: "shadows",
   other: "structs",
 };
 

@@ -102,6 +102,8 @@ from mercwizard_core.mapforge_engine.validate import (  # noqa: E402
     validate_parsed, Finding,
 )
 from mercwizard_core.vfs import parse_vfs_config, VfsConfigError  # noqa: E402
+# tile_families is pure (a static enum table) — import alongside validate.
+from mercwizard_core.mapforge.tile_families import slot_family  # noqa: E402
 
 
 # ─── Install-relative tileset asset resolution ─────────────────────────
@@ -1169,11 +1171,14 @@ def sti_frame_count(
 
 # ─── Tileset palette (Phase 2B) ───────────────────────────────────────
 # Categorized slot inventory the frontend uses to render the asset
-# sidebar. Categories are derived from filename heuristics first (cheap,
-# good enough for the common patterns) — JSD/aux-data introspection
-# would give us authoritative type bits but isn't needed yet.
+# sidebar. Categories come from the authoritative TileDat slot→family
+# table (`tile_families.slot_family`, baked from the TileTypeDefines enum)
+# — the slot number IS the engine tile-type, so this is exact and empties
+# the old 200-slot "Other" bucket. The filename heuristic below is kept
+# only as a fallback for slots the table doesn't cover (item/UI slots,
+# which the palette filters out anyway).
 
-# Filename-prefix → category mapping. Order matters (first match wins).
+# Filename-prefix → category mapping (FALLBACK). Order matters (first match wins).
 _PALETTE_RULES: list[tuple[str, str]] = [
     # (substring-case-insensitive, category)
     ("floor",      "floor"),
@@ -1223,10 +1228,12 @@ _PALETTE_RULES: list[tuple[str, str]] = [
     ("tank",       "vehicle"),
 ]
 
-# Category display order in the UI.
+# Category display order in the UI. "shadow" groups the drop-shadow slots
+# (only visible when the Show-shadows toggle is on); "other" catches any
+# fallback-classified slot.
 PALETTE_CATEGORY_ORDER = [
     "floor", "wall", "door", "window", "roof",
-    "furniture", "veg", "scatter", "vehicle", "other",
+    "furniture", "veg", "scatter", "vehicle", "shadow", "other",
 ]
 
 
@@ -1296,7 +1303,9 @@ def tileset_palette(
             slot=slot_idx,
             sti_filename=name,
             frame_count=len(frames),
-            category=_categorize_sti(name),
+            # Authoritative slot→family table first; filename heuristic only
+            # for slots the table doesn't cover (item/UI slots, filtered out).
+            category=slot_family(slot_idx) or _categorize_sti(name),
             has_jsd=has_jsd,
         ))
     return TilesetPalette(
