@@ -665,6 +665,12 @@ const SlotTile = memo(function SlotTile({
 }: SlotTileProps) {
   const isMultiTile = footprintSize >= 2;
   const isSingleFrame = slot.frame_count <= 1;
+  // A multi-sub single-tile slot opens the inline sub-frame picker so the
+  // user can pick the exact frame (e.g. BLTRUCK: frame 0 is the shadow,
+  // the usable art is frames 2-4). Single-frame slots and multi-tile
+  // structs commit directly at sub 1 (the painter expands a multi-tile
+  // click into the whole footprint via the JSD manifest).
+  const opensPicker = !isSingleFrame && !isMultiTile;
   const titleParts = [
     slot.sti_filename,
     `slot ${slot.slot}`,
@@ -673,15 +679,19 @@ const SlotTile = memo(function SlotTile({
   if (isMultiTile) {
     titleParts.push(`multi-tile struct (${footprintSize} tiles — one click stamps the whole thing)`);
   } else if (slot.has_jsd) titleParts.push("has JSD (single-tile)");
-  const tip = titleParts.join(" · ") + "\nClick to set as active brush"
-    + (slot.frame_count > 1 ? " — pick the sub-frame in the Variants panel" : "");
+  const tip = titleParts.join(" · ") + "\n"
+    + (opensPicker ? "Click to pick a sub-frame in place" : "Click to set as active brush");
   return (
     <button
       type="button"
-      // Always commit the slot at sub 1 — sub-frame selection moved to the
-      // Variants panel (the inline expander was removed). Multi-tile slots
-      // still stamp their whole footprint via the painter.
-      onClick={() => onPickSlot(slot.slot, slot.sti_filename, slot.category)}
+      // Multi-sub single-tile slots open the inline sub-frame picker;
+      // everything else commits directly (single-frame, or a multi-tile
+      // struct whose click stamps the whole footprint at sub 1).
+      onClick={() =>
+        opensPicker
+          ? onExpandSlot(slot.slot)
+          : onPickSlot(slot.slot, slot.sti_filename, slot.category)
+      }
       title={tip}
       className={`relative flex flex-col items-center rounded border p-1 text-[9px] hover:bg-gray-800 ${
         isExpanded
