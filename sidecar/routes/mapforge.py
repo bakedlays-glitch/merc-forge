@@ -1995,10 +1995,16 @@ class _SessionStore:
         with self._lock:
             self._evict_idle_locked()
             if len(self._sessions) >= _MAX_SESSIONS:
-                # Evict the oldest by last_used_at, regardless of idle status.
-                oldest_id = min(self._sessions,
-                                key=lambda k: self._sessions[k].last_used_at)
-                del self._sessions[oldest_id]
+                # Evict the oldest CLEAN session by last_used_at. NEVER a
+                # dirty one — its unsaved edits live only here, so dropping
+                # it silently loses the user's work (R6 trust fix). If every
+                # session is dirty, we let the cap be exceeded rather than
+                # lose anything.
+                clean = [k for k, s in self._sessions.items() if not s.dirty]
+                if clean:
+                    oldest_id = min(clean,
+                                    key=lambda k: self._sessions[k].last_used_at)
+                    del self._sessions[oldest_id]
             self._sessions[sess.id] = sess
         return sess
 
@@ -2024,9 +2030,14 @@ class _SessionStore:
             return list(self._sessions.values())
 
     def _evict_idle_locked(self) -> None:
+        # Drop sessions idle past the timeout — but NEVER a dirty one. Its
+        # unsaved edits live only in memory here, so evicting on idle would
+        # silently lose them (R6 trust fix). Dirty idle sessions persist
+        # until saved or explicitly closed.
         now = time.time()
         for sid in list(self._sessions):
-            if now - self._sessions[sid].last_used_at > _SESSION_IDLE_TIMEOUT:
+            sess = self._sessions[sid]
+            if not sess.dirty and now - sess.last_used_at > _SESSION_IDLE_TIMEOUT:
                 del self._sessions[sid]
 
 
