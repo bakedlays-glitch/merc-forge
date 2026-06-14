@@ -257,14 +257,18 @@ _CELL_SIZES = {
     "bigface":   (106, 122),
 }
 # When the requested size's STI is missing for a slot, try these other
-# sizes (in order) and scale whatever decodes to the requested cell. A
-# bigface request falling back to a small face upscales (NEAREST) — ugly
-# but better than a blank cell for the rare NPC that ships only one size.
+# sizes (in order) and scale whatever decodes to the requested cell.
+# Ordered LARGEST-real-face first to minimize upscaling blur: the decoded
+# faces are SmallFace 48x43 > "65FACE" 31x27 > "33FACE" 15x14 (the folder
+# names don't match pixel dims), with BigFace 106x122 the largest overall.
+# A BigFace-less merc (most NPCs) thus upscales from the 48x43 SmallFace,
+# not the tiny 31x27 — a real (enlarged) face beats a blank cell or a
+# blocky 3.4x blow-up.
 _FALLBACK_ORDER = {
     "smallface": ("bigface", "face_65", "face_33"),
-    "bigface":   ("face_65", "face_33", "smallface"),
-    "face_65":   ("bigface", "face_33", "smallface"),
-    "face_33":   ("face_65", "bigface", "smallface"),
+    "bigface":   ("smallface", "face_65", "face_33"),
+    "face_65":   ("smallface", "bigface", "face_33"),
+    "face_33":   ("face_65", "smallface", "bigface"),
 }
 _GRID_COLS = 16  # 16 cells per row — matches the roster grid layout
 
@@ -315,45 +319,44 @@ def _bake_portrait_sheet(ctx, size: str) -> tuple[bytes, dict]:
         # other slot it's the "no portrait assigned" default, so skip those.
         if face_index == 0 and slot != 0:
             continue
-        result = ctx.face_sti_bytes(face_index, size=size)
-        if result is None:
-            # Some mercs ship only one face-size variant (an NPC with a
-            # BigFace but no SmallFace, or vice-versa). Fall back to any
-            # other available size — the bake scales whatever it decodes
-            # to the requested cell size below.
-            for _fb in _FALLBACK_ORDER.get(size, ()):
-                result = ctx.face_sti_bytes(face_index, size=_fb)
-                if result is not None:
-                    break
-        if result is None:
+        # Resolve the slot's face by trying the requested size first, then
+        # the fallbacks (largest-real-face first). Crucially we accept the
+        # first candidate that BOTH exists AND decodes — picking by file
+        # existence alone would drop a merc whose SmallFace file is present
+        # but undecodable (16-bit / malformed palette) even when its
+        # 65FACE variant decodes fine. decode_sti_frame_to_png returns PNG
+        # bytes; we re-open into PIL to composite (the ~1ms round-trip
+        # beats refactoring the decoder to optionally return PIL).
+        candidates = (size, *_FALLBACK_ORDER.get(size, ()))
+        img: Optional[Image.Image] = None
+        last_reason = "STI not found (loose or in any SLF)"
+        for cand in candidates:
+            res = ctx.face_sti_bytes(face_index, size=cand)
+            if res is None:
+                continue
+            cand_bytes, _source_id = res
+            png_bytes = decode_sti_frame_to_png(cand_bytes, frame_index=0)
+            if png_bytes is None:
+                last_reason = (
+                    f"{cand} decode returned None "
+                    f"(likely 16-bit STI or malformed palette)"
+                )
+                continue
+            try:
+                img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+                break
+            except Exception as e:  # noqa: BLE001
+                last_reason = f"{cand} PIL re-decode failed: {type(e).__name__}"
+                img = None
+                continue
+        if img is None:
             errors.append({
-                "slot": slot, "face_index": face_index,
-                "reason": "STI not found (loose or in any SLF)",
-            })
-            continue
-        sti_bytes, _source_id = result
-        # decode_sti_frame_to_png returns PNG-encoded bytes; we want a
-        # PIL image to composite. Re-decode the PNG into PIL. The
-        # round-trip costs ~1ms per slot — small vs the alternative of
-        # refactoring decode_sti_frame_to_png to optionally return PIL.
-        png_bytes = decode_sti_frame_to_png(sti_bytes, frame_index=0)
-        if png_bytes is None:
-            errors.append({
-                "slot": slot, "face_index": face_index,
-                "reason": "decoder returned None (likely 16-bit STI or malformed palette)",
+                "slot": slot, "face_index": face_index, "reason": last_reason,
             })
             _log.warning(
-                "portrait sheet bake: slot %d face %d (%s) — decode failed",
-                slot, face_index, size,
+                "portrait sheet bake: slot %d face %d (%s) — no decodable face (%s)",
+                slot, face_index, size, last_reason,
             )
-            continue
-        try:
-            img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-        except Exception as e:  # noqa: BLE001
-            errors.append({
-                "slot": slot, "face_index": face_index,
-                "reason": f"PIL re-decode failed: {type(e).__name__}",
-            })
             continue
         decoded.append((slot, face_index, img))
 
