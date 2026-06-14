@@ -58,10 +58,20 @@ export interface GeneratePanelProps {
    * INHERIT it on selection (hunting slot numbers when the brush
    * already holds the right tree was the #1 usability complaint). */
   activeBrush: ActiveBrush | null;
-  /** Ask the parent to enter region-pick mode on the canvas; `cb` fires
-   * with the two picked corners. The panel stays open the whole time —
-   * no modal close/reopen dance. */
+  /** Ask the parent to enter STICKY box-region-pick mode on the canvas:
+   * the user drags a box (or clicks two corners) and `cb` fires with the
+   * two corners — and the mode RE-ARMS so the next drag re-aims the same
+   * generator without pressing a button again. Stays armed until
+   * `cancelRegionPick()` (panel deselect / unmount). */
   pickRegion(cb: (c1: XY, c2: XY) => void): void;
+  /** Sticky single-click point pick — for center/focal generators
+   * (density-falloff): every left click on the map fires `cb` with the
+   * clicked tile (the focal point), staying armed for re-aim. The radius
+   * is set by the slider, not derived from a box. */
+  pickPoint(cb: (t: XY) => void): void;
+  /** Disarm whatever region/point pick is active (panel switched
+   * generators or unmounted). */
+  cancelRegionPick(): void;
   /** Ghost the given (backend-shaped) ops into the local renderer ONLY
    * — bypasses undo/dirty entirely; parent blocks canvas tools while a
    * ghost is live. */
@@ -206,27 +216,41 @@ const PRESETS: Record<string, Array<{ label: string; values: Record<string, unkn
   ],
 };
 
-// Params hidden from the form (the region block owns them).
+// Params hidden from the form (the region block / map interaction owns
+// them). For the "center" (focal) scheme we hide ONLY center_x/center_y —
+// those come from clicking the map — and leave `radius` to render as a
+// normal slider, so you set the focal point on the map and the size with
+// a slider instead of dragging a box to imply a circle.
 function hiddenParams(scheme: RegionScheme | null): Set<string> {
-  return new Set(scheme ? SCHEME_PARAMS[scheme] : []);
+  if (!scheme) return new Set();
+  if (scheme === "center") return new Set(["center_x", "center_y"]);
+  return new Set(SCHEME_PARAMS[scheme]);
 }
 
 // ─── Generator picker cards ───────────────────────────────────────────
-// Visual picker metadata: icon glyph + short name + one-line purpose.
-// Honest buttons, not thumbnails — the list is fixed (compiled-in
-// registry), so unknown names just fall back to the API label.
-const GEN_META: Record<string, { icon: string; title: string; blurb: string; order: number }> = {
-  scatter: { icon: "∴", title: "Scatter", blurb: "Random spread with spacing", order: 1 },
-  cluster: { icon: "⁂", title: "Cluster", blurb: "Groves & clumped patches", order: 2 },
-  "density-falloff": { icon: "◎", title: "Density falloff", blurb: "Dense at center, sparse out", order: 3 },
-  fill: { icon: "▦", title: "Fill layer", blurb: "Flood one layer with a tile", order: 4 },
-  rect: { icon: "▭", title: "Rectangle", blurb: "Outline or filled box", order: 5 },
-  bank: { icon: "⛰", title: "Cliff / bank", blurb: "Raised plateau or escarpment", order: 6 },
-  wipe: { icon: "⌫", title: "Wipe sector", blurb: "Clear every tile, every layer", order: 7 },
-  // The canon Building Library above is the real building flow — the
-  // generic corpus stamp stays available but demoted to last place.
-  building: { icon: "⌂", title: "Building (generic)", blurb: "Prefer the Library above", order: 8 },
+// Visual picker metadata: icon glyph + short name + one-line purpose +
+// the section it lives under. Honest buttons, not thumbnails — the list
+// is fixed (compiled-in registry), so unknown names fall back to the API
+// label in the "Other" section.
+//
+// `group` sorts the cards into four labeled sections instead of one flat
+// 2-col pile (the panel read as "uneven" with object-scatters, a terrain
+// tool and destructive utilities all jumbled together). The generic
+// `building` stamp is intentionally ABSENT — its card is removed (the
+// Building Library above is the real flow); the backend generator stays
+// registered so the `:gen building` console command still works.
+type GenGroup = "Scatter" | "Shapes" | "Terrain" | "Utilities";
+const GEN_META: Record<string, { icon: string; title: string; blurb: string; order: number; group: GenGroup }> = {
+  scatter: { icon: "∴", title: "Scatter", blurb: "Random spread with spacing", order: 1, group: "Scatter" },
+  cluster: { icon: "⁂", title: "Cluster", blurb: "Groves & clumped patches", order: 2, group: "Scatter" },
+  "density-falloff": { icon: "◎", title: "Density falloff", blurb: "Dense near a focal point", order: 3, group: "Scatter" },
+  fill: { icon: "▦", title: "Fill layer", blurb: "Flood one layer with a tile", order: 4, group: "Shapes" },
+  rect: { icon: "▭", title: "Rectangle", blurb: "Outline or filled box", order: 5, group: "Shapes" },
+  bank: { icon: "⛰", title: "Cliff / bank", blurb: "Raised plateau or escarpment", order: 6, group: "Terrain" },
+  autoshadow: { icon: "◐", title: "Auto-shadow", blurb: "Add shadows to placed art", order: 7, group: "Utilities" },
+  wipe: { icon: "⌫", title: "Wipe sector", blurb: "Clear every tile, every layer", order: 8, group: "Utilities" },
 };
+const GEN_GROUP_ORDER: GenGroup[] = ["Scatter", "Shapes", "Terrain", "Utilities"];
 
 // ─── Named "don't place on" masks ─────────────────────────────────────
 // Mirrors NAMED_MASKS in sidecar/mercwizard_core/mapforge/generators.py
@@ -249,7 +273,7 @@ function parseAvoidNamed(v: unknown): Set<string> {
 
 export function MapForgeGeneratePanel({
   sessionId, renderer, readOnly, xmlPath, tileset, activeBrush,
-  pickRegion, applyGhostOps, clearGhost, ghostActive,
+  pickRegion, pickPoint, cancelRegionPick, applyGhostOps, clearGhost, ghostActive,
   setPlacement, placementActive,
   onOp, onComplete,
 }: GeneratePanelProps) {
@@ -260,7 +284,15 @@ export function MapForgeGeneratePanel({
     staleTime: Infinity,
   });
 
+  // Which subsystem this panel is showing. The Building Library and the
+  // procedural generators are distinct tools that were stacked in one
+  // column (too crowded — user feedback); a top toggle shows one at a
+  // time. Generators is the panel's namesake, so it's the default.
+  const [mode, setMode] = useState<"generators" | "buildings">("generators");
   const [selectedName, setSelectedName] = useState<string>("");
+  // Once a generator is picked the 8-card grid collapses to a compact
+  // active row (the params need the vertical space); "Change" re-expands.
+  const [pickerExpanded, setPickerExpanded] = useState(false);
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [autoPreview, setAutoPreview] = useState(true);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -304,12 +336,45 @@ export function MapForgeGeneratePanel({
   // brush) — from then on, brush changes stop auto-overwriting them.
   const slotTouchedRef = useRef(false);
 
+  // Sticky region interaction: while a region generator is selected, the
+  // CANVAS sets its region directly — no "Drag region" button first. Box
+  // schemes capture a box drag; the focal (center) scheme captures a
+  // single click as the focal point (radius stays on its slider). The
+  // parent keeps the mode armed (re-aims on every pick); we disarm it
+  // when the generator changes or the panel unmounts. Refs keep the
+  // effect from re-arming just because a parent callback changed identity.
+  const pickRegionRef = useRef(pickRegion);
+  pickRegionRef.current = pickRegion;
+  const pickPointRef = useRef(pickPoint);
+  pickPointRef.current = pickPoint;
+  const cancelRegionPickRef = useRef(cancelRegionPick);
+  cancelRegionPickRef.current = cancelRegionPick;
+  useEffect(() => {
+    if (!selected || !scheme || readOnly) { cancelRegionPickRef.current(); return; }
+    if (scheme === "center") {
+      pickPointRef.current((t) => {
+        setValues((prev) => ({ ...prev, center_x: t.x, center_y: t.y }));
+      });
+    } else {
+      pickRegionRef.current((c1, c2) => {
+        setValues((prev) => applyPickedRegion(scheme, prev, c1, c2));
+      });
+    }
+    return () => cancelRegionPickRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedName, scheme, readOnly]);
+
   const selectGenerator = (name: string) => {
     previewAbortRef.current?.abort();
     clearGhost();
+    // Generators and building placement are mutually exclusive — picking
+    // a generator card disarms any armed building (the parent disarms the
+    // pick in the other direction).
+    setPlacement(null);
     setPreviewCount(null);
     setPreviewError(null);
     setSelectedName(name);
+    setPickerExpanded(false);   // collapse the card grid to the active row
     slotTouchedRef.current = false;
     const g = (list.data ?? []).find((x) => x.name === name);
     const defaults: Record<string, unknown> = {};
@@ -332,8 +397,45 @@ export function MapForgeGeneratePanel({
         defaults.layer = activeBrush.layer;
       }
     }
+    // Seed a SENSIBLE DEFAULT REGION so the generator previews the moment
+    // it's selected — no "drag a box before anything happens" dead state.
+    // Only the GATED schemes need this: corners (rect, cliff) require a
+    // box >1 tile to preview/Apply, so default them to a centered box; the
+    // focal (center) scheme defaults its focal point to map-center.
+    // Scatter/cluster ("region") already treat all-zeros as "whole map"
+    // and preview immediately, so they keep that default untouched.
+    const sc = g ? regionScheme(g) : null;
+    const parsed = renderer?.getParsed();
+    if (parsed && sc === "corners") {
+      const cx = Math.floor(parsed.cols / 2);
+      const cy = Math.floor(parsed.rows / 2);
+      const hw = Math.max(2, Math.floor(parsed.cols / 4));
+      const hh = Math.max(2, Math.floor(parsed.rows / 4));
+      Object.assign(defaults, { x1: cx - hw, y1: cy - hh, x2: cx + hw, y2: cy + hh });
+    } else if (parsed && sc === "center") {
+      Object.assign(defaults, { center_x: Math.floor(parsed.cols / 2), center_y: Math.floor(parsed.rows / 2) });
+    }
     setValues(defaults);
   };
+
+  // ESC dismisses the whole generator: deselect it (which clears the
+  // ghost) and the region-arm effect's cleanup disarms the canvas pick.
+  // The single intuitive "get me out" gesture — the canvas pick owns the
+  // map while a generator is selected, so the parent leaves ESC to us.
+  // Ignored while typing in a param field.
+  useEffect(() => {
+    if (!selectedName) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      e.preventDefault();
+      selectGenerator("");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedName]);
 
   /** Re-sync slot/sub/layer from the current brush on demand. */
   const useBrush = () => {
@@ -593,99 +695,182 @@ export function MapForgeGeneratePanel({
 
   return (
     <div className="flex h-full flex-col gap-2 p-2 text-xs">
+      {/* Mode toggle — the Building Library and the procedural generators
+          are distinct tools; show ONE at a time (stacked, they overcrowded
+          the column — user feedback). */}
+      <div className="flex shrink-0 overflow-hidden rounded border border-gray-700">
+        {([["generators", "⚙ Generators"], ["buildings", "🏛 Buildings"]] as const).map(([m, label]) => (
+          <button
+            key={m}
+            type="button"
+            data-gen-mode={m}
+            onClick={() => {
+              // Leaving a subsystem tears down its canvas state so a ghost
+              // / armed pick / armed building never lingers under the
+              // other tab's controls.
+              if (m === "buildings") selectGenerator("");  // drop the generator
+              else setPlacement(null);                     // drop any building
+              setMode(m);
+            }}
+            className={`flex-1 px-2 py-1.5 text-xs font-medium ${
+              mode === m
+                ? "bg-emerald-700/40 text-emerald-100"
+                : "bg-gray-900 text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Canon building library — the headline building flow. Real
           buildings grafted verbatim from this tileset's actual maps:
           click a thumbnail card → placement arms with a real sprite
           ghost at the cursor → click stamps it. */}
-      <BuildingLibrarySection
-        sessionId={sessionId}
-        renderer={renderer}
-        xmlPath={xmlPath}
-        tileset={tileset}
-        running={running}
-        clearGhost={() => {
-          previewAbortRef.current?.abort();
-          clearGhost();
-          setPreviewCount(null);
-        }}
-        setPlacement={setPlacement}
-        placementActive={placementActive}
-        onComplete={onComplete}
-      />
-      {/* Generator picker — visual cards (icon + name + purpose), same
-          selection semantics as the old dropdown. */}
-      <div className="grid grid-cols-2 gap-1" data-gen-cards>
-        {[...(list.data ?? [])]
+      {mode === "buildings" && (
+        <BuildingLibrarySection
+          sessionId={sessionId}
+          renderer={renderer}
+          xmlPath={xmlPath}
+          tileset={tileset}
+          running={running}
+          clearGhost={() => {
+            previewAbortRef.current?.abort();
+            clearGhost();
+            setPreviewCount(null);
+          }}
+          setPlacement={setPlacement}
+          placementActive={placementActive}
+          onComplete={onComplete}
+        />
+      )}
+
+      {mode === "generators" && (
+        <>
+          {selected && !pickerExpanded ? (
+        /* Collapsed picker: the chosen generator as one compact row, so
+           the params own the vertical space. "Change" re-expands the grid. */
+        <div className="flex shrink-0 items-center gap-1.5 rounded border border-emerald-500 bg-emerald-950/50 px-2 py-1">
+          <span className="w-4 shrink-0 text-center text-sm leading-none text-emerald-300">
+            {GEN_META[selectedName]?.icon ?? "⚙"}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-emerald-100">
+            {GEN_META[selectedName]?.title ?? selected.label}
+          </span>
+          <button
+            type="button"
+            data-gen-change
+            onClick={() => setPickerExpanded(true)}
+            className="shrink-0 rounded border border-gray-600 bg-gray-800 px-2 py-0.5 text-[10px] text-gray-200 hover:bg-gray-700"
+          >
+            Change ▾
+          </button>
+        </div>
+      ) : (
+        /* Full picker grid — visual cards grouped into labeled sections.
+           The generic `building` stamp is dropped here (Buildings tab is
+           the real flow); its backend generator stays for the console. */
+        <div className="shrink-0 space-y-1.5">
+          {GEN_GROUP_ORDER.map((groupName) => {
+        const cards = [...(list.data ?? [])]
+          .filter((g) => g.name !== "building" && GEN_META[g.name]?.group === groupName)
           .sort((a, b) =>
             (GEN_META[a.name]?.order ?? 99) - (GEN_META[b.name]?.order ?? 99)
-            || a.name.localeCompare(b.name))
-          .map((g) => {
-            const meta = GEN_META[g.name]
-              ?? { icon: "⚙", title: g.label, blurb: "", order: 99 };
-            const active = g.name === selectedName;
-            return (
-              <button
-                key={g.name}
-                type="button"
-                data-gen-card={g.name}
-                data-active={active ? "1" : undefined}
-                onClick={() => selectGenerator(active ? "" : g.name)}
-                title={`${g.label}\n\n${g.description}`}
-                className={`flex items-center gap-1.5 rounded border px-1.5 py-1 text-left ${
-                  active
-                    ? "border-emerald-500 bg-emerald-950/50"
-                    : "border-gray-700 bg-gray-900/60 hover:border-gray-500"
-                }`}
-              >
-                <span className={`w-4 shrink-0 text-center text-sm leading-none ${
-                  active ? "text-emerald-300" : "text-gray-400"
-                }`}>
-                  {meta.icon}
-                </span>
-                <span className="min-w-0">
-                  <span className={`block truncate text-[11px] leading-tight ${
-                    active ? "text-emerald-100" : "text-gray-200"
-                  }`}>
-                    {meta.title}
-                  </span>
-                  <span className="block truncate text-[9px] leading-tight text-gray-500">
-                    {meta.blurb}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-      </div>
-      {selected && (
-        <p className="line-clamp-2 text-[10px] leading-snug text-gray-500" title={selected.description}>
-          {selected.description}
-        </p>
-      )}
+            || a.name.localeCompare(b.name));
+        if (cards.length === 0) return null;
+        return (
+          <div key={groupName} data-gen-group={groupName}>
+            <div className="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-gray-500">
+              {groupName}
+            </div>
+            <div className="grid grid-cols-2 gap-1" data-gen-cards>
+              {cards.map((g) => {
+                const meta = GEN_META[g.name]
+                  ?? { icon: "⚙", title: g.label, blurb: "" };
+                const active = g.name === selectedName;
+                return (
+                  <button
+                    key={g.name}
+                    type="button"
+                    data-gen-card={g.name}
+                    data-active={active ? "1" : undefined}
+                    onClick={() => selectGenerator(active ? "" : g.name)}
+                    title={`${g.label}\n\n${g.description}`}
+                    className={`flex items-center gap-1.5 rounded border px-1.5 py-1 text-left ${
+                      active
+                        ? "border-emerald-500 bg-emerald-950/50"
+                        : "border-gray-700 bg-gray-900/60 hover:border-gray-500"
+                    }`}
+                  >
+                    <span className={`w-4 shrink-0 text-center text-sm leading-none ${
+                      active ? "text-emerald-300" : "text-gray-400"
+                    }`}>
+                      {meta.icon}
+                    </span>
+                    <span className="min-w-0">
+                      <span className={`block truncate text-[11px] leading-tight ${
+                        active ? "text-emerald-100" : "text-gray-200"
+                      }`}>
+                        {meta.title}
+                      </span>
+                      <span className="block truncate text-[9px] leading-tight text-gray-500">
+                        {meta.blurb}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+            </div>
+          )}
+          {selected && (
+            <p className="line-clamp-2 text-[10px] leading-snug text-gray-500" title={selected.description}>
+              {selected.description}
+            </p>
+          )}
 
       {selected && (
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-          {/* Region block */}
+          {/* Region readout — the canvas is already live (sticky pick),
+              so this is a status line, not a gate. Box schemes: drag a
+              box on the map. Focal scheme: click the map to set the
+              focal point. "Whole map" resets a box back to the full
+              sector. */}
           {scheme && (
-            <div className="rounded border border-amber-700/50 bg-amber-950/30 p-2">
+            <div className="rounded border border-amber-700/50 bg-amber-950/30 px-2 py-1.5">
               <div className="flex items-center justify-between gap-2">
-                <div>
+                <div className="min-w-0">
                   <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-300">
-                    Region
+                    {scheme === "center" ? "Focal point" : "Region"}
                   </div>
-                  <div className={`mt-0.5 font-mono ${region.picked ? "text-gray-300" : "italic text-gray-500"}`}>
-                    {region.picked ? region.text : "none — drag one on the map"}
+                  <div className="mt-0.5 truncate font-mono text-gray-300">
+                    {region.text}
+                  </div>
+                  <div className="mt-0.5 text-[9px] italic text-amber-200/70">
+                    {scheme === "center"
+                      ? "🖱 click the map to move it · radius below"
+                      : "🖱 drag a box on the map to aim it"}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => pickRegion((c1, c2) => {
-                    setValues((prev) => applyPickedRegion(scheme, prev, c1, c2));
-                  })}
-                  className="whitespace-nowrap rounded border border-amber-600/60 bg-amber-600/20 px-3 py-1.5 font-medium text-amber-100 hover:bg-amber-600/40"
-                  title="Drag a box on the canvas (or click two corners)"
-                >
-                  🖱 {region.picked ? "Re-pick" : "Drag region"} →
-                </button>
+                {scheme !== "center" && renderer && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const p = renderer.getParsed();
+                      if (!p) return;
+                      setValues((prev) =>
+                        applyPickedRegion(scheme, prev,
+                          { x: 0, y: 0 }, { x: p.cols - 1, y: p.rows - 1 }));
+                    }}
+                    className="shrink-0 whitespace-nowrap rounded border border-amber-700/50 bg-amber-900/30 px-2 py-1 text-[10px] text-amber-200 hover:bg-amber-800/40"
+                    title="Reset the region to the whole sector"
+                  >
+                    ↺ whole map
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -906,6 +1091,8 @@ export function MapForgeGeneratePanel({
             </button>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

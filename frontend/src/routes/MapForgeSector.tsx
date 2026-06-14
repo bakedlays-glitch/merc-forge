@@ -1069,6 +1069,18 @@ function MapForgeSectorInner() {
     corner1?: { x: number; y: number };
     onComplete: (c1: { x: number; y: number }, c2: { x: number; y: number }) => void;
     onCancel: () => void;
+    // Sticky picks (the Generate panel's region aim) RE-ARM after each
+    // completion instead of clearing, so dragging a new box re-aims the
+    // generator without pressing a button. One-shot picks clear on
+    // completion as before.
+    sticky?: boolean;
+  } | null>(null);
+  // Single-click "focal point" pick for the density-falloff generator —
+  // sticky like region pick: every left click on the map sets the focal
+  // point (radius comes from the slider, not a box). Armed by the
+  // Generate panel; cleared by cancelRegionPick / generator change / ESC.
+  const [pickingPoint, setPickingPoint] = useState<{
+    onPick: (t: { x: number; y: number }) => void;
   } | null>(null);
   // Region-pick event plumbing: the anchoring mousedown also fires a
   // click (swallow it so it can't double as the second corner), and a
@@ -1105,6 +1117,21 @@ function MapForgeSectorInner() {
   useEffect(() => {
     setPlacingBuilding(null);
   }, [tool, datPath, tilesetParam, sessionRestartEpoch]);
+  // Arming a paint brush is an explicit "I'm painting now, not placing" —
+  // exit building placement. (The tool-change effect above misses it:
+  // arming a brush leaves you on the pencil, so the tool often doesn't
+  // change and placement would stay stuck armed — user-reported.)
+  useEffect(() => {
+    if (activeBrush) setPlacingBuilding(null);
+  }, [activeBrush]);
+  // Building placement and the generator's sticky canvas region-pick are
+  // mutually exclusive: mousedown checks the region pick FIRST, so an
+  // armed pick would swallow placement clicks. Arming a building cancels
+  // any region pick. (The reverse — selecting a generator disarms a
+  // building — is handled panel-side in selectGenerator.)
+  useEffect(() => {
+    if (placingBuilding) { setPickingRect(null); setPickingPoint(null); }
+  }, [placingBuilding]);
   // ESC exits placement mode (mirrors the region picker's ESC effect).
   useEffect(() => {
     if (!placingBuilding) return;
@@ -1319,7 +1346,8 @@ function MapForgeSectorInner() {
     // (building placement), the generator ghost is live, or a rectangle is
     // being picked.
     if (!brushGhost || !hovered || !renderMeta || tool !== "pencil"
-        || placingBuilding || ghostActive || pickingRect || payload !== "tiles") {
+        || placingBuilding || ghostActive || pickingRect || pickingPoint
+        || payload !== "tiles") {
       cv.style.display = "none";
       return;
     }
@@ -1336,19 +1364,37 @@ function MapForgeSectorInner() {
     cv.style.transform =
       `translate(${p.x + brushGhost.originX}px, ${p.y + brushGhost.originY}px)`;
     cv.style.display = "block";
-  }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect, payload]);
+  }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect, pickingPoint, payload]);
 
   // Region pick for the Generate panel — drag/click two corners on the
-  // canvas while the panel stays docked.
+  // canvas while the panel stays docked. STICKY: stays armed and re-aims
+  // on every drag (the panel calls this once when a box generator is
+  // selected; it disarms via cancelRegionPick on generator change).
   const pickRegionForPanel = useCallback(
     (cb: (c1: { x: number; y: number }, c2: { x: number; y: number }) => void) => {
+      setPickingPoint(null);   // mutually exclusive with focal-point pick
       setPickingRect({
         stage: 0,
+        sticky: true,
         onComplete: (c1, c2) => cb(c1, c2),
         onCancel: () => { /* ESC — keep the previous region */ },
       });
     }, [],
   );
+  // Single-click focal-point pick for the density-falloff generator —
+  // sticky; every click sets the focal point.
+  const pickPointForPanel = useCallback(
+    (cb: (t: { x: number; y: number }) => void) => {
+      setPickingRect(null);    // mutually exclusive with box pick
+      setPickingPoint({ onPick: cb });
+    }, [],
+  );
+  // Disarm whatever region/focal pick is active (panel switched
+  // generators, deselected, or unmounted).
+  const cancelRegionPick = useCallback(() => {
+    setPickingRect(null);
+    setPickingPoint(null);
+  }, []);
 
   // "Generate" opener: focus the docked Generate tab (pre-created as an
   // inactive tab of the inspector group in the default layout), or
@@ -2721,6 +2767,17 @@ function MapForgeSectorInner() {
       }
       return;
     }
+    // Focal-point pick (density-falloff): a single click sets the focal
+    // point. Sticky — stays armed so each click re-aims. The following
+    // click event is swallowed so it can't pin the inspector.
+    if (pickingPoint) {
+      const tile = hovered ?? pixelToTile(e);
+      if (tile) {
+        pickSuppressClickRef.current = true;
+        pickingPoint.onPick(tile);
+      }
+      return;
+    }
     // Building placement mode (StarCraft-style): left click stamps the
     // building anchored at the hovered tile — the same top-left the
     // footprint ghost shows — and STAYS in placement mode so repeated
@@ -2834,7 +2891,8 @@ function MapForgeSectorInner() {
       if (pickingRect.stage === 1 && pickingRect.corner1) {
         const cb = pickingRect.onComplete;
         const c1 = pickingRect.corner1;
-        setPickingRect(null);
+        if (pickingRect.sticky) setPickingRect({ ...pickingRect, stage: 0, corner1: undefined });
+        else setPickingRect(null);
         cb(c1, tile);
       }
       return;
@@ -2893,7 +2951,8 @@ function MapForgeSectorInner() {
       if (tile && (tile.x !== c1.x || tile.y !== c1.y)) {
         const cb = pickingRect.onComplete;
         pickSuppressClickRef.current = true;
-        setPickingRect(null);
+        if (pickingRect.sticky) setPickingRect({ ...pickingRect, stage: 0, corner1: undefined });
+        else setPickingRect(null);
         cb(c1, tile);
       }
       return;
@@ -3899,7 +3958,10 @@ function MapForgeSectorInner() {
   // shortcut effect so it can react instantly when the picker mounts
   // without re-binding every other shortcut.
   useEffect(() => {
-    if (!pickingRect) return;
+    // Sticky generator picks own ESC themselves (the Generate panel
+    // deselects the whole generator on ESC) — don't tear the pick down
+    // from here, or aiming would break mid-generate.
+    if (!pickingRect || pickingRect.sticky) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -4272,7 +4334,7 @@ function MapForgeSectorInner() {
     <div
       ref={setCanvasViewportEl}
       className="relative h-full w-full overflow-hidden bg-gray-950"
-      style={{ cursor: pickingRect || placingBuilding ? "crosshair" : undefined }}
+      style={{ cursor: pickingRect || pickingPoint || placingBuilding ? "crosshair" : undefined }}
       onWheel={onWheel}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMoveDrag}
@@ -4280,21 +4342,25 @@ function MapForgeSectorInner() {
       onMouseLeave={onMouseUpDrag}
     >
       {pickingRect && (
-        <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-rust-700/95 text-rust-50 px-3 py-2 text-sm border-b border-rust-500 shadow-md pointer-events-none">
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-rust-900/70">
-              {pickingRect.stage === 0 ? "1 / 2" : "2 / 2"}
-            </span>
-            <span>
-              {pickingRect.stage === 0
-                ? "Drag a box over the region (or click two corners)"
-                : `Corner pinned at (${pickingRect.corner1?.x}, ${pickingRect.corner1?.y}) — release or click the opposite corner`}
-            </span>
-          </div>
-          <span className="text-xs text-rust-200">ESC to cancel</span>
+        <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-emerald-800/95 text-emerald-50 px-3 py-2 text-sm border-b border-emerald-500 shadow-md pointer-events-none">
+          <span>
+            {pickingRect.stage === 1
+              ? `Corner pinned at (${pickingRect.corner1?.x}, ${pickingRect.corner1?.y}) — release on the opposite corner`
+              : "Drag a box on the map to aim this generator (preview is live)"}
+          </span>
+          <span className="text-xs text-emerald-200">✓ Apply / ✕ Clear in the Generate panel</span>
         </div>
       )}
-      {!pickingRect && placingBuilding && (
+      {!pickingRect && pickingPoint && (
+        <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-emerald-800/95 text-emerald-50 px-3 py-2 text-sm border-b border-emerald-500 shadow-md pointer-events-none">
+          <span>
+            Click the map to set the focal point (preview is live — radius
+            on the slider)
+          </span>
+          <span className="text-xs text-emerald-200">✓ Apply / ✕ Clear in the Generate panel</span>
+        </div>
+      )}
+      {!pickingRect && !pickingPoint && placingBuilding && (
         <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-sky-800/95 text-sky-50 px-3 py-2 text-sm border-b border-sky-500 shadow-md pointer-events-none">
           <span>
             Placing {placingBuilding.w}×{placingBuilding.h} building
@@ -4304,7 +4370,7 @@ function MapForgeSectorInner() {
           <span className="text-xs text-sky-200">ESC to cancel</span>
         </div>
       )}
-      {!pickingRect && !placingBuilding && ghostActive && (
+      {!pickingRect && !pickingPoint && !placingBuilding && ghostActive && (
         <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-between border-b border-emerald-600 bg-emerald-800/95 px-3 py-2 text-sm text-emerald-50 shadow-md">
           <span>
             Previewing generator output — nothing is applied yet. Adjust
@@ -4590,6 +4656,8 @@ function MapForgeSectorInner() {
         tileset={tileset}
         activeBrush={activeBrush}
         pickRegion={pickRegionForPanel}
+        pickPoint={pickPointForPanel}
+        cancelRegionPick={cancelRegionPick}
         applyGhostOps={applyGhostOps}
         clearGhost={clearGhost}
         ghostActive={ghostActive}
@@ -5223,6 +5291,28 @@ function IsoOverlay({
     return parts.join("");
   }, [previewTiles, meta]);
 
+  // Playable-area outline — the iso "playable diamond" the engine renders
+  // inside the 160×160 square (everything outside is off-map border). The
+  // four extreme tiles of the inscribed diamond project to the four
+  // corners of an axis-aligned rectangle in canvas space; we trace it so
+  // map-edge work (cliffs / escarpments especially) has a visible
+  // boundary instead of guessing where the battlefield ends. Geometry
+  // mirrors _make_playable_predicate / _PLAYABLE_BORDER=10 in the sidecar
+  // (generators.py).
+  const playablePath = useMemo(() => {
+    if (!info) return null;
+    const cx = info.cols / 2;
+    const cy = info.rows / 2;
+    const r = Math.min(cx, cy) - 10;
+    if (r <= 0) return null;
+    const pts = ([[cx - r, cy], [cx, cy - r], [cx + r, cy], [cx, cy + r]] as const)
+      .map(([tx, ty]) => {
+        const p = tileToCanvasPixel(tx, ty, meta);
+        return [p.x + meta.tileW / 2, p.y + meta.tileH / 2] as const;
+      });
+    return pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0]} ${p[1]}`).join("") + "Z";
+  }, [info, meta]);
+
   const roomLabels = useMemo(() => {
     if (!showRoomLabels || !info) return null;
     return info.rooms.map((r) => {
@@ -5254,6 +5344,19 @@ function IsoOverlay({
           stroke="rgba(120,200,255,0.45)"
           fill="none"
           strokeWidth={1}
+          vectorEffect="non-scaling-stroke"
+        />
+      )}
+
+      {/* Playable-area boundary — the engine's iso battlefield rectangle.
+          Dashed gold so it reads as a boundary marker, not a tile edge. */}
+      {playablePath && (
+        <path
+          d={playablePath}
+          stroke="rgba(255,205,80,0.85)"
+          fill="none"
+          strokeWidth={2}
+          strokeDasharray="7 5"
           vectorEffect="non-scaling-stroke"
         />
       )}
