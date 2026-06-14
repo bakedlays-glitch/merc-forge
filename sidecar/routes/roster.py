@@ -44,12 +44,47 @@ _log = logging.getLogger(__name__)
 import threading
 
 _SHEET_CACHE: dict[tuple[str, int, str], tuple[bytes, dict]] = {}
-_SHEET_CACHE_MAX = 4  # 4 entries = 4 size variants OR 4 install switches
+# 8 entries = headroom for 2 installs × 4 size variants. Was 4, which a
+# single install populating bigface + smallface + an install switch would
+# thrash, evicting the roster grid's entry and forcing a disk re-read.
+_SHEET_CACHE_MAX = 8
 # Lock added 2026-05-25: FastAPI runs each handler in a threadpool
 # worker. Concurrent roster mounts (e.g. user switches installs while
 # the previous install's bake is still running) can race here. Lock
 # spans the eviction + insert window so dict can't mutate mid-iter.
+# It ALSO guards `_SHEET_GEN` (the invalidation-generation counter).
 _SHEET_CACHE_LOCK = threading.Lock()
+
+# Serializes the expensive bake so the frontend's parallel
+# portrait-sheet.png + .json fetch (Promise.all) doesn't run
+# _bake_portrait_sheet twice concurrently on a cold cache. The first
+# request through bakes + caches; the second blocks here, then finds the
+# warm cache on the double-check inside. A single global lock (vs a
+# per-key keyed-mutex) is sufficient: this is a single-user desktop app
+# with one active install, so the only real contenders share a cache key
+# (the .png/.json pair + the warm thread). Cross-install bakes serialize,
+# which is fine at this scale. NEVER held while taking _SHEET_CACHE_LOCK
+# in a way that nests the other direction — order is _BAKE_LOCK →
+# (_SHEET_CACHE_LOCK briefly) → release; no cycle with state.write_lock,
+# which this path never touches.
+_BAKE_LOCK = threading.Lock()
+
+# Per-install invalidation generation, guarded by _SHEET_CACHE_LOCK. A
+# bake snapshots the generation BEFORE reading face art and only commits
+# its result (memory + disk) if the generation is unchanged at put time.
+# Without this, a portrait recompile that calls
+# invalidate_portrait_sheet_cache() WHILE a bake is in flight would have
+# its invalidation defeated: the in-flight bake (holding pre-recompile
+# art, keyed on an unchanged MercProfiles.xml mtime) would re-populate
+# the cache + re-create the just-deleted disk file with stale art. The
+# generation guard makes the invalidation win.
+_SHEET_GEN: dict[str, int] = {}
+
+# Background-warm bookkeeping: at most one warm thread per install at a
+# time (rapid install switching would otherwise spawn a thundering herd,
+# each rebuilding an InstallContext + thrashing the SLF cache).
+_WARMING: set[str] = set()
+_WARMING_LOCK = threading.Lock()
 
 
 def _portrait_sheet_cache_get(
@@ -59,16 +94,29 @@ def _portrait_sheet_cache_get(
         return _SHEET_CACHE.get(key)
 
 
+def _evict_and_insert_locked(
+    key: tuple[str, int, str], value: tuple[bytes, dict],
+) -> None:
+    """FIFO-evict + insert. Caller MUST already hold _SHEET_CACHE_LOCK.
+
+    Split out so the gen-guarded put in `_portrait_sheet_bytes_and_meta`
+    can check the generation and insert under a SINGLE lock hold (calling
+    `_portrait_sheet_cache_put` there would re-acquire the non-reentrant
+    lock and deadlock).
+    """
+    if len(_SHEET_CACHE) >= _SHEET_CACHE_MAX:
+        try:
+            del _SHEET_CACHE[next(iter(_SHEET_CACHE))]
+        except StopIteration:
+            pass
+    _SHEET_CACHE[key] = value
+
+
 def _portrait_sheet_cache_put(
     key: tuple[str, int, str], value: tuple[bytes, dict],
 ) -> None:
     with _SHEET_CACHE_LOCK:
-        if len(_SHEET_CACHE) >= _SHEET_CACHE_MAX:
-            try:
-                del _SHEET_CACHE[next(iter(_SHEET_CACHE))]
-            except StopIteration:
-                pass
-        _SHEET_CACHE[key] = value
+        _evict_and_insert_locked(key, value)
 
 
 # ─── On-disk portrait-sheet cache (survives sidecar restarts) ────────
@@ -168,9 +216,14 @@ def invalidate_portrait_sheet_cache(install_id: Optional[str] = None) -> None:
     with _SHEET_CACHE_LOCK:
         if install_id is None:
             _SHEET_CACHE.clear()
+            # Bump every known install's generation so any bake in flight
+            # for any install discards its (now-stale) result at put time.
+            for k in list(_SHEET_GEN.keys()):
+                _SHEET_GEN[k] = _SHEET_GEN.get(k, 0) + 1
         else:
             for k in [k for k in _SHEET_CACHE if k[0] == install_id]:
                 del _SHEET_CACHE[k]
+            _SHEET_GEN[install_id] = _SHEET_GEN.get(install_id, 0) + 1
     d = _sheet_cache_dir()
     if not d.is_dir():
         return
@@ -203,11 +256,26 @@ _CELL_SIZES = {
     "face_33":   (33, 33),
     "bigface":   (106, 122),
 }
+# When the requested size's STI is missing for a slot, try these other
+# sizes (in order) and scale whatever decodes to the requested cell. A
+# bigface request falling back to a small face upscales (NEAREST) — ugly
+# but better than a blank cell for the rare NPC that ships only one size.
+_FALLBACK_ORDER = {
+    "smallface": ("bigface", "face_65", "face_33"),
+    "bigface":   ("face_65", "face_33", "smallface"),
+    "face_65":   ("bigface", "face_33", "smallface"),
+    "face_33":   ("face_65", "bigface", "smallface"),
+}
 _GRID_COLS = 16  # 16 cells per row — matches the roster grid layout
 
 
-def _bake_portrait_sheet(install_path, size: str) -> tuple[bytes, dict]:
+def _bake_portrait_sheet(ctx, size: str) -> tuple[bytes, dict]:
     """Compose every filled slot's portrait into one PNG grid.
+
+    Takes a pre-built InstallContext (built once by the caller and shared
+    with the mtime sample that forms the cache key) so the key and the
+    baked data are sampled from the same context — see
+    `_portrait_sheet_bytes_and_meta`.
 
     Returns (png_bytes, manifest_dict). Manifest shape:
         {
@@ -223,14 +291,12 @@ def _bake_portrait_sheet(install_path, size: str) -> tuple[bytes, dict]:
     placeholder for those, instead of the garbled multicolor pixels
     a user hit on slots 26/200/201/etc. 2026-05-24.
     """
-    from mercwizard_core.install_context import make_install_context
     from mercwizard_core.sti_decode import decode_sti_frame_to_png
 
     if size not in _CELL_SIZES:
         raise ValueError(f"Unknown size {size}")
     cell_w, cell_h = _CELL_SIZES[size]
 
-    ctx = make_install_context(install_path)
     profiles_path = ctx.profiles_xml_path()
     all_slots = profiles_xml.read_all_slots(profiles_path)
 
@@ -250,11 +316,12 @@ def _bake_portrait_sheet(install_path, size: str) -> tuple[bytes, dict]:
         if face_index == 0 and slot != 0:
             continue
         result = ctx.face_sti_bytes(face_index, size=size)
-        if result is None and size == "smallface":
-            # Some NPCs ship only a larger face variant (BigFace / 65 / 33)
-            # and no small face. Fall back to those — the bake scales any
-            # decoded face down to the cell size below.
-            for _fb in ("bigface", "face_65", "face_33"):
+        if result is None:
+            # Some mercs ship only one face-size variant (an NPC with a
+            # BigFace but no SmallFace, or vice-versa). Fall back to any
+            # other available size — the bake scales whatever it decodes
+            # to the requested cell size below.
+            for _fb in _FALLBACK_ORDER.get(size, ()):
                 result = ctx.face_sti_bytes(face_index, size=_fb)
                 if result is not None:
                     break
@@ -338,26 +405,102 @@ def _portrait_sheet_bytes_and_meta(
     a portrait-only recompile is handled by invalidate_portrait_sheet_cache.
     """
     from mercwizard_core.install_context import make_install_context
-    ctx = make_install_context(install_path)
+    # Build the InstallContext ONCE and sample MercProfiles.xml's mtime
+    # from it, so the cache key and the data the bake reads come from the
+    # same context (the bake reuses this ctx). This also removes a second
+    # redundant make_install_context (~50-100 ms detect_flavor) per paint.
+    ctx = make_install_context(Path(install_path))
     profiles_path = ctx.profiles_xml_path()
     try:
         mtime_ns = profiles_path.stat().st_mtime_ns
     except OSError:
         mtime_ns = 0
     key = (install_id, mtime_ns, size)
+
+    # Fast path: in-memory hit, no bake-lock contention.
     cached = _portrait_sheet_cache_get(key)
     if cached is not None:
         return cached
-    # On-disk tier: survives sidecar restarts, so the first roster view
-    # after launch skips the ~1 s bake. Warm the in-memory tier from it.
-    on_disk = _disk_sheet_get(install_id, mtime_ns, size)
-    if on_disk is not None:
-        _portrait_sheet_cache_put(key, on_disk)
-        return on_disk
-    result = _bake_portrait_sheet(install_path, size)
-    _portrait_sheet_cache_put(key, result)
-    _disk_sheet_put(install_id, mtime_ns, size, result)
-    return result
+
+    # Serialize the (disk-read | bake) section so the frontend's parallel
+    # portrait-sheet.png + .json fetch doesn't both bake on a cold cache.
+    # The first thread through populates the caches; the second blocks
+    # here and finds the warm entry on the double-check below.
+    with _BAKE_LOCK:
+        cached = _portrait_sheet_cache_get(key)
+        if cached is not None:
+            return cached
+        # Snapshot the invalidation generation BEFORE any read, so an
+        # invalidate_portrait_sheet_cache() that races us (e.g. a portrait
+        # recompile, which does NOT bump MercProfiles.xml's mtime) makes
+        # us discard our result instead of re-populating mem/disk with the
+        # pre-recompile art under the still-current mtime key.
+        with _SHEET_CACHE_LOCK:
+            gen_at_start = _SHEET_GEN.get(install_id, 0)
+
+        # On-disk tier: survives sidecar restarts, so the first roster
+        # view after launch skips the ~1 s bake. Warm the in-memory tier.
+        on_disk = _disk_sheet_get(install_id, mtime_ns, size)
+        if on_disk is not None:
+            with _SHEET_CACHE_LOCK:
+                if _SHEET_GEN.get(install_id, 0) == gen_at_start:
+                    _evict_and_insert_locked(key, on_disk)
+            return on_disk
+
+        result = _bake_portrait_sheet(ctx, size)
+        with _SHEET_CACHE_LOCK:
+            committed = _SHEET_GEN.get(install_id, 0) == gen_at_start
+            if committed:
+                _evict_and_insert_locked(key, result)
+        if committed:
+            _disk_sheet_put(install_id, mtime_ns, size, result)
+        # Serve THIS caller the freshly-baked result regardless of commit
+        # (a racing invalidation just means the next request re-bakes
+        # fresher art — this caller's bytes are still internally
+        # consistent for the mtime it sampled).
+        return result
+
+
+def warm_install(install_id: str, install_path, size: str = "bigface") -> None:
+    """Pre-bake the roster portrait sheet + prime the roster/parse caches
+    on a background daemon thread, so the first roster view after an
+    install becomes active is a cache hit instead of a ~1 s bake.
+
+    `size` defaults to "bigface" — the size the AIM-style roster grid
+    requests on mount. At most one warm runs per install at a time (rapid
+    install switching would otherwise spawn a thundering herd, each
+    rebuilding an InstallContext + thrashing the SLF cache). Fire-and-
+    forget: never blocks the caller, and any failure inside the thread is
+    logged, never raised — a crash here must neither take down the
+    watchdog-monitored process nor wedge the warm guard (hence the
+    `finally`).
+    """
+    with _WARMING_LOCK:
+        if install_id in _WARMING:
+            return
+        _WARMING.add(install_id)
+
+    def _run() -> None:
+        try:
+            try:
+                _portrait_sheet_bytes_and_meta(install_id, install_path, size)
+            except Exception:  # noqa: BLE001
+                _log.exception(
+                    "warm_install: portrait sheet bake failed for %s", install_id,
+                )
+            try:
+                load_roster(Path(install_path))
+            except Exception:  # noqa: BLE001
+                _log.exception(
+                    "warm_install: load_roster failed for %s", install_id,
+                )
+        finally:
+            with _WARMING_LOCK:
+                _WARMING.discard(install_id)
+
+    threading.Thread(
+        target=_run, name=f"warm-{install_id[:8]}", daemon=True,
+    ).start()
 
 
 def _portrait_sheet_etag(png_bytes: bytes) -> str:

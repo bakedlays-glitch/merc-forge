@@ -150,8 +150,12 @@ def run(install_path: Path) -> dict[str, float]:
     # benchmark never touches the user's real %APPDATA%/MercWizard/cache.
     os.environ["APPDATA"] = tempfile.mkdtemp(prefix="mw2_perf_")
     R.invalidate_portrait_sheet_cache(None)
+    # _bake_portrait_sheet now takes a pre-built InstallContext (the caller
+    # builds it once and shares it with the mtime sample that keys the
+    # cache). Build one here to mirror that contract.
+    _bake_ctx = IC.make_install_context(install_path)
     results["portrait_sheet_bake_cold"] = _time_ms(
-        lambda: R._bake_portrait_sheet(install_path, "smallface"), reps=1
+        lambda: R._bake_portrait_sheet(_bake_ctx, "smallface"), reps=1
     )
 
     # Disk-hit: prime the on-disk cache, drop the in-memory tier to mimic a

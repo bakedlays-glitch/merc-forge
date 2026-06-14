@@ -26,6 +26,23 @@ const queryClient = new QueryClient({
   },
 });
 
+// Roster portrait-sheet blobs: each cached query entry owns an object
+// URL. Revoke it exactly when that entry LEAVES the cache (gcTime expiry,
+// invalidation, or reset) — never on component unmount. The roster query
+// holds the sheet with `staleTime: Infinity`, so the old unmount-time
+// revoke freed a URL that was still cached and re-served on a quick
+// return visit, blanking every portrait. Centralising revocation on the
+// cache 'removed' event keeps the blob alive as long as the entry is, and
+// covers both the route-mounted fetch and the startup prefetch.
+queryClient.getQueryCache().subscribe((event) => {
+  if (event.type !== "removed") return;
+  const key = event.query.queryKey;
+  if (Array.isArray(key) && key[0] === "roster-portrait-sheet") {
+    const data = event.query.state.data as { blobUrl?: string } | undefined;
+    if (data?.blobUrl) URL.revokeObjectURL(data.blobUrl);
+  }
+});
+
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("Root element not found");
 

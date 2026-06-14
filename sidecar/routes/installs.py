@@ -197,6 +197,15 @@ def set_active(payload: ActivePayload) -> dict:
             "install_id": payload.install_id,
         })
     active = state.active()
+    if active is not None:
+        # Fire-and-forget background warm: pre-bake the roster portrait
+        # sheet + prime the roster/parse caches so the user's first roster
+        # view after switching installs is a cache hit, not a ~1 s bake.
+        # Non-blocking daemon thread — does not delay this response and
+        # does not reintroduce the watchdog-endangering startup crawl that
+        # bug #12 removed.
+        from .roster import warm_install
+        warm_install(active.id, active.path)
     return {"active_install_id": active.id if active else None}
 
 

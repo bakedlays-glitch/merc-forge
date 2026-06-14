@@ -10,9 +10,24 @@ real %APPDATA%/MercWizard/cache.
 """
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
+import mercwizard_core.install_context as IC
 from routes import roster as R
+
+
+class _FakeCtx:
+    """Minimal InstallContext stand-in: only profiles_xml_path() is read by
+    `_portrait_sheet_bytes_and_meta` (the bake itself is monkeypatched)."""
+
+    def __init__(self, profiles_path):
+        self._p = profiles_path
+
+    def profiles_xml_path(self):
+        return self._p
 
 
 @pytest.fixture(autouse=True)
@@ -102,3 +117,95 @@ def test_invalidate_also_clears_in_memory():
     assert R._portrait_sheet_cache_get(key) is not None
     R.invalidate_portrait_sheet_cache(iid)
     assert R._portrait_sheet_cache_get(key) is None
+
+
+# ── In-flight dedup + generation guard (the hardened bake path) ──────
+
+
+def _install_fake_ctx(tmp_path, monkeypatch):
+    """Point make_install_context at a real on-disk MercProfiles.xml (so
+    `.stat().st_mtime_ns` works and the cache key is stable) and return it."""
+    pf = tmp_path / "MercProfiles.xml"
+    pf.write_text("<MERCPROFILES/>", encoding="utf-8")
+    monkeypatch.setattr(IC, "make_install_context", lambda p: _FakeCtx(pf))
+    return pf
+
+
+def test_concurrent_requests_bake_once(tmp_path, monkeypatch):
+    """The frontend fires portrait-sheet.png + .json in parallel. On a cold
+    cache both miss — the bake must run ONCE, not twice."""
+    pf = _install_fake_ctx(tmp_path, monkeypatch)
+    calls: list[str] = []
+
+    def fake_bake(ctx, size):
+        calls.append(size)
+        time.sleep(0.2)  # widen the window so both threads collide on the lock
+        return (b"png-bytes", {"size": size, "cells": []})
+
+    monkeypatch.setattr(R, "_bake_portrait_sheet", fake_bake)
+
+    results: list[tuple] = []
+
+    def worker():
+        results.append(R._portrait_sheet_bytes_and_meta("iid-dedup", tmp_path, "bigface"))
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert len(calls) == 1, "bake ran more than once under concurrency"
+    assert len(results) == 2
+    assert all(r[0] == b"png-bytes" for r in results)
+    # Both the in-memory and on-disk tiers should now be warm.
+    mtime = pf.stat().st_mtime_ns
+    assert R._portrait_sheet_cache_get(("iid-dedup", mtime, "bigface")) is not None
+    assert R._disk_sheet_get("iid-dedup", mtime, "bigface") is not None
+
+
+def test_invalidate_during_bake_is_not_repopulated(tmp_path, monkeypatch):
+    """A portrait recompile invalidates mid-bake (it does NOT bump
+    MercProfiles.xml mtime). The in-flight bake must DISCARD its now-stale
+    result instead of re-populating mem + disk under the unchanged key."""
+    pf = _install_fake_ctx(tmp_path, monkeypatch)
+
+    def fake_bake(ctx, size):
+        # Simulate the racing recompile bumping the generation mid-bake.
+        R.invalidate_portrait_sheet_cache("iid-gen")
+        return (b"stale-bytes", {"size": size, "cells": []})
+
+    monkeypatch.setattr(R, "_bake_portrait_sheet", fake_bake)
+
+    out = R._portrait_sheet_bytes_and_meta("iid-gen", tmp_path, "bigface")
+    # This caller still receives its freshly-baked bytes...
+    assert out[0] == b"stale-bytes"
+    # ...but the result must NOT have been committed to either cache tier,
+    # so the next request re-bakes fresher art.
+    mtime = pf.stat().st_mtime_ns
+    assert R._portrait_sheet_cache_get(("iid-gen", mtime, "bigface")) is None
+    assert R._disk_sheet_get("iid-gen", mtime, "bigface") is None
+
+
+def test_warm_install_dedups_per_install(tmp_path, monkeypatch):
+    """At most one warm thread runs per install at a time; a second
+    warm_install while the first is in flight is a no-op."""
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    started: list[tuple] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_meta(iid, path, size):
+        started.append((iid, size))
+        entered.set()
+        release.wait(2)
+        return (b"x", {"cells": []})
+
+    monkeypatch.setattr(R, "_portrait_sheet_bytes_and_meta", fake_meta)
+    monkeypatch.setattr(R, "load_roster", lambda p: [])
+
+    R.warm_install("iid-warm", tmp_path)
+    assert entered.wait(2), "warm thread never reached the bake"
+    # Second call while the first is still in flight must not spawn a bake.
+    R.warm_install("iid-warm", tmp_path)
+    release.set()
+    time.sleep(0.15)  # let the first warm thread finish + clear the guard
+    assert started.count(("iid-warm", "bigface")) == 1

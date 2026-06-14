@@ -23,7 +23,7 @@
  * live as URLs (so existing keyboard shortcuts / bookmarks work) but
  * they're no longer linked from the Hub.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -34,7 +34,6 @@ import {
   getApiBaseUrl,
   getRoster,
   getRosterPortraitSheet,
-  type PortraitSheet,
 } from "../lib/api";
 import { getServerToken } from "../lib/tauri";
 import type { RosterEntry } from "../lib/schema";
@@ -47,6 +46,20 @@ import { categoryLabel, useSlotPicker } from "../lib/slotPicker";
 // "highlighted by category"; every slot is interactive.
 
 type Filter = "all" | "filled" | "aim" | "merc" | "rpc" | "npc" | "quest_bound" | "locked" | "unassigned" | "empty";
+
+// Card-size presets for the AIM-style roster grid. `min` is the grid's
+// min column width (px); cards flex up from there to fill the row.
+const CARD_SIZES = [
+  { id: "compact", label: "Compact", min: 88 },
+  { id: "medium", label: "Medium", min: 120 },
+  { id: "large", label: "Large", min: 164 },
+] as const;
+const CARD_SIZE_KEY = "mw_roster_card_size";
+// BigFace native dimensions — the portrait sheet's cell size and the
+// card's portrait aspect ratio. Used as a fallback before the sheet
+// manifest loads so empty/loading cards keep the same shape.
+const BIGFACE_W = 106;
+const BIGFACE_H = 122;
 
 export default function MercWizardRoster() {
   const qc = useQueryClient();
@@ -79,35 +92,22 @@ export default function MercWizardRoster() {
     : "";
 
   // Roster portrait sprite-sheet: ONE PNG + ONE JSON manifest replaces
-  // the N+1 per-slot fetches. Re-bakes on any roster mutation via the
-  // dataUpdatedAt cache-bust. Blob URL revoked on unmount + refetch.
-  // User feedback: "i want it to be fast".
+  // the N+1 per-slot fetches. `size: bigface` gives the AIM-dossier
+  // head-and-shoulders framing the cards render. Re-bakes on any roster
+  // mutation via the dataUpdatedAt cache-bust. The key/size/cacheBust
+  // here MUST match App.tsx's warm-prefetch so the startup warm lands on
+  // the same cache entry this query reads. Blob URLs are revoked centrally
+  // in main.tsx on cache eviction (NOT on unmount — that blanked
+  // portraits on a quick return visit, since staleTime is Infinity).
   const portraitSheet = useQuery({
     queryKey: ["roster-portrait-sheet", roster.dataUpdatedAt],
     queryFn: () => getRosterPortraitSheet({
+      size: "bigface",
       cacheBust: roster.dataUpdatedAt,
     }),
     staleTime: Infinity,
     enabled: !!roster.data,
   });
-  // Revoke the previous blob URL when the sheet re-fetches OR the
-  // component unmounts. Without this, every roster invalidation leaks
-  // a ~50-200 KB blob.
-  const prevSheetRef = useRef<PortraitSheet | null>(null);
-  useEffect(() => {
-    const cur = portraitSheet.data ?? null;
-    const prev = prevSheetRef.current;
-    if (prev && prev !== cur) {
-      URL.revokeObjectURL(prev.blobUrl);
-    }
-    prevSheetRef.current = cur;
-  }, [portraitSheet.data]);
-  useEffect(() => () => {
-    if (prevSheetRef.current) {
-      URL.revokeObjectURL(prevSheetRef.current.blobUrl);
-      prevSheetRef.current = null;
-    }
-  }, []);
   // Quick slot → cell lookup so each SlotCell finds its crop in O(1).
   const cellsBySlot = useMemo(() => {
     const m = new Map<number, { x: number; y: number }>();
@@ -116,8 +116,28 @@ export default function MercWizardRoster() {
     return m;
   }, [portraitSheet.data]);
   const [selected, setSelected] = useState<number | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
+  // Default to the filled-mercs gallery (a true AIM-style roster) rather
+  // than all 256 slots — far less scrolling now that cards are big. The
+  // ALL / EMPTY chips switch to the full grid / empty slots in one click.
+  const [filter, setFilter] = useState<Filter>("filled");
   const [search, setSearch] = useState("");
+  // Card-size control (Compact / Medium / Large), persisted so the user's
+  // choice sticks between sessions. Drives both the responsive grid's min
+  // column width and the portrait scale.
+  const [sizeIdx, setSizeIdx] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(CARD_SIZE_KEY);
+      const n = raw != null ? parseInt(raw, 10) : 1;
+      return Number.isInteger(n) && n >= 0 && n < CARD_SIZES.length ? n : 1;
+    } catch {
+      return 1;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(CARD_SIZE_KEY, String(sizeIdx)); } catch { /* ignore */ }
+  }, [sizeIdx]);
+  const cardSize = CARD_SIZES[sizeIdx] ?? CARD_SIZES[1]!;
+  const cardMin = cardSize.min;
   const [contextMenu, setContextMenu] = useState<{
     slot: number; x: number; y: number;
   } | null>(null);
@@ -236,6 +256,14 @@ export default function MercWizardRoster() {
     return result;
   }, [filter, search, byIdx, picker.data]);
 
+  // The gallery renders ONLY the matching slots (sorted), not all 256
+  // greyed — so the filled-first default is a tight gallery and ALL shows
+  // the full grid. Slot numbers on each card keep positions legible.
+  const visibleSlots = useMemo(
+    () => Array.from(visibleSet).sort((a, b) => a - b),
+    [visibleSet],
+  );
+
   // Chip counts — computed ignoring the search box (counts reflect the
   // filter shape, not the search-narrowed result). One walk over 256
   // slots tallies all 10 chip totals; recomputes only when the roster
@@ -332,13 +360,12 @@ export default function MercWizardRoster() {
       {/* Filter / search bar */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap overflow-hidden rounded border border-wasteland-700">
-          {/* Filter chips trimmed 2026-05-25 to the four most-used:
-              ALL / AIM / MERC / EMPTY. The Filter union type
-              still defines the dropped values (filled, rpc, npc,
-              quest_bound, locked, unassigned) so deep-linked URLs that
-              set ?filter=locked keep working; we just don't surface
-              the buttons. */}
-          {(["all", "aim", "merc", "empty"] as Filter[]).map((f) => (
+          {/* Filter chips: FILLED (the default gallery) / ALL (full 256-
+              slot grid) / AIM / MERC / EMPTY. The Filter union type still
+              defines the dropped values (rpc, npc, quest_bound, locked,
+              unassigned) so deep-linked URLs that set ?filter=locked keep
+              working; we just don't surface the buttons. */}
+          {(["filled", "all", "aim", "merc", "empty"] as Filter[]).map((f) => (
             <button
               key={f}
               type="button"
@@ -367,6 +394,23 @@ export default function MercWizardRoster() {
           placeholder="Filter by name, nickname, or slot number…"
           className="flex-1 min-w-[16rem] rounded border border-wasteland-700 bg-wasteland-900 px-3 py-1 text-xs"
         />
+        {/* Card-size control */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase text-wasteland-500">Size</span>
+          <input
+            type="range"
+            min={0}
+            max={CARD_SIZES.length - 1}
+            step={1}
+            value={sizeIdx}
+            onChange={(e) => setSizeIdx(parseInt(e.target.value, 10))}
+            className="w-24 accent-rust-500"
+            aria-label="Portrait card size"
+          />
+          <span className="w-14 text-[10px] text-wasteland-400">
+            {cardSize.label}
+          </span>
+        </div>
       </div>
 
       {roster.isLoading && (
@@ -382,45 +426,51 @@ export default function MercWizardRoster() {
         <div className="grid gap-4 lg:grid-cols-[1fr_18rem]">
           {/* Slot grid */}
           <div>
-            <div
-              className="grid gap-1"
-              style={{ gridTemplateColumns: "repeat(16, minmax(0, 1fr))" }}
-            >
-              {Array.from({ length: 256 }).map((_, slot) => {
-                const entry = byIdx.get(slot);
-                const filled = !!entry && !entry.is_empty;
-                const matches = visibleSet.has(slot);
-                const isSelected = selected === slot;
-                const info = picker.data?.slots[slot];
-                const tier = info?.tier ?? "safe";
-                const cell = filled ? cellsBySlot.get(slot) ?? null : null;
-                const sheet = portraitSheet.data;
-                const nick = filled && entry
-                  ? (entry.nickname ?? entry.name ?? "?")
-                  : null;
-                return (
-                  <SlotCell
-                    key={slot}
-                    slot={slot}
-                    filled={filled}
-                    matches={matches}
-                    selected={isSelected}
-                    tier={tier}
-                    engineName={info?.engine_name ?? null}
-                    engineRole={info?.engine_role ?? null}
-                    profileType={entry?.profile_type ?? null}
-                    sheetUrl={cell && sheet ? sheet.blobUrl : null}
-                    cellX={cell?.x ?? 0}
-                    cellY={cell?.y ?? 0}
-                    cellW={sheet?.manifest.cell_w ?? 48}
-                    cellH={sheet?.manifest.cell_h ?? 43}
-                    nickname={nick}
-                    onSelect={handleSlotSelect}
-                    onContextMenu={handleSlotContextMenu}
-                  />
-                );
-              })}
-            </div>
+            {visibleSlots.length === 0 ? (
+              <div className="rounded border border-wasteland-700 bg-wasteland-900/40 p-6 text-center text-sm text-wasteland-400">
+                No slots match. Try the ALL chip or clear the search box.
+              </div>
+            ) : (
+              <div
+                className="grid gap-2"
+                style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cardMin}px, 1fr))` }}
+              >
+                {visibleSlots.map((slot) => {
+                  const entry = byIdx.get(slot);
+                  const filled = !!entry && !entry.is_empty;
+                  const isSelected = selected === slot;
+                  const info = picker.data?.slots[slot];
+                  const tier = info?.tier ?? "safe";
+                  const cell = filled ? cellsBySlot.get(slot) ?? null : null;
+                  const sheet = portraitSheet.data;
+                  const nick = filled && entry
+                    ? (entry.nickname ?? entry.name ?? "?")
+                    : null;
+                  return (
+                    <SlotCell
+                      key={slot}
+                      slot={slot}
+                      filled={filled}
+                      selected={isSelected}
+                      tier={tier}
+                      engineName={info?.engine_name ?? null}
+                      engineRole={info?.engine_role ?? null}
+                      profileType={entry?.profile_type ?? null}
+                      sheetUrl={cell && sheet ? sheet.blobUrl : null}
+                      cellX={cell?.x ?? 0}
+                      cellY={cell?.y ?? 0}
+                      cellW={sheet?.manifest.cell_w ?? BIGFACE_W}
+                      cellH={sheet?.manifest.cell_h ?? BIGFACE_H}
+                      sheetW={sheet?.manifest.sheet_w ?? 0}
+                      sheetH={sheet?.manifest.sheet_h ?? 0}
+                      nickname={nick}
+                      onSelect={handleSlotSelect}
+                      onContextMenu={handleSlotContextMenu}
+                    />
+                  );
+                })}
+              </div>
+            )}
             {/* Legend — merc Type (border colour) + slot-lock status */}
             <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-wasteland-400">
               <span className="text-wasteland-500">Type:</span>
@@ -717,7 +767,6 @@ const TYPE_STYLE: Record<number, { label: string; border: string; chip: string }
 interface SlotCellProps {
   slot: number;
   filled: boolean;
-  matches: boolean;
   selected: boolean;
   /** Slot lock tier from useSlotPicker. "safe" when no engine-named lock. */
   tier: string;
@@ -729,6 +778,10 @@ interface SlotCellProps {
   cellY: number;
   cellW: number;
   cellH: number;
+  /** Full sprite-sheet dimensions — needed to scale the cell crop to fill
+   *  a flexible-width card via percentage background sizing. */
+  sheetW: number;
+  sheetH: number;
   nickname: string | null;
   /** Stable refs from the parent's useCallback. */
   onSelect: (slot: number) => void;
@@ -736,32 +789,37 @@ interface SlotCellProps {
 }
 
 const SlotCell = memo(function SlotCell({
-  slot, filled, matches, selected, tier, engineName, engineRole, profileType,
-  sheetUrl, cellX, cellY, cellW, cellH, nickname,
+  slot, filled, selected, tier, engineName, engineRole, profileType,
+  sheetUrl, cellX, cellY, cellW, cellH, sheetW, sheetH, nickname,
   onSelect, onContextMenu,
 }: SlotCellProps) {
   const showPortrait = !!sheetUrl;
   const lockStyle = tier !== "safe" ? tierStyle(tier as Parameters<typeof tierStyle>[0]) : null;
   const typeStyle = profileType != null ? TYPE_STYLE[profileType] ?? null : null;
 
-  // cls assembled from primitives — selected wins over filled wins over
-  // matches. The border colour is the merc Type (typeStyle); slot-lock /
-  // quest-bound tiers show as a small corner dot instead (rendered below),
-  // so the category is always readable.
-  let cls = "aspect-square rounded text-[10px] font-mono "
-    + "relative overflow-hidden "
-    + "flex flex-col items-center justify-center "
-    + "border transition-colors cursor-pointer ";
+  // Percentage-based sprite-sheet crop. The grid's auto-fill 1fr columns
+  // stretch each card beyond the min width, so a fixed-px crop wouldn't
+  // fill it. backgroundSize scales the whole sheet so ONE cell == the card
+  // width; backgroundPosition uses the standard sprite %-formula. The
+  // portrait area's aspect-ratio is pinned to the cell so height tracks
+  // width. This is what makes the portrait fill the card at any size.
+  const bgSize = cellW > 0 && cellH > 0
+    ? `${(sheetW / cellW) * 100}% ${(sheetH / cellH) * 100}%`
+    : "cover";
+  const posX = sheetW - cellW > 0 ? (cellX / (sheetW - cellW)) * 100 : 0;
+  const posY = sheetH - cellH > 0 ? (cellY / (sheetH - cellH)) * 100 : 0;
+
+  // Card frame: type-coloured border for filled mercs (AIM/MERC/RPC/NPC),
+  // dashed for empty slots, rust ring when selected. Lock / quest-bound
+  // tiers show as a corner dot so the Type colour stays readable.
+  let cls = "relative flex flex-col overflow-hidden rounded-lg border-2 "
+    + "text-left transition-colors cursor-pointer ";
   if (selected) {
-    cls += "bg-rust-500 text-wasteland-50 ring-2 ring-rust-300 border-rust-300";
-  } else if (filled && matches) {
-    cls += `bg-wasteland-700 text-wasteland-100 hover:bg-rust-500/30 ${typeStyle?.border ?? "border-wasteland-600"}`;
+    cls += "border-rust-300 ring-2 ring-rust-400/70 bg-wasteland-800";
   } else if (filled) {
-    cls += "bg-wasteland-800 text-wasteland-500 border-wasteland-700 opacity-50 hover:opacity-80";
-  } else if (matches) {
-    cls += `bg-wasteland-900 text-wasteland-300 hover:bg-rust-500/20 ${typeStyle?.border ?? "border-wasteland-700"}`;
+    cls += `${typeStyle?.border ?? "border-wasteland-600"} bg-wasteland-900 hover:bg-wasteland-800`;
   } else {
-    cls += "bg-wasteland-950 text-wasteland-600 border-wasteland-800 opacity-40 hover:opacity-70";
+    cls += "border-dashed border-wasteland-700 bg-wasteland-950/60 hover:border-wasteland-600 hover:bg-wasteland-900";
   }
 
   const baseTip = filled
@@ -782,48 +840,63 @@ const SlotCell = memo(function SlotCell({
       }}
       title={tip}
     >
-      {lockStyle && (tier === "locked" || tier === "quest_bound") && (
-        <span
-          aria-hidden="true"
-          className={`pointer-events-none absolute top-0.5 right-0.5 z-10 h-2 w-2 rounded-full border-2 ${lockStyle.borderClass} bg-wasteland-950`}
-        />
-      )}
-      {showPortrait && (
-        <div
-          aria-hidden="true"
-          className="absolute inset-0 pointer-events-none"
-          style={{
-            backgroundImage: `url(${sheetUrl})`,
-            backgroundPosition: `-${cellX}px -${cellY}px`,
-            backgroundRepeat: "no-repeat",
-            backgroundSize: "auto",
-            imageRendering: "pixelated",
-            backgroundOrigin: "padding-box",
-            width: cellW,
-            height: cellH,
-          }}
-        />
-      )}
-      <span
-        className={
-          showPortrait
-            ? "absolute top-0.5 left-0.5 text-[8px] font-mono leading-none px-1 rounded bg-black/70 text-wasteland-100"
-            : "leading-none"
-        }
+      {/* Portrait area — aspect pinned to the BigFace cell so cards align */}
+      <div
+        className="relative w-full"
+        style={{ aspectRatio: `${cellW || BIGFACE_W} / ${cellH || BIGFACE_H}` }}
       >
-        {slot}
-      </span>
-      {nickname && (
-        <span
-          className={
-            showPortrait
-              ? "absolute bottom-0 inset-x-0 text-[8px] truncate leading-tight px-0.5 bg-gradient-to-t from-black/90 to-transparent text-wasteland-50"
-              : "text-[8px] truncate max-w-full leading-none mt-0.5"
-          }
-        >
-          {nickname}
+        {showPortrait ? (
+          <div
+            aria-hidden="true"
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              backgroundImage: `url(${sheetUrl})`,
+              backgroundSize: bgSize,
+              backgroundPosition: `${posX}% ${posY}%`,
+              backgroundRepeat: "no-repeat",
+              imageRendering: "pixelated",
+            }}
+          />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center bg-wasteland-950/40">
+            {filled ? (
+              <span className="font-mono text-lg text-wasteland-600">
+                {(nickname ?? "?").charAt(0).toUpperCase()}
+              </span>
+            ) : (
+              <span aria-hidden="true" className="text-2xl leading-none text-wasteland-700">+</span>
+            )}
+          </div>
+        )}
+        {/* Slot-number badge */}
+        <span className="absolute top-1 left-1 z-10 rounded bg-black/70 px-1 font-mono text-[9px] leading-none text-wasteland-100">
+          {slot}
         </span>
-      )}
+        {/* Lock / quest-bound corner dot */}
+        {lockStyle && (tier === "locked" || tier === "quest_bound") && (
+          <span
+            aria-hidden="true"
+            className={`pointer-events-none absolute top-1 right-1 z-10 h-2.5 w-2.5 rounded-full border-2 ${lockStyle.borderClass} bg-wasteland-950`}
+          />
+        )}
+      </div>
+      {/* Name plate */}
+      <div className="w-full bg-black/40 px-1.5 py-1">
+        {filled ? (
+          <>
+            <div className="truncate text-[11px] font-medium leading-tight text-wasteland-50">
+              {nickname ?? "?"}
+            </div>
+            <div className="truncate text-[9px] leading-tight text-wasteland-400">
+              {typeStyle?.label ?? "—"}
+            </div>
+          </>
+        ) : (
+          <div className="truncate text-[10px] leading-tight text-wasteland-500">
+            Empty
+          </div>
+        )}
+      </div>
       {selected && <span className="sr-only">selected</span>}
     </button>
   );
