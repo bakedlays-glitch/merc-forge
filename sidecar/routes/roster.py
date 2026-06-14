@@ -122,7 +122,9 @@ def _portrait_sheet_cache_put(
 # ─── On-disk portrait-sheet cache (survives sidecar restarts) ────────
 # The in-memory _SHEET_CACHE above is empty on every sidecar launch, so
 # the FIRST roster view after each launch always paid the full bake
-# (~1.2 s on a 250-merc install, measured 2026-05-31). Persist the baked
+# (~4 s smallface / ~9 s bigface on a ~250-merc install, measured
+# 2026-06-14 — bigface is slower because most NPCs lack one and exhaust
+# the fallback chain's SLF probes). Persist the baked
 # (png, manifest) under %APPDATA%/MercWizard/cache/portrait_sheets/ keyed
 # on the SAME (install_id, MercProfiles.xml mtime_ns, size) tuple, so the
 # first view after launch loads the cached PNG instantly and only re-bakes
@@ -141,7 +143,7 @@ def _sheet_cache_dir() -> Path:
 # Bump whenever the bake's face-resolution / compositing logic changes, so old
 # on-disk sheets (keyed by install+size+MercProfiles-mtime, which do NOT change
 # when the sidecar CODE does) get ignored instead of served stale.
-_PORTRAIT_CACHE_VERSION = 3  # v3: + BigFace/65/33 fallback for small-face-less NPCs (2026-06-04)
+_PORTRAIT_CACHE_VERSION = 4  # v4: roster grid baked at bigface + decode-aware largest-real-face-first fallback (2026-06-14)
 
 
 def _disk_key_prefix(install_id: str, size: str) -> str:
@@ -442,7 +444,7 @@ def _portrait_sheet_bytes_and_meta(
             gen_at_start = _SHEET_GEN.get(install_id, 0)
 
         # On-disk tier: survives sidecar restarts, so the first roster
-        # view after launch skips the ~1 s bake. Warm the in-memory tier.
+        # view after launch skips the multi-second bake. Warm the in-memory tier.
         on_disk = _disk_sheet_get(install_id, mtime_ns, size)
         if on_disk is not None:
             with _SHEET_CACHE_LOCK:
@@ -467,7 +469,7 @@ def _portrait_sheet_bytes_and_meta(
 def warm_install(install_id: str, install_path, size: str = "bigface") -> None:
     """Pre-bake the roster portrait sheet + prime the roster/parse caches
     on a background daemon thread, so the first roster view after an
-    install becomes active is a cache hit instead of a ~1 s bake.
+    install becomes active is a cache hit instead of a ~4-9 s bake.
 
     `size` defaults to "bigface" — the size the AIM-style roster grid
     requests on mount. At most one warm runs per install at a time (rapid
@@ -501,9 +503,17 @@ def warm_install(install_id: str, install_path, size: str = "bigface") -> None:
             with _WARMING_LOCK:
                 _WARMING.discard(install_id)
 
-    threading.Thread(
-        target=_run, name=f"warm-{install_id[:8]}", daemon=True,
-    ).start()
+    try:
+        threading.Thread(
+            target=_run, name=f"warm-{install_id[:8]}", daemon=True,
+        ).start()
+    except RuntimeError:
+        # Thread creation can fail under resource exhaustion. _run (and its
+        # finally that discards the flag) never executes in that case, so
+        # clear _WARMING here — otherwise this install is permanently stuck
+        # in the set and every future warm for it silently no-ops.
+        with _WARMING_LOCK:
+            _WARMING.discard(install_id)
 
 
 def _portrait_sheet_etag(png_bytes: bytes) -> str:

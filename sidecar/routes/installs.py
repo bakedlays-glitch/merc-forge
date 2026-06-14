@@ -200,7 +200,7 @@ def set_active(payload: ActivePayload) -> dict:
     if active is not None:
         # Fire-and-forget background warm: pre-bake the roster portrait
         # sheet + prime the roster/parse caches so the user's first roster
-        # view after switching installs is a cache hit, not a ~1 s bake.
+        # view after switching installs is a cache hit, not a ~4-9 s bake.
         # Non-blocking daemon thread — does not delay this response and
         # does not reintroduce the watchdog-endangering startup crawl that
         # bug #12 removed.

@@ -576,13 +576,18 @@ export interface PortraitSheetManifest {
 }
 
 export interface PortraitSheet {
-  /** Blob URL the caller owns — revoke on unmount / refetch. */
+  /** Object URL for the sprite sheet. Revocation is centralized in
+   *  main.tsx, which revokes it when the owning react-query entry is
+   *  evicted or its data is replaced in place — do NOT revoke it from a
+   *  component (that frees a still-cached URL under staleTime: Infinity). */
   blobUrl: string;
   manifest: PortraitSheetManifest;
 }
 
 /** Fetch the roster portrait sprite sheet + manifest in parallel.
- *  Caller is responsible for `URL.revokeObjectURL(blobUrl)` when done. */
+ *  The returned `blobUrl`'s lifetime is managed centrally in main.tsx
+ *  (revoked on react-query cache eviction / in-place replacement) — callers
+ *  must NOT revoke it themselves. */
 export async function getRosterPortraitSheet(opts?: {
   install_id?: string;
   size?: string;

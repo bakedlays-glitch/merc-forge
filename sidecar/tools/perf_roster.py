@@ -14,7 +14,9 @@ Metrics (all milliseconds, min of N reps):
   make_install_context_cold  one InstallContext build (was the ~2.2 s pig)
   load_roster_cold           load_roster() with a fresh MercProfiles parse
   load_roster_warm           load_roster() with the parse cache warm
-  portrait_sheet_bake_cold   full sheet bake (decode every face + composite)
+  portrait_sheet_bake_cold   full smallface sheet bake (decode every face + composite)
+  portrait_sheet_bake_bigface_cold  full BIGFACE sheet bake — the size the roster
+                             grid actually ships (slower; background-warmed)
   portrait_sheet_disk_hit    sheet served from the on-disk cache after a
                              simulated fresh sidecar launch (in-memory empty)
 
@@ -58,6 +60,10 @@ BUDGETS_MS: dict[str, float] = {
     "load_roster_cold": 800.0,
     "load_roster_warm": 500.0,
     "portrait_sheet_bake_cold": 8000.0,
+    # Bigface is the size the roster grid ships; ~9 s on a ~250-merc install
+    # (background-warmed + disk-cached, so not user-visible latency). Budget
+    # is deliberately loose — it catches a gross regression, not the norm.
+    "portrait_sheet_bake_bigface_cold": 14000.0,
     "portrait_sheet_disk_hit": 400.0,
 }
 
@@ -156,6 +162,14 @@ def run(install_path: Path) -> dict[str, float]:
     _bake_ctx = IC.make_install_context(install_path)
     results["portrait_sheet_bake_cold"] = _time_ms(
         lambda: R._bake_portrait_sheet(_bake_ctx, "smallface"), reps=1
+    )
+    # The roster grid ships BIGFACE (106x122) — measure the size that
+    # actually bakes in production. It's slower than smallface (most NPCs
+    # lack a bigface and exhaust the fallback chain's SLF probes), but it's
+    # baked once per data change on a background warm thread, so its budget
+    # is generous: it guards a gross regression, not the ~9 s norm.
+    results["portrait_sheet_bake_bigface_cold"] = _time_ms(
+        lambda: R._bake_portrait_sheet(_bake_ctx, "bigface"), reps=1
     )
 
     # Disk-hit: prime the on-disk cache, drop the in-memory tier to mimic a

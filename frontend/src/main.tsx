@@ -26,20 +26,34 @@ const queryClient = new QueryClient({
   },
 });
 
-// Roster portrait-sheet blobs: each cached query entry owns an object
-// URL. Revoke it exactly when that entry LEAVES the cache (gcTime expiry,
-// invalidation, or reset) — never on component unmount. The roster query
-// holds the sheet with `staleTime: Infinity`, so the old unmount-time
-// revoke freed a URL that was still cached and re-served on a quick
-// return visit, blanking every portrait. Centralising revocation on the
-// cache 'removed' event keeps the blob alive as long as the entry is, and
-// covers both the route-mounted fetch and the startup prefetch.
+// Roster portrait-sheet blobs: each cached query entry owns an object URL.
+// We revoke it when that entry LEAVES the cache (gcTime expiry, reset) AND
+// when its data is replaced in place by a same-key refetch (e.g. a sidecar
+// restart re-fetching the same dataUpdatedAt key) — never on component
+// unmount. The roster query holds the sheet with `staleTime: Infinity`, so
+// the old unmount-time revoke freed a URL that was still cached and
+// re-served on a quick return visit, blanking every portrait. Tracking the
+// current URL per query hash covers both the route-mounted fetch and the
+// startup prefetch, and plugs the in-place-replacement leak the bare
+// 'removed'-only handler missed.
+const sheetBlobUrls = new Map<string, string>();
 queryClient.getQueryCache().subscribe((event) => {
-  if (event.type !== "removed") return;
-  const key = event.query.queryKey;
-  if (Array.isArray(key) && key[0] === "roster-portrait-sheet") {
-    const data = event.query.state.data as { blobUrl?: string } | undefined;
-    if (data?.blobUrl) URL.revokeObjectURL(data.blobUrl);
+  const { query } = event;
+  const key = query.queryKey;
+  if (!Array.isArray(key) || key[0] !== "roster-portrait-sheet") return;
+  const hash = query.queryHash;
+  const tracked = sheetBlobUrls.get(hash);
+  if (event.type === "removed") {
+    if (tracked) {
+      URL.revokeObjectURL(tracked);
+      sheetBlobUrls.delete(hash);
+    }
+    return;
+  }
+  const current = (query.state.data as { blobUrl?: string } | undefined)?.blobUrl;
+  if (current && current !== tracked) {
+    if (tracked) URL.revokeObjectURL(tracked); // old URL replaced in place
+    sheetBlobUrls.set(hash, current);
   }
 });
 

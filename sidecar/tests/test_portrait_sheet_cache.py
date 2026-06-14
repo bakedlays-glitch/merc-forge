@@ -185,6 +185,97 @@ def test_invalidate_during_bake_is_not_repopulated(tmp_path, monkeypatch):
     assert R._disk_sheet_get("iid-gen", mtime, "bigface") is None
 
 
+# ── Decode-aware face fallback (largest real face first) ────────────
+
+
+def _tiny_png():
+    import io as _io
+
+    from PIL import Image as _Image
+
+    b = _io.BytesIO()
+    _Image.new("RGBA", (4, 4), (10, 20, 30, 255)).save(b, "PNG")
+    return b.getvalue()
+
+
+class _FallbackCtx:
+    """ctx stub for _bake_portrait_sheet: returns per-size sentinel bytes so
+    the decode-aware fallback can be exercised without real STIs."""
+
+    def __init__(self, per_size):
+        self._per_size = per_size  # {size: bytes | None}
+
+    def profiles_xml_path(self):
+        from pathlib import Path
+        return Path("dummy-profiles.xml")
+
+    def face_sti_bytes(self, face_index, size="smallface"):
+        v = self._per_size.get(size)
+        return None if v is None else (v, f"src:{size}")
+
+
+def _patch_bake(monkeypatch, slot, per_size, decode):
+    import mercwizard_core.sti_decode as _stidecode
+    monkeypatch.setattr(
+        R.profiles_xml, "read_all_slots",
+        lambda p: {slot: {"ubFaceIndex": str(slot), "zName": "X"}},
+    )
+    monkeypatch.setattr(_stidecode, "decode_sti_frame_to_png", decode)
+    return _FallbackCtx(per_size)
+
+
+def test_bake_fallback_falls_through_undecodable_larger_face(monkeypatch):
+    """BigFace absent, SmallFace present-but-undecodable, 65FACE good →
+    the slot still renders (fell through to the 65FACE), tried largest first."""
+    decoded_with: list = []
+
+    def decode(b, frame_index=0):
+        decoded_with.append(b)
+        return None if b == b"SMALL-bad" else _tiny_png()
+
+    ctx = _patch_bake(monkeypatch, 5, {
+        "bigface": None, "smallface": b"SMALL-bad",
+        "face_65": b"FACE65-good", "face_33": b"FACE33-good",
+    }, decode)
+    _png, manifest = R._bake_portrait_sheet(ctx, "bigface")
+
+    assert any(c["slot"] == 5 for c in manifest["cells"])
+    assert not any(e["slot"] == 5 for e in manifest["errors"])
+    # Largest-real-face first: SmallFace decoded before 65FACE; BigFace never
+    # decoded (no file); 33FACE not reached (65FACE succeeded).
+    assert decoded_with == [b"SMALL-bad", b"FACE65-good"]
+
+
+def test_bake_fallback_uses_largest_decodable_first(monkeypatch):
+    """BigFace absent but SmallFace good → SmallFace wins over the smaller
+    variants (no upscaling from a tiny face)."""
+    decoded_with: list = []
+
+    def decode(b, frame_index=0):
+        decoded_with.append(b)
+        return _tiny_png()
+
+    ctx = _patch_bake(monkeypatch, 7, {
+        "bigface": None, "smallface": b"SMALL-good",
+        "face_65": b"FACE65-good", "face_33": b"FACE33-good",
+    }, decode)
+    _png, manifest = R._bake_portrait_sheet(ctx, "bigface")
+
+    assert any(c["slot"] == 7 for c in manifest["cells"])
+    assert decoded_with == [b"SMALL-good"]  # smaller variants never reached
+
+
+def test_bake_fallback_no_decodable_face_errors_not_crashes(monkeypatch):
+    """No face in any size → slot excluded with an error, never raises."""
+    ctx = _patch_bake(monkeypatch, 9, {
+        "bigface": None, "smallface": None, "face_65": None, "face_33": None,
+    }, lambda b, frame_index=0: None)
+    _png, manifest = R._bake_portrait_sheet(ctx, "bigface")
+
+    assert not any(c["slot"] == 9 for c in manifest["cells"])
+    assert any(e["slot"] == 9 for e in manifest["errors"])
+
+
 def test_warm_install_dedups_per_install(tmp_path, monkeypatch):
     """At most one warm thread runs per install at a time; a second
     warm_install while the first is in flight is a no-op."""

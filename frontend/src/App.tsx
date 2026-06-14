@@ -60,7 +60,8 @@ export default function App() {
   const queryClient = useQueryClient();
 
   // Background-warm the roster so the user's first visit is an instant
-  // cache hit instead of a cold fetch + ~1 s portrait-sheet bake. Fired
+  // cache hit instead of a cold fetch + a multi-second portrait-sheet bake
+  // (~4-9 s on a large install; the bigface grid is the slow path). Fired
   // once an install is active (app launch) and again after a sidecar
   // respawn. Best-effort: prefetch failures surface normally when the
   // user actually navigates. The portrait-sheet key + size + cacheBust
