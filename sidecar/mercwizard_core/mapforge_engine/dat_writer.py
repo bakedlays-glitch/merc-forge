@@ -151,6 +151,23 @@ def write_dat_bytes(parsed: Dict[str, Any], original_bytes: bytes) -> bytes:
     heights_size = 2 * world_max
     appendix_offset = parsed["appendix_offset"]
 
+    # Appendix: SYNTHESIZE from an authored model if one is present
+    # (exit grids / ambient / entry points), else pass the original bytes
+    # through verbatim (preserves the byte-exact round-trip for unedited
+    # maps). Authoring sets parsed["flags"] to match the sections written,
+    # so the header below reflects the new flag word.
+    appendix_model = parsed.get("appendix_model")
+    if appendix_model is not None:
+        try:
+            from .appendix_writer import build_appendix
+        except ImportError:
+            from appendix_writer import build_appendix
+        appendix_bytes, new_flags = build_appendix(
+            appendix_model, parsed.get("tail"), parsed["major"])
+        parsed["flags"] = new_flags
+    else:
+        appendix_bytes = original_bytes[appendix_offset:]
+
     out = bytearray()
     out.extend(_pack_header(parsed, original_bytes))
     # Heights region: emit from parsed["heights"] (low byte) + parsed
@@ -178,10 +195,10 @@ def write_dat_bytes(parsed: Dict[str, Any], original_bytes: bytes) -> bytes:
     out.extend(_pack_pass_2byte(parsed["roofs"]))
     out.extend(_pack_pass_2byte(parsed["onroofs"]))
     out.extend(_pack_room_info(parsed["rooms"], parsed["room_bytes_per_tile"]))
-    # Appendix passthrough. parsed["appendix_offset"] points to the byte
-    # AFTER room info ends in the original file. If our re-encoding is
-    # correct, len(out) right now == appendix_offset.
-    out.extend(original_bytes[appendix_offset:])
+    # Appendix: synthesized (authored model) or verbatim passthrough — decided
+    # above. parsed["appendix_offset"] points to the byte AFTER room info; if
+    # our re-encoding is correct, len(out) right now == appendix_offset.
+    out.extend(appendix_bytes)
     return bytes(out)
 
 

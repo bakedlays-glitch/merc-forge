@@ -192,13 +192,16 @@ def parse_appendix_minimal(
         if flags & MAP_FULLSOLDIER_SAVED:
             return bail("soldiers_records")
 
-        # 6. EXITGRIDS — uint16 count + count * 8 bytes (per appendices.py write side).
+        # 6. EXITGRIDS — uint16 count + count * 12 bytes. Modern (major>=7.0)
+        # EXITGRID is a class: iMapIndex(i32) usGridNo(i32) ubGotoSectorX/Y/Z(3xu8)
+        # +1 pad = sizeof 12 (Exit Grids.h:16-31, source-verified 2026-06-14).
+        # (The old "8" was the classic INT16-gridno layout — wrong for v7.0.)
         if flags & MAP_EXITGRIDS_SAVED:
             if pos + 2 > end:
                 return bail("exitgrid_count_truncated")
             eg_count = safe_uint16(pos)
             out["appendix_exitgrid_count"] = eg_count
-            pos += 2 + 8 * eg_count
+            pos += 2 + 12 * eg_count
             if pos > end:
                 return bail("exitgrid_records_overrun")
 
