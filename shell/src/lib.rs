@@ -122,6 +122,10 @@ pub fn run() {
                         .title("Merc Forge — startup failed")
                         .kind(MessageDialogKind::Error)
                         .blocking_show();
+                    // Flush the buffered error line: the LoggerHandle is
+                    // mem::forget-ed (no Drop-flush) and process::exit skips
+                    // destructors, so without this the diagnostic can be lost.
+                    log::logger().flush();
                     std::process::exit(1);
                 }
             };

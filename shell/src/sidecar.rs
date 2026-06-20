@@ -102,10 +102,27 @@ async fn spawn_one(app: &AppHandle, token: &str) -> Result<(u16, CommandChild), 
         }
     });
 
-    let port = tokio::time::timeout(SPAWN_TIMEOUT, port_rx)
-        .await
-        .map_err(|_| format!("Sidecar didn't report port within {}s", SPAWN_TIMEOUT.as_secs()))?
-        .map_err(|_| "Sidecar exited before reporting port".to_string())?;
+    // On any failure here the spawned process is still alive but `child` is
+    // about to drop — and `CommandChild` has NO Drop-kill, so an early return
+    // would orphan a headless sidecar. Kill it explicitly on both error arms.
+    let port = match tokio::time::timeout(SPAWN_TIMEOUT, port_rx).await {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => {
+            // port channel closed → the sidecar exited before reporting.
+            let _ = child.kill();
+            return Err("Sidecar exited before reporting port".to_string());
+        }
+        Err(_) => {
+            // Timeout: process spawned but never printed its port → kill it so
+            // we don't leak a running, unreachable sidecar.
+            let pid = child.pid();
+            let _ = child.kill();
+            return Err(format!(
+                "Sidecar didn't report port within {}s (pid {} killed)",
+                SPAWN_TIMEOUT.as_secs(), pid,
+            ));
+        }
+    };
 
     LATEST_SIDECAR_PID.store(child.pid(), Ordering::SeqCst);
     log::info!("Sidecar bound port {} (pid {})", port, child.pid());
