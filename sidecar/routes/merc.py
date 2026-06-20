@@ -719,9 +719,11 @@ def get_merc_portrait(
         face_index = int(raw.get("ubFaceIndex", "0").strip())
     except (ValueError, AttributeError):
         face_index = 0
-    if face_index == 0:
-        # Slot is filled but has no portrait (vanilla convention). Return
-        # 204 so the client can render the slot number alone.
+    if face_index == 0 and slot != 0:
+        # Face index 0 is "no portrait" (vanilla convention) for every slot
+        # EXCEPT slot 0 (Barry/the Chosen one), whose real face IS face 0 —
+        # matches the roster bake's `face_index == 0 and slot != 0` skip.
+        # Return 204 so the client can render the slot number alone.
         return Response(status_code=204)
 
     # Resolve source bytes + a version-id derived from the on-disk
@@ -788,6 +790,108 @@ def get_merc_portrait(
         "size": size,
         "message": last_reason,
     })
+
+
+@router.get("/merc/{slot}/animation-frames.png")
+def get_merc_animation_frames(
+    slot: int,
+    install_id: str | None = Query(default=None),
+) -> Response:
+    """One horizontal strip of every animation frame in the merc's SmallFace
+    STI, each composited onto the base face the way the engine renders it.
+
+    A JA2 face STI is: frame 0 = the full face, then the eye/blink sub-frames
+    (1-4), then the mouth/talk sub-frames (5-7) — small region images the
+    engine pastes onto the base at the merc's usEyesX/Y / usMouthX/Y at
+    runtime. We reconstruct each composited face into a 48x43 cell so the
+    Edit tab can show the merc's whole expression set (base · blink · talk),
+    not just the neutral portrait. 204 when the slot has no portrait (face
+    index 0); 404 when the SmallFace STI is missing.
+    """
+    import io as _io
+    from PIL import Image as _Image
+
+    info = _resolve_install(install_id)
+    ctx = make_install_context(info.path)
+    raw = profiles_xml.read_slot(ctx.profiles_xml_path(), slot)
+    if raw is None:
+        raise HTTPException(status_code=404, detail={"error": "SLOT_EMPTY", "slot": slot})
+    try:
+        face_index = int(raw.get("ubFaceIndex", "0").strip())
+    except (ValueError, AttributeError):
+        face_index = 0
+    if face_index == 0 and slot != 0:
+        return Response(status_code=204)
+
+    res = ctx.face_sti_bytes(face_index, size="smallface")
+    if res is None:
+        raise HTTPException(status_code=404, detail={
+            "error": "PORTRAIT_NOT_FOUND", "slot": slot, "face_index": face_index,
+            "message": f"SmallFace STI for face {face_index} not found",
+        })
+    sti_bytes, _source_id = res
+
+    from mercwizard_core.sti_decode import decode_sti_frame_to_png
+    frames: list = []
+    for i in range(64):  # generous cap; real STIs hold ~8
+        png = decode_sti_frame_to_png(sti_bytes, frame_index=i)
+        if png is None:
+            break
+        try:
+            frames.append(_Image.open(_io.BytesIO(png)).convert("RGBA"))
+        except Exception:  # noqa: BLE001
+            break
+    if not frames:
+        raise HTTPException(status_code=404, detail={
+            "error": "PORTRAIT_DECODE_FAILED", "slot": slot, "face_index": face_index,
+        })
+
+    def _coord(key: str) -> int:
+        try:
+            return int((raw.get(key) or "0").strip())
+        except (ValueError, AttributeError):
+            return 0
+    eye_xy = (_coord("usEyesX"), _coord("usEyesY"))
+    mouth_xy = (_coord("usMouthX"), _coord("usMouthY"))
+
+    base = frames[0]
+    n = len(frames)
+    # Canonical layout authored by the merc pipeline + shipped by vanilla:
+    # after the base, the next (up to) 4 frames are eye/blink, the rest are
+    # mouth/talk. min() guards a short STI.
+    eye_n = min(4, n - 1)
+    cw, ch = _CELL_SIZES_SMALLFACE
+    cells: list = []
+    for i, fr in enumerate(frames):
+        if i == 0:
+            cell = base.copy()
+        else:
+            cell = base.copy()
+            pos = eye_xy if i <= eye_n else mouth_xy
+            try:
+                cell.paste(fr, pos, fr)  # alpha-composite the sub-frame at its coord
+            except (ValueError, SystemError):
+                pass  # bad coord / size mismatch — leave the base for this cell
+        if cell.size != (cw, ch):
+            cell = cell.resize((cw, ch), _Image.NEAREST)
+        cells.append(cell)
+
+    strip = _Image.new("RGBA", (cw * len(cells), ch), (0, 0, 0, 0))
+    for idx, im in enumerate(cells):
+        strip.paste(im, (idx * cw, 0))
+    buf = _io.BytesIO()
+    strip.save(buf, format="PNG")
+    data = buf.getvalue()
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=60", "ETag": _etag_for_png(data)},
+    )
+
+
+# Canonical SmallFace cell size — every composited animation frame is
+# normalized to this so the frontend can slice the strip on a fixed stride.
+_CELL_SIZES_SMALLFACE = (48, 43)
 
 
 def _decode_face_sti_frame_zero(sti_path: Path) -> Optional[bytes]:

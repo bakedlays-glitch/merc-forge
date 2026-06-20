@@ -706,6 +706,60 @@ const FACE_SIZES: { key: "bigface" | "smallface" | "face_65" | "face_33"; label:
   { key: "face_33", label: "33Face", w: 33, h: 33 },
 ];
 
+// The SmallFace STI's animation frames, composited onto the base face
+// (base · blink · talk) and served as one strip by /merc/{slot}/animation-
+// frames.png. Slices the strip on a fixed 48-wide stride; the frame count is
+// read from the loaded image so a short/odd STI still renders correctly.
+function AnimationFramesRow({ url }: { url: string }) {
+  const [count, setCount] = useState<number | null>(null);
+  const CW = 48;
+  const CH = 43;
+  const SCALE = 2;
+  const eyeN = count ? Math.min(4, count - 1) : 0;
+  return (
+    <>
+      {/* Off-screen loader: read naturalWidth to learn the frame count. */}
+      <img
+        src={url}
+        alt=""
+        className="hidden"
+        onLoad={(e) => setCount(Math.max(1, Math.round(e.currentTarget.naturalWidth / CW)))}
+        onError={() => setCount(0)}
+      />
+      {count === null ? (
+        <div style={{ width: CW * SCALE, height: CH * SCALE }}>
+          <PortraitSkeleton label="…" />
+        </div>
+      ) : count <= 1 ? (
+        <p className="text-[10px] text-wasteland-500">No animation frames on disk (static face).</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {Array.from({ length: count }).map((_, i) => {
+            const label = i === 0 ? "Base" : i <= eyeN ? `Blink ${i}` : `Talk ${i - eyeN}`;
+            return (
+              <div key={i} className="flex flex-col items-center gap-1">
+                <div
+                  className="border border-wasteland-800"
+                  style={{
+                    width: CW * SCALE,
+                    height: CH * SCALE,
+                    backgroundImage: `url(${url})`,
+                    backgroundSize: `${count * CW * SCALE}px ${CH * SCALE}px`,
+                    backgroundPosition: `-${i * CW * SCALE}px 0`,
+                    backgroundRepeat: "no-repeat",
+                    imageRendering: "pixelated",
+                  }}
+                />
+                <span className="font-mono text-[9px] text-wasteland-500">{label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
 function EditPortraitTab({ merc }: { merc: Merc }) {
   const qc = useQueryClient();
   const [portrait, setPortrait] = useState<File | null>(null);
@@ -728,6 +782,7 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
   // Built with a `?_t=<token>` query param because `<img>` tags can't
   // attach the X-MercWizard-Token header. See mediaUrl() docstring.
   const [portraitUrls, setPortraitUrls] = useState<Record<string, string> | null>(null);
+  const [animFramesUrl, setAnimFramesUrl] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     Promise.all([getApiBaseUrl(), getServerToken()]).then(([base, token]) => {
@@ -745,6 +800,7 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
         urls[s.key] = `${base}/merc/${merc.uiIndex}/portrait?size=${s.key}&v=${v}${tokenQs}`;
       }
       setPortraitUrls(urls);
+      setAnimFramesUrl(`${base}/merc/${merc.uiIndex}/animation-frames.png?v=${v}${tokenQs}`);
     }).catch(() => {
       // No reachable sidecar yet — leave the preview empty; the dropzone
       // still works for picking a new file.
@@ -829,6 +885,18 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
           </div>
         )}
       </div>
+
+      {/* Animation frames — base face + the blink/talk sub-frames composited
+          the way the engine renders them, so you can see the merc's whole
+          expression set, not just the neutral portrait. */}
+      {animFramesUrl && (
+        <div className="rounded border border-wasteland-700 bg-wasteland-950/40 p-3">
+          <div className="text-xs uppercase text-wasteland-500 mb-2">
+            Animation frames · base · blink · talk
+          </div>
+          <AnimationFramesRow url={animFramesUrl} />
+        </div>
+      )}
 
       <PortraitDropzone
         previewUrl={portraitUrl}
