@@ -181,7 +181,7 @@ export default function Move() {
 
     if ((sourceType === 3 || sourceType === 4)
         && (destClass === "aim" || destClass === "merc")) {
-      const typeLabel = sourceType === 3 ? "NPC" : "RPC";
+      const typeLabel = sourceType === 3 ? "RPC" : "NPC";  // engine: RPC=3, NPC=4
       const site = destClass === "aim" ? "AIM website" : "M.E.R.C. website (Speck's service)";
       return {
         severity: "warn",

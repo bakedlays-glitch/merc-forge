@@ -317,8 +317,9 @@ def _bake_portrait_sheet(ctx, size: str) -> tuple[bytes, dict]:
             face_index = int(raw.get("ubFaceIndex", "0").strip())
         except (ValueError, AttributeError):
             face_index = 0
-        # Face index 0 is a real face ONLY for Barry (profile 0); for every
-        # other slot it's the "no portrait assigned" default, so skip those.
+        # Face index 0 is a real face ONLY for slot 0 (the Chosen one /
+        # "Narg"); for every other slot it's the "no portrait assigned"
+        # default, so skip those.
         if face_index == 0 and slot != 0:
             continue
         # Resolve the slot's face by trying the requested size first, then

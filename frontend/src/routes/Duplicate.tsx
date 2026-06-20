@@ -184,7 +184,7 @@ export default function Duplicate() {
     // genuinely surprises people.
     if ((sourceType === 3 || sourceType === 4)
         && (destClass === "aim" || destClass === "merc")) {
-      const sourceTypeLabel = sourceType === 3 ? "NPC" : "RPC";
+      const sourceTypeLabel = sourceType === 3 ? "RPC" : "NPC";  // engine: RPC=3, NPC=4
       const siteLabel = destClass === "aim" ? "AIM website" : "M.E.R.C. website (Speck's service)";
       return {
         severity: "warn",

@@ -721,7 +721,7 @@ def get_merc_portrait(
         face_index = 0
     if face_index == 0 and slot != 0:
         # Face index 0 is "no portrait" (vanilla convention) for every slot
-        # EXCEPT slot 0 (Barry/the Chosen one), whose real face IS face 0 —
+        # EXCEPT slot 0 (the Chosen one / "Narg"), whose real face IS face 0 —
         # matches the roster bake's `face_index == 0 and slot != 0` skip.
         # Return 204 so the client can render the slot number alone.
         return Response(status_code=204)
