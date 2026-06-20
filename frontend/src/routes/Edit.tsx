@@ -657,25 +657,25 @@ function PortraitSkeleton({ label }: { label: string }) {
 /** Image with explicit loading + error states. Renders the
  * PortraitSkeleton while the IMG is fetching, hides on 404/204 (slot
  * has no portrait on disk yet), shows the painting on success. */
-function PortraitImage({ url, alt }: { url: string; alt: string }) {
+function PortraitImage({ url, alt, w = 106, h = 122 }: { url: string; alt: string; w?: number; h?: number }) {
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   // Reset to loading whenever the URL changes (e.g. after a recompile
   // bumps the cache-busting suffix).
   useEffect(() => { setState("loading"); }, [url]);
   if (state === "error") {
     return (
-      <div className="mx-auto" style={{ width: 106, height: 122 }}>
-        <div className="w-full h-full rounded border border-wasteland-800 bg-wasteland-950 flex items-center justify-center text-[10px] text-wasteland-500 text-center px-2">
-          No portrait on disk yet — pick one below to write it.
+      <div style={{ width: w, height: h }}>
+        <div className="w-full h-full rounded border border-wasteland-800 bg-wasteland-950 flex items-center justify-center text-[9px] text-wasteland-500 text-center px-1">
+          no art
         </div>
       </div>
     );
   }
   return (
-    <div className="relative mx-auto" style={{ width: 106, height: 122 }}>
+    <div className="relative" style={{ width: w, height: h }}>
       {state === "loading" && (
         <div className="absolute inset-0">
-          <PortraitSkeleton label="Loading portrait…" />
+          <PortraitSkeleton label="…" />
         </div>
       )}
       <img
@@ -683,8 +683,8 @@ function PortraitImage({ url, alt }: { url: string; alt: string }) {
         alt={alt}
         className="block"
         style={{
-          width: 106,
-          height: 122,
+          width: w,
+          height: h,
           imageRendering: "pixelated",
           objectFit: "contain",
           opacity: state === "loading" ? 0 : 1,
@@ -695,6 +695,16 @@ function PortraitImage({ url, alt }: { url: string; alt: string }) {
     </div>
   );
 }
+
+// The four face STIs every merc carries, with the display box each renders
+// into (their canonical decoded sizes) — so the Edit tab shows ALL of a
+// merc's pictures at their true relative sizes, not just the BigFace.
+const FACE_SIZES: { key: "bigface" | "smallface" | "face_65" | "face_33"; label: string; w: number; h: number }[] = [
+  { key: "bigface", label: "BigFace", w: 106, h: 122 },
+  { key: "smallface", label: "SmallFace", w: 48, h: 43 },
+  { key: "face_65", label: "65Face", w: 65, h: 65 },
+  { key: "face_33", label: "33Face", w: 33, h: 33 },
+];
 
 function EditPortraitTab({ merc }: { merc: Merc }) {
   const qc = useQueryClient();
@@ -717,7 +727,7 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
   //
   // Built with a `?_t=<token>` query param because `<img>` tags can't
   // attach the X-MercWizard-Token header. See mediaUrl() docstring.
-  const [currentPortraitUrl, setCurrentPortraitUrl] = useState<string | null>(null);
+  const [portraitUrls, setPortraitUrls] = useState<Record<string, string> | null>(null);
   useEffect(() => {
     let cancelled = false;
     Promise.all([getApiBaseUrl(), getServerToken()]).then(([base, token]) => {
@@ -727,9 +737,14 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
       // without waiting on the 60s server Cache-Control. The roster
       // query invalidation also bumps the URL, but the Edit tab opens
       // before that fires when navigating from the roster row.
-      setCurrentPortraitUrl(
-        `${base}/merc/${merc.uiIndex}/portrait?size=bigface&v=${Date.now()}${tokenQs}`,
-      );
+      // Build a URL per face size so the tab shows ALL of the merc's
+      // pictures (BigFace/SmallFace/65Face/33Face), not just the BigFace.
+      const v = Date.now();
+      const urls: Record<string, string> = {};
+      for (const s of FACE_SIZES) {
+        urls[s.key] = `${base}/merc/${merc.uiIndex}/portrait?size=${s.key}&v=${v}${tokenQs}`;
+      }
+      setPortraitUrls(urls);
     }).catch(() => {
       // No reachable sidecar yet — leave the preview empty; the dropzone
       // still works for picking a new file.
@@ -786,19 +801,31 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
           isn't reachable. */}
       <div className="rounded border border-wasteland-700 bg-wasteland-950/40 p-3">
         <div className="text-xs uppercase text-wasteland-500 mb-2">
-          Current portrait on disk · face {merc.ubFaceIndex}
+          Current portraits on disk · face {merc.ubFaceIndex}
         </div>
-        {currentPortraitUrl ? (
-          <PortraitImage
-            url={currentPortraitUrl}
-            alt={`Current portrait for ${merc.zNickname || merc.zName || `slot ${merc.uiIndex}`}`}
-          />
+        {portraitUrls ? (
+          // All four face STIs side-by-side at their true relative sizes, so
+          // you can see (and sanity-check) every picture a merc carries, not
+          // just the BigFace.
+          <div className="flex flex-wrap items-end gap-4">
+            {FACE_SIZES.map((s) => (
+              <div key={s.key} className="flex flex-col items-center gap-1">
+                <PortraitImage
+                  url={portraitUrls[s.key] ?? ""}
+                  alt={`${s.label} for ${merc.zNickname || merc.zName || `slot ${merc.uiIndex}`}`}
+                  w={s.w}
+                  h={s.h}
+                />
+                <span className="font-mono text-[10px] text-wasteland-500">{s.label}</span>
+              </div>
+            ))}
+          </div>
         ) : (
           /* Token/api-base not resolved yet (very early in tab open).
               Render the same skeleton shape so the layout doesn't jump
-              when the IMG finally appears. */
-          <div className="mx-auto" style={{ width: 106, height: 122 }}>
-            <PortraitSkeleton label="Resolving portrait URL…" />
+              when the IMGs finally appear. */
+          <div style={{ width: 106, height: 122 }}>
+            <PortraitSkeleton label="Resolving portraits…" />
           </div>
         )}
       </div>
