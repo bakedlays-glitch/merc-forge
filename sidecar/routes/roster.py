@@ -317,61 +317,60 @@ def _bake_portrait_sheet(ctx, size: str) -> tuple[bytes, dict]:
             face_index = int(raw.get("ubFaceIndex", "0").strip())
         except (ValueError, AttributeError):
             face_index = 0
+        try:
+            prof_type = int((raw.get("Type") or "").strip())
+        except (ValueError, AttributeError):
+            prof_type = -1
         # Face index 0 is a real face ONLY for slot 0 (the Chosen one /
         # "Narg"); for every other slot it's the "no portrait assigned"
-        # default, so skip those.
-        if face_index == 0 and slot != 0:
+        # default — EXCEPT a Type=5 vehicle, whose ubFaceIndex is inert (it
+        # draws its Vehicles.xml StiFaceIcon, not a FACES STI), so a face-0
+        # vehicle must still render its icon.
+        if face_index == 0 and slot != 0 and prof_type != 5:
             continue
-        # Resolve the slot's face by trying the requested size first, then
-        # the fallbacks (largest-real-face first). Crucially we accept the
-        # first candidate that BOTH exists AND decodes — picking by file
-        # existence alone would drop a merc whose SmallFace file is present
-        # but undecodable (16-bit / malformed palette) even when its
-        # 65FACE variant decodes fine. decode_sti_frame_to_png returns PNG
-        # bytes; we re-open into PIL to composite (the ~1ms round-trip
-        # beats refactoring the decoder to optionally return PIL).
-        candidates = (size, *_FALLBACK_ORDER.get(size, ()))
         img: Optional[Image.Image] = None
         last_reason = "STI not found (loose or in any SLF)"
-        for cand in candidates:
-            res = ctx.face_sti_bytes(face_index, size=cand)
-            if res is None:
-                continue
-            cand_bytes, _source_id = res
-            png_bytes = decode_sti_frame_to_png(cand_bytes, frame_index=0)
-            if png_bytes is None:
-                last_reason = (
-                    f"{cand} decode returned None "
-                    f"(likely 16-bit STI or malformed palette)"
-                )
-                continue
-            try:
-                img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-                break
-            except Exception as e:  # noqa: BLE001
-                last_reason = f"{cand} PIL re-decode failed: {type(e).__name__}"
-                img = None
-                continue
-        if img is None:
+        # Resolve the slot's face by trying the requested size first, then the
+        # fallbacks (largest-real-face first), accepting the first candidate
+        # that BOTH exists AND decodes (file-existence alone would drop a merc
+        # whose SmallFace is present-but-undecodable even when its 65FACE
+        # decodes). SKIP this for a face-0 vehicle — face 0 would grab slot-0's
+        # art; it goes straight to the vehicle icon below.
+        if not (prof_type == 5 and face_index == 0):
+            candidates = (size, *_FALLBACK_ORDER.get(size, ()))
+            for cand in candidates:
+                res = ctx.face_sti_bytes(face_index, size=cand)
+                if res is None:
+                    continue
+                cand_bytes, _source_id = res
+                png_bytes = decode_sti_frame_to_png(cand_bytes, frame_index=0)
+                if png_bytes is None:
+                    last_reason = (
+                        f"{cand} decode returned None "
+                        f"(likely 16-bit STI or malformed palette)"
+                    )
+                    continue
+                try:
+                    img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_reason = f"{cand} PIL re-decode failed: {type(e).__name__}"
+                    img = None
+                    continue
+        if img is None and prof_type == 5:
             # Vehicle (Type=5) profiles don't draw a FACES portrait — the
             # engine uses the Vehicles.xml StiFaceIcon (e.g. INTERFACE\Jeep.sti)
-            # for the UI icon. Only the faceless vehicles reach here (e.g. slot
-            # 199 "Jeep"); vehicles that ship a real FACES bigface (160-164)
-            # already resolved above. Fall back to the vehicle icon so they
-            # render instead of going blank.
-            try:
-                prof_type = int((raw.get("Type") or "").strip())
-            except (ValueError, AttributeError):
-                prof_type = -1
-            if prof_type == 5:
-                vres = ctx.vehicle_icon_bytes(slot)
-                if vres is not None:
-                    vpng = decode_sti_frame_to_png(vres[0], frame_index=0)
-                    if vpng is not None:
-                        try:
-                            img = Image.open(io.BytesIO(vpng)).convert("RGBA")
-                        except Exception:  # noqa: BLE001
-                            img = None
+            # for the UI icon. Faceless vehicles (slot 199 "Jeep", or any with
+            # ubFaceIndex 0) land here; vehicles that ship a real FACES bigface
+            # (160-164) resolved above. Fall back to the icon so they render.
+            vres = ctx.vehicle_icon_bytes(slot)
+            if vres is not None:
+                vpng = decode_sti_frame_to_png(vres[0], frame_index=0)
+                if vpng is not None:
+                    try:
+                        img = Image.open(io.BytesIO(vpng)).convert("RGBA")
+                    except Exception:  # noqa: BLE001
+                        img = None
         if img is None:
             errors.append({
                 "slot": slot, "face_index": face_index, "reason": last_reason,

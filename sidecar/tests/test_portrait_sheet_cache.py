@@ -320,6 +320,36 @@ def test_bake_type5_vehicle_with_no_icon_errors(monkeypatch):
     assert any(e["slot"] == 199 for e in manifest["errors"])
 
 
+def test_bake_type5_face0_vehicle_skips_face_resolve_for_icon(monkeypatch):
+    """A Type=5 vehicle with ubFaceIndex==0 must NOT be dropped by the face-0
+    skip, and must NOT resolve face 0 (which would grab slot-0's art) — it goes
+    straight to the vehicle icon. Proven by making the face path fully
+    resolvable+decodable: the ONLY way the vehicle icon is reached is if the
+    face resolve was skipped."""
+    import mercwizard_core.sti_decode as _stidecode
+    monkeypatch.setattr(
+        R.profiles_xml, "read_all_slots",
+        lambda p: {163: {"ubFaceIndex": "0", "zName": "Heli", "Type": "5"}},
+    )
+    monkeypatch.setattr(_stidecode, "decode_sti_frame_to_png",
+                        lambda b, frame_index=0: _tiny_png())  # everything decodes
+
+    used_icon = {"called": False}
+
+    class _VehCtx(_FallbackCtx):
+        def face_sti_bytes(self, face_index, size="smallface"):
+            return (b"SLOT0-ART", f"src:{size}")  # would win if (wrongly) consulted
+
+        def vehicle_icon_bytes(self, slot):
+            used_icon["called"] = True
+            return (b"ICON", f"icon:{slot}")
+
+    ctx = _VehCtx({})
+    _png, manifest = R._bake_portrait_sheet(ctx, "bigface")
+    assert any(c["slot"] == 163 for c in manifest["cells"])
+    assert used_icon["called"], "face-0 vehicle must skip face resolve and use the icon"
+
+
 def test_warm_install_dedups_per_install(tmp_path, monkeypatch):
     """At most one warm thread runs per install at a time; a second
     warm_install while the first is in flight is a no-op."""

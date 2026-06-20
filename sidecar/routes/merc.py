@@ -719,11 +719,16 @@ def get_merc_portrait(
         face_index = int(raw.get("ubFaceIndex", "0").strip())
     except (ValueError, AttributeError):
         face_index = 0
-    if face_index == 0 and slot != 0:
+    try:
+        prof_type = int((raw.get("Type") or "").strip())
+    except (ValueError, AttributeError):
+        prof_type = -1
+    if face_index == 0 and slot != 0 and prof_type != 5:
         # Face index 0 is "no portrait" (vanilla convention) for every slot
-        # EXCEPT slot 0 (the Chosen one / "Narg"), whose real face IS face 0 —
-        # matches the roster bake's `face_index == 0 and slot != 0` skip.
-        # Return 204 so the client can render the slot number alone.
+        # EXCEPT slot 0 (the Chosen one / "Narg", whose real face IS face 0)
+        # and a Type=5 vehicle (whose ubFaceIndex is inert — it draws its
+        # Vehicles.xml StiFaceIcon, served below). Return 204 so the client
+        # can render the slot number alone.
         return Response(status_code=204)
 
     # Resolve source bytes + a version-id derived from the on-disk
@@ -746,7 +751,10 @@ def get_merc_portrait(
         f"face {face_index} ({size}) not found loose or in any SLF "
         f"archive under {info.path}"
     )
-    for cand in (size, *_FALLBACK_ORDER.get(size, ())):
+    # A face-0 vehicle has no real face to resolve (face 0 would grab slot-0's
+    # art) — empty candidates so it falls straight through to the icon below.
+    candidates = () if (prof_type == 5 and face_index == 0) else (size, *_FALLBACK_ORDER.get(size, ()))
+    for cand in candidates:
         result = ctx.face_sti_bytes(face_index, size=cand)
         if result is None:
             continue
@@ -781,6 +789,24 @@ def get_merc_portrait(
                 "ETag": _etag_for_png(png_bytes),
             },
         )
+
+    # Type=5 vehicle: no FACES portrait — serve its Vehicles.xml StiFaceIcon
+    # (INTERFACE\<vehicle>.sti), so a faceless vehicle (slot 199, or any with
+    # ubFaceIndex 0) matches the roster grid instead of 404-ing.
+    if prof_type == 5:
+        vres = ctx.vehicle_icon_bytes(slot)
+        if vres is not None:
+            vbytes, vsource = vres
+            vkey = (info.id, slot, "vehicle", vsource)
+            vcached = _png_cache_get(vkey)
+            if vcached is not None:
+                return Response(content=vcached, media_type="image/png", headers={
+                    "Cache-Control": "private, max-age=60", "ETag": _etag_for_png(vcached)})
+            vpng = decode_sti_frame_to_png(vbytes, frame_index=0)
+            if vpng is not None:
+                _png_cache_put(vkey, vpng)
+                return Response(content=vpng, media_type="image/png", headers={
+                    "Cache-Control": "private, max-age=60", "ETag": _etag_for_png(vpng)})
 
     # No candidate size resolved + decoded — the client renders a placeholder.
     raise HTTPException(status_code=404, detail={
