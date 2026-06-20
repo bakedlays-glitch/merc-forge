@@ -5,13 +5,15 @@
  * Phase 0 (read-only): no edit ops yet. This is the entry point for the
  * editor-module-to-be.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { formatApiError } from "../lib/api";
 import {
+  fetchRadarThumbSheetUrl,
   getMapForgeHealth,
+  getRadarThumbMeta,
   getSectorInfo,
   getSectorNames,
   streamAtlasBuild,
@@ -34,6 +36,18 @@ import {
 // match on the derived code.
 const GRID_ROWS = "ABCDEFGHIJKLMNOP".split(""); // 16 rows
 const GRID_COLS = Array.from({ length: 16 }, (_, i) => i + 1); // 1..16
+
+// Radar-thumbnail sheet handed down to the grid: the sprite-sheet blob URL,
+// a code→cell-origin map, and the sheet geometry. Each cell paints its
+// sector's 88x44 minimap via CSS background-position. null = off / loading.
+interface GridThumbs {
+  sheetUrl: string;
+  cells: Map<string, { x: number; y: number }>;
+  cols: number;
+  rows: number;
+  cellW: number;
+  cellH: number;
+}
 
 /** `A9.DAT` → "A9"; `a9_b1.dat` → "A9" (basements share the surface
  * sector's code). Mirrors building_library.sector_grid_from_name. Returns
@@ -66,6 +80,21 @@ export default function MapForge() {
   // Strategic-grid vs flat-list view. Default to the strategic grid — it's
   // the orientation most users want ("which sector is the bar in?").
   const [view, setView] = useState<"grid" | "list">("grid");
+  // Radar map thumbnails on the strategic grid (opt-in, persisted). Off by
+  // default — the multi-MB sprite sheet only fetches when the user enables
+  // it, so the hub stays light for users who just want the sector picker.
+  const [showThumbs, setShowThumbs] = useState<boolean>(() => {
+    try { return localStorage.getItem("mapforge.showThumbs") === "1"; }
+    catch { return false; }
+  });
+  const toggleThumbs = useCallback(() => {
+    setShowThumbs((v) => {
+      const next = !v;
+      try { localStorage.setItem("mapforge.showThumbs", next ? "1" : "0"); }
+      catch { /* private mode / quota — non-fatal */ }
+      return next;
+    });
+  }, []);
   // Recently-opened sectors (MRU, persisted). Seeded from localStorage and
   // bumped whenever a sector is opened from this hub.
   const [recent, setRecent] = useState<RecentSector[]>(() => readRecentSectors());
@@ -114,6 +143,55 @@ export default function MapForge() {
     retry: false,
     staleTime: 60 * 60 * 1000,
   });
+
+  // Radar-thumbnail sheet (opt-in). Two queries: the manifest (code→cell
+  // origin) + the sprite-sheet blob URL. Only fetched in grid view with
+  // thumbnails enabled, so the multi-MB PNG is never pulled otherwise.
+  const activeInstallId = health.data?.active_install_id ?? null;
+  const thumbsActive = view === "grid" && showThumbs
+    && health.data?.renderer_available === true
+    && activeInstallId !== null;
+  const thumbMeta = useQuery({
+    queryKey: ["mapforge", "radar-thumbs", "meta", activeInstallId],
+    queryFn: getRadarThumbMeta,
+    enabled: thumbsActive,
+    retry: false,
+    staleTime: 60 * 60 * 1000,
+  });
+  const thumbSheet = useQuery({
+    queryKey: ["mapforge", "radar-thumbs", "sheet", activeInstallId],
+    queryFn: fetchRadarThumbSheetUrl,
+    enabled: thumbsActive,
+    retry: false,
+    staleTime: Infinity,
+  });
+  // Revoke the blob URL when it changes or the component unmounts — the
+  // sheet is multi-MB, so a leak per install switch / toggle adds up.
+  useEffect(() => {
+    const url = thumbSheet.data;
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [thumbSheet.data]);
+  // Sector code → cell origin (O(1) lookup from each grid cell).
+  const thumbCells = useMemo(() => {
+    const m = new Map<string, { x: number; y: number }>();
+    for (const c of thumbMeta.data?.cells ?? []) {
+      m.set(c.code.toUpperCase(), { x: c.x, y: c.y });
+    }
+    return m;
+  }, [thumbMeta.data]);
+  const thumbs = useMemo<GridThumbs | null>(() => {
+    if (!thumbsActive || !thumbSheet.data || !thumbMeta.data) return null;
+    return {
+      sheetUrl: thumbSheet.data,
+      cells: thumbCells,
+      cols: thumbMeta.data.cols,
+      rows: thumbMeta.data.rows,
+      cellW: thumbMeta.data.cell_w,
+      cellH: thumbMeta.data.cell_h,
+    };
+  }, [thumbsActive, thumbSheet.data, thumbMeta.data, thumbCells]);
+  const thumbsLoading = thumbsActive
+    && (thumbMeta.isLoading || thumbSheet.isLoading);
 
   // Filter the map list by name substring + source (loose/slf/all). The
   // user typically knows the sector code (e.g. "C13" or "a9") and just
@@ -366,6 +444,20 @@ export default function MapForge() {
                   </button>
                 ))}
               </div>
+              {view === "grid" && (
+                <button
+                  type="button"
+                  onClick={toggleThumbs}
+                  className={`rounded border px-2.5 py-1 text-xs ${
+                    showThumbs
+                      ? "border-blue-500 bg-blue-900 text-blue-100"
+                      : "border-gray-700 bg-gray-900 text-gray-400 hover:bg-gray-800"
+                  }`}
+                  title="Show each sector's radar minimap as a thumbnail in the grid"
+                >
+                  {thumbsLoading ? "🗺 Maps…" : showThumbs ? "🗺 Maps on" : "🗺 Maps"}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => rescan.mutate()}
@@ -434,6 +526,7 @@ export default function MapForge() {
               names={sectorNames.data?.names ?? {}}
               namesLoading={sectorNames.isLoading}
               onOpen={openSector}
+              thumbs={thumbs}
             />
           ) : (
           <div>
@@ -547,11 +640,13 @@ function StrategicGrid({
   names,
   namesLoading,
   onOpen,
+  thumbs,
 }: {
   sectorIndex: Map<string, SectorMapFile>;
   names: Record<string, string>;
   namesLoading: boolean;
   onOpen: (m: { path: string; name: string; grid: string }) => void;
+  thumbs: GridThumbs | null;
 }) {
   const haveAny = sectorIndex.size > 0;
   return (
@@ -603,6 +698,7 @@ function StrategicGrid({
             sectorIndex={sectorIndex}
             names={names}
             onOpen={onOpen}
+            thumbs={thumbs}
           />
         ))}
       </div>
@@ -618,11 +714,13 @@ function GridRow({
   sectorIndex,
   names,
   onOpen,
+  thumbs,
 }: {
   rowLetter: string;
   sectorIndex: Map<string, SectorMapFile>;
   names: Record<string, string>;
   onOpen: (m: { path: string; name: string; grid: string }) => void;
+  thumbs: GridThumbs | null;
 }) {
   return (
     <>
@@ -635,34 +733,69 @@ function GridRow({
         const name = names[code] ?? "";
         const hasMap = file !== undefined;
         const unsaved = hasMap && readJournalEntry(file.path) !== null;
-        const tint = !hasMap
-          ? "border-gray-800 bg-gray-950 text-gray-600"
-          : unsaved
-            ? "border-amber-600 bg-amber-950/60 text-amber-100 hover:border-amber-400 hover:bg-amber-900/60"
-            : "border-blue-800 bg-blue-950/50 text-blue-100 hover:border-blue-500 hover:bg-blue-900/50";
+        // Radar thumbnail for this cell (only on has-map cells — those are
+        // the clickable, editable sectors). The single sprite sheet is
+        // positioned to this sector's cell with the standard responsive
+        // sprite trick: size the sheet to cols×rows of the cell box, then
+        // shift by a percentage so the one cell fills the square.
+        const cell = hasMap && thumbs ? thumbs.cells.get(code) : undefined;
+        let bgStyle: CSSProperties | undefined;
+        if (cell && thumbs) {
+          const col = cell.x / thumbs.cellW;
+          const row = cell.y / thumbs.cellH;
+          bgStyle = {
+            backgroundImage: `url(${thumbs.sheetUrl})`,
+            backgroundSize: `${thumbs.cols * 100}% ${thumbs.rows * 100}%`,
+            backgroundPosition:
+              `${thumbs.cols > 1 ? (col / (thumbs.cols - 1)) * 100 : 0}% ` +
+              `${thumbs.rows > 1 ? (row / (thumbs.rows - 1)) * 100 : 0}%`,
+            backgroundRepeat: "no-repeat",
+            imageRendering: "pixelated",
+          };
+        }
+        const hasThumb = bgStyle !== undefined;
+        // With a thumbnail painted, drop the fill colour so the map shows;
+        // keep the category border (and amber for unsaved) as a thin frame.
+        const tint = hasThumb
+          ? (unsaved ? "border-amber-400 text-amber-100" : "border-blue-700 text-blue-100")
+          : !hasMap
+            ? "border-gray-800 bg-gray-950 text-gray-600"
+            : unsaved
+              ? "border-amber-600 bg-amber-950/60 text-amber-100 hover:border-amber-400 hover:bg-amber-900/60"
+              : "border-blue-800 bg-blue-950/50 text-blue-100 hover:border-blue-500 hover:bg-blue-900/50";
         return (
           <button
             key={code}
             type="button"
             disabled={!hasMap}
+            style={bgStyle}
             onClick={() => {
               if (file) onOpen({ path: file.path, name: file.name, grid: code });
             }}
-            className={`flex aspect-square flex-col items-center justify-center gap-0.5 rounded-sm border px-0.5 text-center leading-tight transition-colors ${tint} ${
-              hasMap ? "cursor-pointer" : "cursor-default"
+            className={`relative flex aspect-square flex-col items-center justify-center gap-0.5 overflow-hidden rounded-sm border px-0.5 text-center leading-tight transition-colors ${tint} ${
+              hasMap ? "cursor-pointer hover:brightness-110" : "cursor-default"
             }`}
             title={hasMap
               ? `${code}${name ? ` — ${name}` : ""}${file.source === "slf" ? " (in SLF)" : ""}\n${file.path}`
               : `${code} — no map`}
           >
-            <span className="font-mono text-[10px]">{code}</span>
-            {name && (
-              <span className="line-clamp-2 w-full truncate text-[9px] opacity-80">
-                {name}
+            {hasThumb ? (
+              // Map painted: show just the code on a legibility scrim.
+              <span className="rounded bg-black/65 px-1 font-mono text-[9px] text-white">
+                {code}
               </span>
+            ) : (
+              <>
+                <span className="font-mono text-[10px]">{code}</span>
+                {name && (
+                  <span className="line-clamp-2 w-full truncate text-[9px] opacity-80">
+                    {name}
+                  </span>
+                )}
+              </>
             )}
             {unsaved && (
-              <span className="h-1 w-1 rounded-full bg-amber-300" />
+              <span className="absolute right-0.5 top-0.5 h-1 w-1 rounded-full bg-amber-300" />
             )}
           </button>
         );

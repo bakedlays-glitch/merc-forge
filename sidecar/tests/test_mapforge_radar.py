@@ -76,3 +76,68 @@ def test_dither_survives_gamut_edges_and_transparency(tmp_path):
         write_radar_sti(im, out)          # must not raise
         png = decode_sti_frame_to_png(out.read_bytes(), 0)
         assert png is not None, name
+
+
+# ─── Hub radar-thumbnail sprite sheet (read path) ───────────────────────
+
+def _pack_radarmaps_slf(path, codes):
+    """Pack valid 88x44 radar STIs into a Radarmaps.slf at `path`, one per
+    sector `code` (root-stored as `<CODE>.STI`, like vanilla)."""
+    from ja2py.fileformats.SlfFS import BufferedSlfFS
+    slf = BufferedSlfFS()
+    slf.library_name = "TEST"
+    slf.library_path = "Radarmaps.slf"
+    for code in codes:
+        tmp = path.parent / f"_{code}.sti"
+        write_radar_sti(_multicolor(), tmp)
+        with slf.open(f"/{code}.STI", "wb") as f:
+            f.write(tmp.read_bytes())
+    with open(path, "wb") as f:
+        slf.save(f)
+
+
+def test_radar_thumb_sheet_bakes_from_radarmaps_slf(tmp_path):
+    """The hub radar-thumbnail bake packs each sector's radar STI from
+    Radarmaps.slf into one sprite sheet + a code→cell manifest. Regression
+    guard: this read path drives the strategic-grid map previews and a
+    refactor of _bake_radar_thumb_sheet could silently blank every cell."""
+    from routes.mapforge import (
+        _bake_radar_thumb_sheet, _RADAR_CELL_W, _RADAR_CELL_H,
+        _RADAR_THUMB_COLS,
+    )
+
+    install = tmp_path / "inst"
+    (install / "Data").mkdir(parents=True)
+    _pack_radarmaps_slf(install / "Data" / "Radarmaps.slf", ("C5", "A9"))
+
+    png, man = _bake_radar_thumb_sheet(install)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    assert man["count"] == 2
+    assert man["errors"] == []
+    assert man["cell_w"] == _RADAR_CELL_W and man["cell_h"] == _RADAR_CELL_H
+    assert man["cols"] == _RADAR_THUMB_COLS
+    cells = {c["code"]: (c["x"], c["y"]) for c in man["cells"]}
+    assert set(cells) == {"A9", "C5"}
+    # Codes are laid out sorted, left→right at cell width (A9 before C5).
+    assert cells["A9"] == (0, 0)
+    assert cells["C5"] == (_RADAR_CELL_W, 0)
+
+
+def test_radar_thumb_loose_override_wins_over_slf(tmp_path):
+    """A loose RADARMAPS/<code>.STI (a radar the user just regenerated)
+    overrides the bundled Radarmaps.slf entry, matching the engine's VFS
+    read precedence — the thumbnail must reflect the fresher art."""
+    from routes.mapforge import _bake_radar_thumb_sheet
+
+    install = tmp_path / "inst"
+    (install / "Data").mkdir(parents=True)
+    _pack_radarmaps_slf(install / "Data" / "Radarmaps.slf", ("A9",))
+    # Loose override at a higher-priority layer.
+    loose_dir = install / "Data-1.13" / "RADARMAPS"
+    loose_dir.mkdir(parents=True)
+    write_radar_sti(_multicolor(), loose_dir / "A9.STI")
+
+    png, man = _bake_radar_thumb_sheet(install)
+    # Still exactly one A9 cell (override dedups against the SLF entry).
+    assert man["count"] == 1
+    assert [c["code"] for c in man["cells"]] == ["A9"]

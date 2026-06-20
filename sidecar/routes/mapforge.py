@@ -922,6 +922,272 @@ def list_active_install_sector_names():
     )
 
 
+# ─── Radar-thumbnail sprite sheet (hub strategic-grid map previews) ──────
+# The hub grid showed sector codes + town names as TEXT only. JA2 ships a
+# pre-baked 88x44, 8-bit ETRLE radar STI per sector inside Radarmaps.slf,
+# keyed by sector code (A9.STI, C5.STI, A10_B1.STI). We pack every sector's
+# radar into ONE PNG sprite sheet + a code→cell manifest (mirroring the
+# roster portrait sheet) so the grid paints a map thumbnail per cell with
+# zero per-cell HTTP. Measured ~1.5 ms/decode, ~0.5 s for a full install.
+#
+# Pure READ path — opens Radarmaps.slf + any loose RADARMAPS/<code>.STI
+# override, decodes, composites. NO .dat writes, so the MapForge
+# data-safety gate does not apply. Distinct from sector_radar's
+# WRITE/generate path (which renders + ETRLE-encodes a NEW radar).
+import threading as _threading
+
+_RADAR_THUMB_CACHE_VERSION = 1  # bump if the bake/compositing logic changes
+_RADAR_CELL_W = 88
+_RADAR_CELL_H = 44
+_RADAR_THUMB_COLS = 16
+_RADAR_THUMB_MEM: dict[tuple[str, str], tuple[bytes, dict]] = {}
+_RADAR_THUMB_MEM_MAX = 4
+_RADAR_THUMB_LOCK = _threading.Lock()
+
+
+def _radar_thumb_cache_dir() -> Path:
+    base = os.environ.get("APPDATA")
+    root = Path(base) / "MercWizard" if base else Path.home() / ".config" / "MercWizard"
+    return root / "mapforge" / "radar_thumbs"
+
+
+def _radarmaps_slf_paths(install_root: Path) -> list[Path]:
+    """Existing Radarmaps.slf across content layers, VFS priority order
+    (Data-1.13 before Data → a mod's radars override vanilla)."""
+    out: list[Path] = []
+    for layer in _TILESET_LAYERS:
+        layer_root = install_root / layer
+        if not layer_root.is_dir():
+            continue
+        direct = layer_root / "Radarmaps.slf"
+        if direct.is_file():
+            out.append(direct)
+            continue
+        # Case-insensitive fallback (a bundle from a case-sensitive FS).
+        for e in layer_root.iterdir():
+            if e.is_file() and e.name.lower() == "radarmaps.slf":
+                out.append(e)
+                break
+    return out
+
+
+def _radar_thumb_fingerprint(install_root: Path) -> str:
+    """Cache key over the install's radar sources — bundled Radarmaps.slf
+    archives + any loose RADARMAPS override dir. Bumps when a user
+    regenerates a radar (sector_radar) so the thumb refreshes."""
+    h = hashlib.sha1()
+    h.update(str(install_root.resolve()).encode("utf-8", "replace"))
+    for slf in _radarmaps_slf_paths(install_root):
+        try:
+            st = slf.stat()
+            h.update(f"|slf:{slf.name}:{st.st_mtime_ns}:{st.st_size}".encode())
+        except OSError:
+            pass
+    for layer in _TILESET_LAYERS:
+        rd = install_root / layer / "RADARMAPS"
+        if rd.is_dir():
+            try:
+                h.update(f"|loose:{layer}:{rd.stat().st_mtime_ns}".encode())
+            except OSError:
+                pass
+    return h.hexdigest()[:20]
+
+
+def _decode_radar_to_rgba(data: bytes):
+    """Decode a radar STI's frame 0 to a PIL RGBA image, or None."""
+    from mercwizard_core.sti_decode import decode_sti_frame_to_png
+    png = decode_sti_frame_to_png(data, frame_index=0)
+    if png is None:
+        return None
+    try:
+        return PIL.Image.open(io.BytesIO(png)).convert("RGBA")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _bake_radar_thumb_sheet(install_root: Path) -> tuple[bytes, dict]:
+    """Pack every sector's radar STI into one PNG grid + a code→cell
+    manifest. Loose RADARMAPS/<code>.STI overrides win over the bundled
+    Radarmaps.slf entry (matches the engine's VFS read precedence)."""
+    from ja2py.fileformats.SlfFS import SlfFS
+
+    images: dict[str, "PIL.Image.Image"] = {}  # CODE → image (first writer wins)
+    errors: list[str] = []
+
+    def _put(code: str, img) -> None:
+        key = code.upper()
+        if img is not None and key not in images:
+            images[key] = img
+
+    # 1) Loose override RADARMAPS/<code>.STI (highest priority — a radar the
+    #    user just (re)generated lands here, above the bundled SLF).
+    for layer in _TILESET_LAYERS:
+        rd = install_root / layer / "RADARMAPS"
+        if not rd.is_dir():
+            continue
+        for p in sorted(rd.iterdir()):
+            if p.is_file() and p.suffix.upper() == ".STI":
+                try:
+                    _put(p.stem, _decode_radar_to_rgba(p.read_bytes()))
+                except OSError:
+                    pass
+
+    # 2) Bundled Radarmaps.slf (vanilla minimaps).
+    for slf_path in _radarmaps_slf_paths(install_root):
+        try:
+            fs_slf = SlfFS(str(slf_path))
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            members = list(fs_slf.walk.files())
+        except Exception:  # noqa: BLE001
+            continue
+        for member in members:
+            name = os.path.basename(member)
+            if not name.upper().endswith(".STI"):
+                continue
+            code = name[:-4].upper()
+            if code in images:
+                continue
+            try:
+                with fs_slf.openbin(member, "r") as f:
+                    data = f.read()
+            except Exception:  # noqa: BLE001
+                continue
+            img = _decode_radar_to_rgba(data)
+            if img is None:
+                errors.append(code)
+            else:
+                _put(code, img)
+
+    codes = sorted(images.keys())
+    n = len(codes)
+    cols = _RADAR_THUMB_COLS
+    rows = max(1, (n + cols - 1) // cols)
+    sheet_w = cols * _RADAR_CELL_W
+    sheet_h = rows * _RADAR_CELL_H
+    sheet = PIL.Image.new("RGBA", (sheet_w, sheet_h), (0, 0, 0, 0))
+    cells: list[dict] = []
+    for i, code in enumerate(codes):
+        img = images[code]
+        if img.size != (_RADAR_CELL_W, _RADAR_CELL_H):
+            img = img.resize((_RADAR_CELL_W, _RADAR_CELL_H), PIL.Image.Resampling.BOX)
+        x = (i % cols) * _RADAR_CELL_W
+        y = (i // cols) * _RADAR_CELL_H
+        sheet.paste(img, (x, y), img)
+        cells.append({"code": code, "x": x, "y": y})
+
+    buf = io.BytesIO()
+    sheet.save(buf, format="PNG", optimize=True)
+    manifest = {
+        "cell_w": _RADAR_CELL_W, "cell_h": _RADAR_CELL_H,
+        "cols": cols, "rows": rows,
+        "sheet_w": sheet_w, "sheet_h": sheet_h,
+        "cells": cells,
+        "errors": sorted(set(errors)),
+        "count": n,
+    }
+    return buf.getvalue(), manifest
+
+
+def _radar_thumb_get_or_bake(install_id: str, install_root: Path) -> tuple[bytes, dict]:
+    """(png, manifest) via mem → disk → bake, keyed on a radar-source
+    fingerprint so a regenerated radar refreshes the sheet."""
+    fp = _radar_thumb_fingerprint(install_root)
+    mem_key = (install_id, fp)
+    with _RADAR_THUMB_LOCK:
+        hit = _RADAR_THUMB_MEM.get(mem_key)
+    if hit is not None:
+        return hit
+
+    d = _radar_thumb_cache_dir()
+    prefix = hashlib.md5(
+        f"v{_RADAR_THUMB_CACHE_VERSION}|{install_id}".encode("utf-8")
+    ).hexdigest()
+    png_path = d / f"{prefix}__{fp}.png"
+    json_path = d / f"{prefix}__{fp}.json"
+    try:
+        if png_path.is_file() and json_path.is_file():
+            res = (png_path.read_bytes(),
+                   json.loads(json_path.read_text(encoding="utf-8")))
+            if isinstance(res[1], dict):
+                with _RADAR_THUMB_LOCK:
+                    _RADAR_THUMB_MEM[mem_key] = res
+                return res
+    except (OSError, ValueError):
+        pass  # missing / half-written / corrupt → re-bake
+
+    # Serialize the bake so the parallel .png + .json fetch bakes once.
+    with _RADAR_THUMB_LOCK:
+        hit = _RADAR_THUMB_MEM.get(mem_key)
+        if hit is not None:
+            return hit
+        res = _bake_radar_thumb_sheet(install_root)
+        if len(_RADAR_THUMB_MEM) >= _RADAR_THUMB_MEM_MAX:
+            try:
+                del _RADAR_THUMB_MEM[next(iter(_RADAR_THUMB_MEM))]
+            except StopIteration:
+                pass
+        _RADAR_THUMB_MEM[mem_key] = res
+
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        tmp_png = d / f"{prefix}__{fp}.png.tmp"
+        tmp_json = d / f"{prefix}__{fp}.json.tmp"
+        tmp_png.write_bytes(res[0])
+        tmp_json.write_text(json.dumps(res[1]), encoding="utf-8")
+        os.replace(tmp_png, png_path)
+        os.replace(tmp_json, json_path)
+        for p in list(d.glob(f"{prefix}__*.png")) + list(d.glob(f"{prefix}__*.json")):
+            if p.name not in (png_path.name, json_path.name):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass  # disk cache best-effort
+    return res
+
+
+def _active_install_or_400():
+    info = get_state().active()
+    if info is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "NO_ACTIVE_INSTALL",
+                    "message": "Activate an install in MercForge first."},
+        )
+    return info
+
+
+@router.get("/installs/radar-thumbs.png")
+def get_radar_thumb_sheet() -> Response:
+    """One PNG packing every sector's 88x44 radar minimap into a 16-column
+    grid. Pair with /installs/radar-thumbs.json for the code→cell offsets;
+    the hub grid then paints each cell via CSS background-position."""
+    _require_renderer()
+    info = _active_install_or_400()
+    png, _manifest = _radar_thumb_get_or_bake(info.id, Path(info.path))
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, max-age=300, must-revalidate",
+            "ETag": f'"{hashlib.md5(png[:4096]).hexdigest()[:16]}-{len(png)}"',
+        },
+    )
+
+
+@router.get("/installs/radar-thumbs.json")
+def get_radar_thumb_meta() -> dict:
+    """Companion manifest for /installs/radar-thumbs.png — sector code →
+    (x, y) origin inside the sheet, plus cell/grid dims."""
+    _require_renderer()
+    info = _active_install_or_400()
+    _png, manifest = _radar_thumb_get_or_bake(info.id, Path(info.path))
+    return manifest
+
+
 @router.get("/sector/info", response_model=SectorInfo)
 def sector_info(
     dat: str = Query(..., description="Absolute path to .dat sector file "

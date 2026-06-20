@@ -249,6 +249,45 @@ export function getSectorNames(): Promise<SectorNames> {
   return jsonGet<SectorNames>("/mapforge/installs/sector-names");
 }
 
+// ─── Radar-thumbnail sprite sheet (hub strategic-grid map previews) ──────
+// One PNG packs every sector's 88x44 radar minimap into a 16-col grid; the
+// manifest maps a sector code to its cell origin. Mirrors the roster
+// portrait-sheet pattern. Read-only — sourced from the install's bundled
+// Radarmaps.slf (+ any loose RADARMAPS override). See sidecar
+// routes/mapforge.py get_radar_thumb_sheet / get_radar_thumb_meta.
+export interface RadarThumbCell {
+  code: string;
+  x: number;
+  y: number;
+}
+export interface RadarThumbManifest {
+  cell_w: number;
+  cell_h: number;
+  cols: number;
+  rows: number;
+  sheet_w: number;
+  sheet_h: number;
+  cells: RadarThumbCell[];
+  /** Sector codes whose radar STI failed to decode (rendered as a label). */
+  errors: string[];
+  count: number;
+}
+
+export function getRadarThumbMeta(): Promise<RadarThumbManifest> {
+  return jsonGet<RadarThumbManifest>("/mapforge/installs/radar-thumbs.json");
+}
+
+/** Fetch the whole radar sprite sheet as one blob: URL. Caller must
+ * URL.revokeObjectURL it when done (the sheet is multi-MB). */
+export async function fetchRadarThumbSheetUrl(): Promise<string> {
+  const res = await authedFetch("/mapforge/installs/radar-thumbs.png");
+  if (!res.ok) {
+    throw new Error(`radar thumbnails request failed: ${res.status}`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
 export function inspectTile(
   datPath: string,
   xmlPath: string,
