@@ -676,7 +676,7 @@ function StrategicGrid({
 
       {/* 17-column grid: a leading row-label column + 16 sector columns. */}
       <div
-        className="grid gap-px"
+        className={`grid ${thumbs ? "gap-0" : "gap-px"}`}
         style={{ gridTemplateColumns: "1.5rem repeat(16, minmax(2.75rem, 1fr))" }}
       >
         {/* Header row: corner cell + 1..16 column numbers. */}
@@ -738,7 +738,10 @@ function GridRow({
         // positioned to this sector's cell with the standard responsive
         // sprite trick: size the sheet to cols×rows of the cell box, then
         // shift by a percentage so the one cell fills the square.
-        const cell = hasMap && thumbs ? thumbs.cells.get(code) : undefined;
+        // Radar thumbnail for this cell. Painted wherever a radar exists (not
+        // only editable .dat sectors) so the cells abut into a continuous
+        // mosaic of the whole world map. Clickability stays gated on hasMap.
+        const cell = thumbs ? thumbs.cells.get(code) : undefined;
         let bgStyle: CSSProperties | undefined;
         if (cell && thumbs) {
           const col = cell.x / thumbs.cellW;
@@ -754,15 +757,19 @@ function GridRow({
           };
         }
         const hasThumb = bgStyle !== undefined;
-        // With a thumbnail painted, drop the fill colour so the map shows;
-        // keep the category border (and amber for unsaved) as a thin frame.
-        const tint = hasThumb
-          ? (unsaved ? "border-amber-400 text-amber-100" : "border-blue-700 text-blue-100")
-          : !hasMap
-            ? "border-gray-800 bg-gray-950 text-gray-600"
-            : unsaved
-              ? "border-amber-600 bg-amber-950/60 text-amber-100 hover:border-amber-400 hover:bg-amber-900/60"
-              : "border-blue-800 bg-blue-950/50 text-blue-100 hover:border-blue-500 hover:bg-blue-900/50";
+        // Mosaic mode = thumbnails loaded. Drop gaps/borders/rounding so the
+        // per-sector maps connect edge-to-edge into one larger map; a sector
+        // with no radar becomes a dark filler tile.
+        const mosaic = thumbs != null;
+        const tint = mosaic
+          ? (hasThumb
+              ? (unsaved ? "text-amber-100" : "text-blue-100")
+              : "bg-gray-950 text-gray-700")
+          : (!hasMap
+              ? "border-gray-800 bg-gray-950 text-gray-600"
+              : unsaved
+                ? "border-amber-600 bg-amber-950/60 text-amber-100 hover:border-amber-400 hover:bg-amber-900/60"
+                : "border-blue-800 bg-blue-950/50 text-blue-100 hover:border-blue-500 hover:bg-blue-900/50");
         return (
           <button
             key={code}
@@ -772,18 +779,20 @@ function GridRow({
             onClick={() => {
               if (file) onOpen({ path: file.path, name: file.name, grid: code });
             }}
-            className={`relative flex aspect-square flex-col items-center justify-center gap-0.5 overflow-hidden rounded-sm border px-0.5 text-center leading-tight transition-colors ${tint} ${
-              hasMap ? "cursor-pointer hover:brightness-110" : "cursor-default"
+            className={`relative flex aspect-square flex-col items-center justify-center gap-0.5 overflow-hidden px-0.5 text-center leading-tight transition-colors ${mosaic ? "" : "rounded-sm border"} ${tint} ${
+              hasMap ? "cursor-pointer hover:brightness-125" : "cursor-default"
             }`}
             title={hasMap
               ? `${code}${name ? ` — ${name}` : ""}${file.source === "slf" ? " (in SLF)" : ""}\n${file.path}`
-              : `${code} — no map`}
+              : `${code}${name ? ` — ${name}` : " — no map"}`}
           >
             {hasThumb ? (
-              // Map painted: show just the code on a legibility scrim.
-              <span className="rounded bg-black/65 px-1 font-mono text-[9px] text-white">
+              // Map painted: tiny code on a faint scrim so the map shows through.
+              <span className="rounded bg-black/55 px-0.5 font-mono text-[8px] leading-tight text-white/90">
                 {code}
               </span>
+            ) : mosaic ? (
+              <span className="font-mono text-[8px] text-gray-600">{code}</span>
             ) : (
               <>
                 <span className="font-mono text-[10px]">{code}</span>
