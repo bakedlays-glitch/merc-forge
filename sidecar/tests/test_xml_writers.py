@@ -449,3 +449,124 @@ def test_gear_clear_slot(tmp_path: Path, sample_gear: Gear) -> None:
     starting_gear.upsert(xml, sample_gear)
     assert starting_gear.clear_slot(xml, 220) is True
     assert starting_gear.read_slot(xml, 220) is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Encoding safety (cp1252 / mislabeled XML) — parse_tolerant +
+#  save_atomic_preserving. Before this, the four core writers re-serialized
+#  to utf-8 WITHOUT a declaration (mojibaking a cp1252 file's sibling rows
+#  for the engine, which reads a decl-less file in its own codepage), and a
+#  raw cp1252 high byte under a utf-8/absent declaration raised
+#  XMLSyntaxError that rolled back and HARD-BLOCKED every save. The engine's
+#  expat (XML_ParserCreate(NULL)) decodes only UTF-8/UTF-16/ISO-8859-1/ASCII
+#  and re-reads char data as CP_UTF8, so the writers normalize ALL output to
+#  self-describing UTF-8; the parse side rescues legacy bytes into the tree.
+# ──────────────────────────────────────────────────────────────────────────
+import re as _re
+
+from mercwizard_core.inject import _atomic_xml
+
+
+def test_parse_tolerant_rescues_cp1252_highbyte(tmp_path: Path) -> None:
+    """A decl-less file carrying a raw cp1252 high byte (0xE9 = é) parses
+    instead of raising XMLSyntaxError — the rescue that un-bricks save."""
+    p = tmp_path / "legacy.xml"
+    p.write_bytes("<R><z>Renée</z></R>".encode("cp1252"))  # 0xE9, no decl
+    tree = _atomic_xml.parse_tolerant(p)
+    assert tree.findtext(".//z") == "Renée"
+
+
+def test_save_preserving_always_utf8_with_decl(tmp_path: Path) -> None:
+    """save_atomic_preserving normalizes to UTF-8 + a utf-8 declaration —
+    never echoes a source Windows-1252 codepage (engine-fatal) — and the
+    transcoded accented text is valid UTF-8 (0xE9 → 0xC3 0xA9)."""
+    p = tmp_path / "legacy.xml"
+    p.write_bytes("<?xml version='1.0' encoding='Windows-1252'?>\n<R><z>Renée</z></R>".encode("cp1252"))
+    tree = _atomic_xml.parse_tolerant(p)
+    out = tmp_path / "out.xml"
+    _atomic_xml.save_atomic_preserving(tree, out)
+    raw = out.read_bytes()
+    raw.decode("utf-8")                       # valid utf-8 (raises otherwise)
+    head = raw[:80].lower()
+    assert b"<?xml" in head and b"utf-8" in head and b"1252" not in head
+    assert b"\xc3\xa9" in raw and b"\xe9" not in raw
+    # Round-trips back through the tolerant parser with the value intact.
+    assert _atomic_xml.parse_tolerant(out).findtext(".//z") == "Renée"
+
+
+def test_profiles_survives_cp1252_nodecl_highbyte(tmp_path: Path, sample_merc: Merc) -> None:
+    """Upserting onto a legacy decl-less file with a raw cp1252 sibling no
+    longer hard-blocks; the sibling value survives, output is valid UTF-8."""
+    xml = tmp_path / "MercProfiles.xml"
+    legacy = ("<MERCPROFILES><PROFILE><uiIndex>5</uiIndex>"
+              "<zNickname>Renée</zNickname></PROFILE></MERCPROFILES>")
+    xml.write_bytes(legacy.encode("cp1252"))   # 0xE9, no declaration
+    profiles_xml.upsert(xml, sample_merc)       # must NOT raise
+    assert profiles_xml.read_slot(xml, 5)["zNickname"] == "Renée"
+    assert profiles_xml.read_slot(xml, 220) is not None
+    raw = xml.read_bytes()
+    raw.decode("utf-8")
+    assert b"\xc3\xa9" in raw and b"\xe9" not in raw
+
+
+def test_profiles_cp1252_declared_normalizes_to_utf8(tmp_path: Path, sample_merc: Merc) -> None:
+    """A correctly cp1252-DECLARED file (which lxml parses fine) is
+    re-written as UTF-8, never echoed back as Windows-1252."""
+    xml = tmp_path / "MercProfiles.xml"
+    legacy = ("<?xml version='1.0' encoding='Windows-1252'?>\n<MERCPROFILES>"
+              "<PROFILE><uiIndex>5</uiIndex><zNickname>Renée</zNickname>"
+              "</PROFILE></MERCPROFILES>")
+    xml.write_bytes(legacy.encode("cp1252"))
+    profiles_xml.upsert(xml, sample_merc)
+    assert profiles_xml.read_slot(xml, 5)["zNickname"] == "Renée"
+    head = xml.read_bytes()[:80].lower()
+    assert b"<?xml" in head and b"utf-8" in head and b"1252" not in head
+
+
+def test_profiles_output_has_xml_declaration(tmp_path: Path, sample_merc: Merc) -> None:
+    """The writer restores the <?xml?> declaration (the old save dropped it,
+    a latent regression vs the declaration MercProfiles.xml ships with)."""
+    xml = tmp_path / "MercProfiles.xml"
+    profiles_xml.upsert(xml, sample_merc)
+    head = xml.read_bytes()[:80].lower()
+    assert head.startswith(b"<?xml") and b"utf-8" in head
+
+
+def _corrupt_to_cp1252_nodecl(xml: Path) -> None:
+    """Turn a writer-authored file into a legacy decl-less file carrying a
+    raw cp1252 high byte (in a comment), reproducing the BUG-2 parse-block
+    shape independent of the file's schema."""
+    text = xml.read_text(encoding="utf-8")
+    text = _re.sub(r"^\s*<\?xml[^>]*\?>\s*", "", text, count=1)  # drop decl
+    text = text.replace(">", "><!-- café -->", 1)                # inject é after root open
+    xml.write_bytes(text.encode("cp1252"))                       # raw 0xE9
+
+
+def test_aim_survives_cp1252_highbyte(tmp_path: Path, sample_aim_binding: AimBinding) -> None:
+    xml = tmp_path / "AIMAvailability.xml"
+    aim_availability.upsert(xml, sample_aim_binding)
+    _corrupt_to_cp1252_nodecl(xml)
+    aim_availability.upsert(xml, sample_aim_binding)   # must NOT raise
+    raw = xml.read_bytes()
+    raw.decode("utf-8")
+    assert b"\xe9" not in raw
+
+
+def test_merc_avail_survives_cp1252_highbyte(tmp_path: Path, sample_merc_binding: MercBinding) -> None:
+    xml = tmp_path / "MercAvailability.xml"
+    merc_availability.upsert(xml, sample_merc_binding)
+    _corrupt_to_cp1252_nodecl(xml)
+    merc_availability.upsert(xml, sample_merc_binding)  # must NOT raise
+    raw = xml.read_bytes()
+    raw.decode("utf-8")
+    assert b"\xe9" not in raw
+
+
+def test_gear_survives_cp1252_highbyte(tmp_path: Path, sample_gear: Gear) -> None:
+    xml = tmp_path / "MercStartingGear.xml"
+    starting_gear.upsert(xml, sample_gear)
+    _corrupt_to_cp1252_nodecl(xml)
+    starting_gear.upsert(xml, sample_gear)             # must NOT raise
+    raw = xml.read_bytes()
+    raw.decode("utf-8")
+    assert b"\xe9" not in raw

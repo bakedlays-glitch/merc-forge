@@ -56,17 +56,14 @@ CANONICAL_MERC_BIO_IDS: dict[int, int] = {
 def _parse(path: Path) -> Optional[etree._ElementTree]:
     if not path.exists():
         return None
-    parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)
-    data = path.read_bytes()
-    if data.startswith(b"\xef\xbb\xbf"):
-        data = data[3:]
-    return etree.ElementTree(etree.fromstring(data, parser))
+    from ._atomic_xml import parse_tolerant
+    return parse_tolerant(path)
 
 
 def _save(tree: etree._ElementTree, path: Path) -> None:
     # Atomic write — see aim_availability._save for the rationale.
-    from ._atomic_xml import save_atomic
-    save_atomic(tree, path)
+    from ._atomic_xml import save_atomic_preserving
+    save_atomic_preserving(tree, path)
     invalidate_parse_cache()
 
 

@@ -132,13 +132,12 @@ def normalize_profile_tags(raw: dict[str, str]) -> dict[str, str]:
 
 
 def _parse_with_bom_tolerance(path: Path) -> etree._ElementTree:
-    """Parse an XML file, tolerant of UTF-8 BOM."""
-    parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)
-    data = path.read_bytes()
-    # Strip UTF-8 BOM if present
-    if data.startswith(b"\xef\xbb\xbf"):
-        data = data[3:]
-    return etree.ElementTree(etree.fromstring(data, parser))
+    """Parse MercProfiles.xml, tolerant of a UTF-8 BOM and of legacy
+    cp1252 / mislabeled high bytes (which would otherwise raise
+    XMLSyntaxError and hard-block every save on a localized install).
+    Delegates to the shared `parse_tolerant`."""
+    from ._atomic_xml import parse_tolerant
+    return parse_tolerant(path)
 
 
 def _format_value(field_name: str, value: object) -> str:
@@ -481,6 +480,6 @@ def _save_tree(tree: etree._ElementTree, path: Path) -> None:
     aim_availability._save, merc_availability._save, and
     starting_gear._save already do. Bug-review finding A1/B6/E1.
     """
-    from ._atomic_xml import save_atomic
-    save_atomic(tree, path)
+    from ._atomic_xml import save_atomic_preserving
+    save_atomic_preserving(tree, path)
     invalidate_parse_cache()

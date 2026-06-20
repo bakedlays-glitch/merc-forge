@@ -15,10 +15,15 @@ for the binary EDTs.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 
 from lxml import etree
+
+# Leading XML declaration, for the cp1252 rescue: lxml refuses to parse a
+# `str` that still carries an encoding declaration, so we strip it first.
+_XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>\s*")
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:
@@ -89,3 +94,60 @@ def save_atomic(
         encoding=encoding,
     )
     write_bytes_atomic(path, xml_bytes)
+
+
+def parse_tolerant(path: Path) -> etree._ElementTree:
+    """Parse an XML file, tolerant of a UTF-8 BOM AND of legacy cp1252 /
+    mislabeled bytes.
+
+    The default lxml parse raises `XMLSyntaxError: Input is not proper
+    UTF-8` on a file that carries raw cp1252 high bytes under a utf-8 or
+    absent encoding declaration — the packaging of many localized 1.13
+    rebundles (RU/DE/FR). Inside a writer's read-modify-write that error
+    rolls the save back and HARD-BLOCKS every merc save on that install.
+
+    Here we instead rescue such a file: decode the bytes 1:1 via cp1252
+    (a superset of latin-1 that also covers the 0x80–0x9F smart-quote
+    range), strip the encoding declaration lxml refuses on a `str`, and
+    re-parse as Unicode. The caller (`save_atomic_preserving`) then
+    re-serializes the tree as valid UTF-8 — the ONLY byte encoding the
+    engine round-trips: its expat is created with `XML_ParserCreate(NULL)`
+    and registers no Windows-1252 handler, and it re-decodes char data as
+    `CP_UTF8` (XML_Profiles.cpp:396/404).
+
+    Assumes `path` exists — callers keep their own not-found handling.
+    """
+    parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)
+    data = path.read_bytes()
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    try:
+        return etree.ElementTree(etree.fromstring(data, parser))
+    except etree.XMLSyntaxError:
+        text = _XML_DECL_RE.sub("", data.decode("cp1252"), count=1)
+        return etree.ElementTree(etree.fromstring(text, parser))
+
+
+def save_atomic_preserving(tree: etree._ElementTree, path: Path) -> None:
+    """Atomic save that ALWAYS emits UTF-8 + an `<?xml?>` declaration.
+
+    The four core merc XML writers (profiles / aim_availability /
+    merc_availability / starting_gear) reflow the whole tree on save.
+    Normalizing to self-describing UTF-8 makes the output decodable by the
+    engine — its expat understands only UTF-8/UTF-16/ISO-8859-1/US-ASCII
+    and re-decodes char data as `CP_UTF8`, so UTF-8 is the only byte
+    encoding that round-trips accented names. It also restores the
+    `<?xml ... encoding='utf-8'?>` declaration the previous
+    `encoding='utf-8', xml_declaration=False` save silently dropped.
+
+    NB: echoing a source `Windows-1252` declaration here would be engine
+    FATAL (`XML_ERROR_UNKNOWN_ENCODING` — no handler is registered → the
+    whole table fails to load), which is why we normalize rather than
+    preserve the source codepage. Paired with `parse_tolerant`, which
+    rescues legacy cp1252 content INTO the tree so this re-emits it as
+    valid UTF-8.
+    """
+    save_atomic(
+        tree, path,
+        pretty_print=True, encoding="utf-8", xml_declaration=True,
+    )
