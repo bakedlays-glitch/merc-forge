@@ -26,8 +26,6 @@ These don't affect correctness in the deployed threat model (single user, Window
 - **FaceGear auto-positioning quality varies per merc** — the algorithm assumes the eye XML coord tracks the goggle bbox row across all mercs in the source install, but vanilla art was hand-positioned and not coord-aligned (Christine's goggles sit at row 14 vs Narg's at row 11 despite both having `usEyesY=10`). Auto-positioning lands the gear close-enough for ~80% of vanilla-style portraits; outliers may need the Upload PNG path. No automatic fine-tune offered today.
 - ~~**Auto-position source-frame selection is naive**~~ — RESOLVED 2026-05-27 (see Resolved section). The source-picker abstraction was removed entirely; fine-tuning is now direct sOffsetX/sOffsetY editing via `POST /facegear/set-offset`. The auto_position route's source-merc override parameters were dropped — sidecar always uses first-non-empty as the starting point.
 - ~~**Auto-position offset isn't editable in the UI after writing**~~ — RESOLVED 2026-05-27 (see Resolved section). The ±1px nudge arrow widget was added earlier; the remaining gap was that it only surfaced after a session-local Auto / nudge mutation. Fixed by extending `GET /facegear/overlay` to also return the frame's signed `offset_xy` and using it as the live-offset fallback in `FaceGearOverlayAuthor.tsx`.
-- **Settings "Animation default" select is still disabled** — left over from the procedural-animation arc. The actual default behavior (skip mode unless explicit frames supplied) is hardcoded in Create.tsx. Could either be removed or repurposed to switch between skip + future template-overlay modes.
-
 ---
 
 ## Deferred features

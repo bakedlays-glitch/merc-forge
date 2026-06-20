@@ -17,7 +17,8 @@ router = APIRouter()
 def health() -> dict:
     """Cheap liveness check.
 
-    Must respond in well under the shell's 6 s watchdog timeout.
+    Must answer within the shell watchdog's 3 s per-ping timeout; 3
+    consecutive misses (pinging every 2 s, so ~6 s) trigger a respawn.
 
     Per bug #12 the sidecar no longer runs a background install scan —
     detection is purely user-driven via the FirstRun VFS Selector

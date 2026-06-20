@@ -140,12 +140,11 @@ export default function App() {
     if (activeInstallId) void warmRoster();
   }, [activeInstallId, warmRoster]);
 
-  // Show first-run flow whenever no install is active. We deliberately
-  // include the scan-in-progress window: FirstRun has its own "Scanning
-  // Steam, GOG, and common paths..." indicator, and routing there
-  // immediately is better than rendering an empty Hub for ~30s while
-  // auto-detect runs (which made the app feel broken — users would click
-  // around and miss the prompt entirely when it finally fired).
+  // Show the first-run flow whenever no install is active. Install
+  // detection is manual-only since bug #12 removed the background
+  // Steam/GOG/common-paths auto-scan — the user picks a folder via the
+  // FirstRun VFS Selector Wizard — so there's no scan window to wait on:
+  // route to FirstRun immediately rather than render an empty Hub.
   const needsFirstRun =
     health.isSuccess
     && !health.data?.active_install_id;
