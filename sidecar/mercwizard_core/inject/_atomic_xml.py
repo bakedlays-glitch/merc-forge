@@ -23,7 +23,9 @@ from lxml import etree
 
 # Leading XML declaration, for the cp1252 rescue: lxml refuses to parse a
 # `str` that still carries an encoding declaration, so we strip it first.
-_XML_DECL_RE = re.compile(r"^\s*<\?xml[^>]*\?>\s*")
+# Require whitespace (or the closing `?>`) right after `xml` so this matches
+# only a real `<?xml ...?>` declaration, NOT a `<?xml-stylesheet ...?>` PI.
+_XML_DECL_RE = re.compile(r"^\s*<\?xml(?:\s[^>]*)?\?>\s*")
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:

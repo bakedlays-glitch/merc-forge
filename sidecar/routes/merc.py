@@ -831,16 +831,33 @@ def get_merc_animation_frames(
         })
     sti_bytes, _source_id = res
 
-    from mercwizard_core.sti_decode import decode_sti_frame_to_png
+    # Decode every frame by loading the STI ONCE. The per-frame
+    # decode_sti_frame_to_png re-parses + ETRLE-decompresses the WHOLE STI on
+    # each call (O(N^2) over the frames); 8-bit ETRLE is the animated case, so
+    # load it once and resolve each subimage. A 16-bit STI is a single RGB
+    # image (no animation) → just the base frame.
+    from mercwizard_core.sti_decode import (
+        decode_subimage_to_rgba, decode_sti_frame_to_png,
+    )
+    from ja2py.fileformats.Sti import is_8bit_sti, load_8bit_sti
     frames: list = []
-    for i in range(64):  # generous cap; real STIs hold ~8
-        png = decode_sti_frame_to_png(sti_bytes, frame_index=i)
-        if png is None:
-            break
-        try:
-            frames.append(_Image.open(_io.BytesIO(png)).convert("RGBA"))
-        except Exception:  # noqa: BLE001
-            break
+    try:
+        _buf = _io.BytesIO(sti_bytes)
+        if is_8bit_sti(_buf):
+            _buf.seek(0)
+            _images = load_8bit_sti(_buf)
+            frames = [decode_subimage_to_rgba(_images, i)
+                      for i in range(len(_images.images))]
+    except Exception:  # noqa: BLE001 — malformed 8-bit → fall through to base
+        frames = []
+    if not frames:
+        # 16-bit / not-multi-frame: serve just the base frame.
+        png0 = decode_sti_frame_to_png(sti_bytes, frame_index=0)
+        if png0 is not None:
+            try:
+                frames = [_Image.open(_io.BytesIO(png0)).convert("RGBA")]
+            except Exception:  # noqa: BLE001
+                frames = []
     if not frames:
         raise HTTPException(status_code=404, detail={
             "error": "PORTRAIT_DECODE_FAILED", "slot": slot, "face_index": face_index,
