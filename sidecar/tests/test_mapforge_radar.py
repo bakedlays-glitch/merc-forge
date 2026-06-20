@@ -123,21 +123,62 @@ def test_radar_thumb_sheet_bakes_from_radarmaps_slf(tmp_path):
     assert cells["C5"] == (_RADAR_CELL_W, 0)
 
 
-def test_radar_thumb_loose_override_wins_over_slf(tmp_path):
-    """A loose RADARMAPS/<code>.STI (a radar the user just regenerated)
-    overrides the bundled Radarmaps.slf entry, matching the engine's VFS
-    read precedence — the thumbnail must reflect the fresher art."""
-    from routes.mapforge import _bake_radar_thumb_sheet
+def _slf_with_image(path, code, img):
+    """Pack a single <code>.STI radar (built from `img`) into a Radarmaps.slf."""
+    from ja2py.fileformats.SlfFS import BufferedSlfFS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f"_slf_{code}.sti"
+    write_radar_sti(img, tmp)
+    slf = BufferedSlfFS()
+    slf.library_name = "TEST"
+    slf.library_path = "Radarmaps.slf"
+    with slf.open(f"/{code}.STI", "wb") as f:
+        f.write(tmp.read_bytes())
+    with open(path, "wb") as f:
+        slf.save(f)
 
-    install = tmp_path / "inst"
-    (install / "Data").mkdir(parents=True)
-    _pack_radarmaps_slf(install / "Data" / "Radarmaps.slf", ("A9",))
-    # Loose override at a higher-priority layer.
-    loose_dir = install / "Data-1.13" / "RADARMAPS"
-    loose_dir.mkdir(parents=True)
-    write_radar_sti(_multicolor(), loose_dir / "A9.STI")
 
+def test_radar_thumb_writable_profile_override_wins(tmp_path):
+    """A radar the user regenerates lands in the WRITABLE VFS profile
+    (Profiles/UserProfile_*/RADARMAPS — where sector_radar's
+    resolve_override_write writes), NOT a content-layer dir. The thumb bake
+    must read it FIRST so the mosaic shows the fresh art and a re-regenerate
+    busts the cache.
+
+    Proven with DISTINGUISHABLE art (the prior test used identical images +
+    the wrong dir, so it passed without proving anything): the bundled SLF
+    holds a BLUE A9, the writable-profile override a RED A9 — the baked cell
+    must come out red, and re-writing the override must change the
+    fingerprint even though it overwrites a file in place."""
+    import io as _io
+    import os as _os
+    import sys as _sys
+    from PIL import Image, ImageStat
+    _sys.path.insert(0, _os.path.dirname(__file__))  # make sibling test modules importable
+    from test_ini_editor import make_vfs_install
+    from routes.mapforge import (
+        _bake_radar_thumb_sheet, _radar_override_dir, _radar_thumb_fingerprint,
+    )
+
+    install = make_vfs_install(tmp_path / "inst")
+    blue = Image.new("RGBA", (88, 44), (30, 30, 210, 255))
+    red = Image.new("RGBA", (88, 44), (210, 30, 30, 255))
+    _slf_with_image(install / "Data" / "Radarmaps.slf", "A9", blue)
+
+    # The override goes where the engine + sector_radar actually write it.
+    odir = _radar_override_dir(install)
+    assert odir is not None and odir.name == "RADARMAPS", "write profile not resolved"
+    odir.mkdir(parents=True, exist_ok=True)
+    write_radar_sti(red, odir / "A9.STI")
+
+    fp_before = _radar_thumb_fingerprint(install)
     png, man = _bake_radar_thumb_sheet(install)
-    # Still exactly one A9 cell (override dedups against the SLF entry).
-    assert man["count"] == 1
-    assert [c["code"] for c in man["cells"]] == ["A9"]
+    assert man["count"] == 1 and [c["code"] for c in man["cells"]] == ["A9"]
+    cell = Image.open(_io.BytesIO(png)).convert("RGB").crop((0, 0, 88, 44))
+    r, _g, b = ImageStat.Stat(cell).mean
+    assert r > b + 40, f"override (red) must win over SLF (blue); got rgb≈({r:.0f},{_g:.0f},{b:.0f})"
+
+    # Re-regenerate (overwrite in place) → fingerprint must change so the
+    # cached sheet is rebuilt (dir mtime alone wouldn't catch this).
+    write_radar_sti(Image.new("RGBA", (88, 44), (30, 210, 30, 255)), odir / "A9.STI")
+    assert _radar_thumb_fingerprint(install) != fp_before

@@ -163,10 +163,15 @@ export default function MapForge() {
     queryFn: fetchRadarThumbSheetUrl,
     enabled: thumbsActive,
     retry: false,
-    staleTime: Infinity,
+    // gcTime:0 evicts the cache entry on unmount so the revoke below can
+    // never leave a REVOKED blob URL cached for a return visit (the blank-
+    // mosaic trap main.tsx documents for the roster sheet). Each mount
+    // re-fetches a fresh URL; the server sheet is disk-cached so it's cheap.
+    gcTime: 0,
   });
   // Revoke the blob URL when it changes or the component unmounts — the
-  // sheet is multi-MB, so a leak per install switch / toggle adds up.
+  // sheet is multi-MB, so a leak per install switch / toggle adds up. Safe
+  // because gcTime:0 drops the cache entry in lockstep (no stale reuse).
   useEffect(() => {
     const url = thumbSheet.data;
     return () => { if (url) URL.revokeObjectURL(url); };

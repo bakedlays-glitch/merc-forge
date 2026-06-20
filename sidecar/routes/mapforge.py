@@ -971,6 +971,35 @@ def _radarmaps_slf_paths(install_root: Path) -> list[Path]:
     return out
 
 
+def _radar_override_dir(install_root: Path) -> Optional[Path]:
+    """The writable VFS profile's RADARMAPS dir — the ACTUAL target
+    sector_radar regenerates radars into via resolve_override_write
+    (Profiles/UserProfile_*/RADARMAPS). It is front-of-stack and overrides
+    Radarmaps.slf, so the thumb bake must read it FIRST and the fingerprint
+    must track it; otherwise a user-regenerated radar is never shown and
+    never busts the cache. None for legacy layouts with no write profile."""
+    try:
+        layout = parse_vfs_config(install_root)
+        ewp = layout.engine_write_profile()
+        if ewp is not None and ewp.profile_root is not None:
+            return ewp.profile_root / "RADARMAPS"
+    except Exception:  # noqa: BLE001 — VfsConfigError / any parse failure
+        return None
+    return None
+
+
+def _radar_loose_dirs(install_root: Path) -> list[Path]:
+    """RADARMAPS override dirs, highest priority first: the writable VFS
+    profile (where regen lands) ahead of the content-layer RADARMAPS dirs."""
+    dirs: list[Path] = []
+    odir = _radar_override_dir(install_root)
+    if odir is not None:
+        dirs.append(odir)
+    for layer in _TILESET_LAYERS:
+        dirs.append(install_root / layer / "RADARMAPS")
+    return dirs
+
+
 def _radar_thumb_fingerprint(install_root: Path) -> str:
     """Cache key over the install's radar sources — bundled Radarmaps.slf
     archives + any loose RADARMAPS override dir. Bumps when a user
@@ -983,11 +1012,22 @@ def _radar_thumb_fingerprint(install_root: Path) -> str:
             h.update(f"|slf:{slf.name}:{st.st_mtime_ns}:{st.st_size}".encode())
         except OSError:
             pass
-    for layer in _TILESET_LAYERS:
-        rd = install_root / layer / "RADARMAPS"
-        if rd.is_dir():
+    # Loose RADARMAPS dirs (writable profile first). Hash PER FILE, not by
+    # dir mtime — a regenerate OVERWRITES an existing <code>.STI in place,
+    # which need not bump the directory's mtime.
+    for rd in _radar_loose_dirs(install_root):
+        if not rd.is_dir():
+            continue
+        try:
+            entries = sorted(rd.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            if p.suffix.upper() != ".STI":
+                continue
             try:
-                h.update(f"|loose:{layer}:{rd.stat().st_mtime_ns}".encode())
+                st = p.stat()
+                h.update(f"|loose:{p.name}:{st.st_mtime_ns}:{st.st_size}".encode())
             except OSError:
                 pass
     return h.hexdigest()[:20]
@@ -1020,17 +1060,30 @@ def _bake_radar_thumb_sheet(install_root: Path) -> tuple[bytes, dict]:
             images[key] = img
 
     # 1) Loose override RADARMAPS/<code>.STI (highest priority — a radar the
-    #    user just (re)generated lands here, above the bundled SLF).
-    for layer in _TILESET_LAYERS:
-        rd = install_root / layer / "RADARMAPS"
+    #    user just (re)generated lands in the writable VFS profile, scanned
+    #    first, above the content-layer dirs and the bundled SLF).
+    for rd in _radar_loose_dirs(install_root):
         if not rd.is_dir():
             continue
-        for p in sorted(rd.iterdir()):
-            if p.is_file() and p.suffix.upper() == ".STI":
-                try:
-                    _put(p.stem, _decode_radar_to_rgba(p.read_bytes()))
-                except OSError:
-                    pass
+        try:
+            entries = sorted(rd.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            if not (p.is_file() and p.suffix.upper() == ".STI"):
+                continue
+            code = p.stem.upper()
+            if code in images:
+                continue  # higher-priority dir already supplied it
+            try:
+                data = p.read_bytes()
+            except OSError:
+                continue
+            img = _decode_radar_to_rgba(data)
+            if img is None:
+                errors.append(code)  # mirror the SLF branch — don't drop silently
+            else:
+                _put(p.stem, img)
 
     # 2) Bundled Radarmaps.slf (vanilla minimaps).
     for slf_path in _radarmaps_slf_paths(install_root):
