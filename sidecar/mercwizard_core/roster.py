@@ -68,7 +68,16 @@ def load_roster(install_root: Path) -> list[RosterEntry]:
         zname = (prof.get("zName") or "").strip()
         znick = (prof.get("zNickname") or "").strip()
         if not zname and not znick:
-            roster.append(RosterEntry(slot=slot, is_empty=True))
+            # No display name → empty/available slot. Still capture Type so the
+            # UI can distinguish an empty IMP destination template (Type=6 —
+            # e.g. PGLady2 at slot 55, which ships with no placeholder nickname
+            # like its PGmale*/PGLady* siblings) from a truly blank slot.
+            empty_type = None
+            try:
+                empty_type = int((prof.get("Type") or "").strip())
+            except ValueError:
+                pass
+            roster.append(RosterEntry(slot=slot, is_empty=True, profile_type=empty_type))
             continue
 
         face_index_str = prof.get("ubFaceIndex") or ""

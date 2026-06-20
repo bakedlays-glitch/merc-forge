@@ -859,7 +859,18 @@ const SlotCell = memo(function SlotCell({
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center bg-wasteland-950/40">
-            {filled ? (
+            {profileType === 6 ? (
+              // Type=6 IMP destination templates (PGmale*/PGLady*, including
+              // the nickname-less PGLady2 at slot 55) have no portrait until a
+              // player creates an IMP character into the slot. Label them so
+              // they read as intentional empty IMP slots, not a broken/missing
+              // portrait — applies whether or not they carry a placeholder
+              // nickname (slot 55 has none, so it would otherwise show "+").
+              <span className="flex flex-col items-center gap-0.5 text-wasteland-500">
+                <span className="font-mono text-sm font-semibold tracking-wide">IMP</span>
+                <span className="text-[8px] uppercase tracking-wide">template</span>
+              </span>
+            ) : filled ? (
               <span className="font-mono text-lg text-wasteland-600">
                 {(nickname ?? "?").charAt(0).toUpperCase()}
               </span>

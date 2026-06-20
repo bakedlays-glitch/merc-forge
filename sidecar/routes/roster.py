@@ -143,7 +143,7 @@ def _sheet_cache_dir() -> Path:
 # Bump whenever the bake's face-resolution / compositing logic changes, so old
 # on-disk sheets (keyed by install+size+MercProfiles-mtime, which do NOT change
 # when the sidecar CODE does) get ignored instead of served stale.
-_PORTRAIT_CACHE_VERSION = 4  # v4: roster grid baked at bigface + decode-aware largest-real-face-first fallback (2026-06-14)
+_PORTRAIT_CACHE_VERSION = 5  # v5: IMPFACES probe + Type=5 vehicle StiFaceIcon fallback (2026-06-20)
 
 
 def _disk_key_prefix(install_id: str, size: str) -> str:
@@ -351,6 +351,26 @@ def _bake_portrait_sheet(ctx, size: str) -> tuple[bytes, dict]:
                 last_reason = f"{cand} PIL re-decode failed: {type(e).__name__}"
                 img = None
                 continue
+        if img is None:
+            # Vehicle (Type=5) profiles don't draw a FACES portrait — the
+            # engine uses the Vehicles.xml StiFaceIcon (e.g. INTERFACE\Jeep.sti)
+            # for the UI icon. Only the faceless vehicles reach here (e.g. slot
+            # 199 "Jeep"); vehicles that ship a real FACES bigface (160-164)
+            # already resolved above. Fall back to the vehicle icon so they
+            # render instead of going blank.
+            try:
+                prof_type = int((raw.get("Type") or "").strip())
+            except (ValueError, AttributeError):
+                prof_type = -1
+            if prof_type == 5:
+                vres = ctx.vehicle_icon_bytes(slot)
+                if vres is not None:
+                    vpng = decode_sti_frame_to_png(vres[0], frame_index=0)
+                    if vpng is not None:
+                        try:
+                            img = Image.open(io.BytesIO(vpng)).convert("RGBA")
+                        except Exception:  # noqa: BLE001
+                            img = None
         if img is None:
             errors.append({
                 "slot": slot, "face_index": face_index, "reason": last_reason,

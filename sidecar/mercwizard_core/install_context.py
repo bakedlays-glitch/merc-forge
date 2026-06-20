@@ -509,6 +509,123 @@ class InstallContext:
                                 type(e).__name__, e,
                             )
                             continue
+
+        # 3. IMPFACES loose fallback — the IMP pre-gen / player-character
+        # portraits live under IMPFaces/ (root "<idx>.sti" smallface; subdirs
+        # BigFaces/65Face/33Face for the sized variants), a tree neither probe
+        # above touches. The engine routes a Type=IMP profile here (Faces.cpp
+        # InternalInitFace), and the IMP art indices (200-219) never have a
+        # matching FACES file, so probing it LAST is non-destructive — FACES
+        # always wins when both exist, and only an otherwise-unresolved index
+        # pays the extra stats. Casing of the subdir varies by layer
+        # (Data/IMPFaces/BIGFACES vs Data-1.13/IMPFaces/BigFaces).
+        imp_subs = {subdir, subdir.upper(), subdir.lower()} if subdir else {""}
+        imp_names = sorted({str(face_index), f"{face_index:02d}", f"{face_index:03d}"})
+        for imp_base in ("IMPFaces", "IMPFACES", "impfaces"):
+            for sv in imp_subs:
+                for name in imp_names:
+                    for ext in ("sti", "STI"):
+                        rel = f"{imp_base}/{sv}{name}.{ext}"
+                        existing = self.layout.resolve_in_mod_content(rel)
+                        if existing is None:
+                            existing = self.layout.resolve_read(rel)
+                        if existing is not None and existing.is_file():
+                            try:
+                                data = existing.read_bytes()
+                                st = existing.stat()
+                                return (data, f"file:{st.st_mtime_ns}:{st.st_size}")
+                            except OSError:
+                                pass
+        return None
+
+    def vehicles_xml_path(self, *, for_write: bool = False) -> Path:
+        rel = "TableData/Vehicles.xml"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
+    def vehicle_face_icon_rel(self, slot: int) -> Optional[str]:
+        """Vehicles.xml StiFaceIcon (e.g. 'INTERFACE\\Jeep.sti') for the
+        vehicle profile at `slot`, or None.
+
+        A vehicle's profile id == its Vehicles.xml uiIndex (the engine sets
+        ubProfileID from uiIndex), so the join is uiIndex==slot. Parsed via
+        latin-1 + regex (encoding-agnostic; the file may be cp1252) and cached
+        per InstallContext."""
+        cache = getattr(self, "_veh_icon_cache", None)
+        if cache is None:
+            import re as _re
+            cache = {}
+            try:
+                raw = self.vehicles_xml_path().read_bytes().decode("latin-1")
+                for m in _re.finditer(r"<VEHICLE>(.*?)</VEHICLE>", raw, _re.S):
+                    blk = m.group(1)
+                    ui = _re.search(r"<uiIndex>\s*(\d+)", blk)
+                    icon = _re.search(r"<StiFaceIcon>([^<]*)</StiFaceIcon>", blk)
+                    if ui is not None:
+                        cache[int(ui.group(1))] = (icon.group(1).strip() if icon else "")
+            except (OSError, ValueError):
+                cache = {}
+            self._veh_icon_cache = cache
+        val = cache.get(slot) or ""
+        return val or None
+
+    def vehicle_icon_bytes(self, slot: int) -> Optional[tuple[bytes, str]]:
+        """Source bytes for a vehicle profile's UI icon, resolved from its
+        Vehicles.xml StiFaceIcon (e.g. INTERFACE\\Jeep.sti) across loose
+        Interface/ dirs + Interface*.slf. None when the slot is not an
+        icon-bearing vehicle or the icon can't be found.
+
+        Vehicles draw this icon, NOT FACES\\<idx>.sti — the engine's
+        InternalInitFace only sprintfs FACES/IMPFACES paths for non-vehicle
+        profile Types, so a Type=5 slot's ubFaceIndex is inert."""
+        rel = self.vehicle_face_icon_rel(slot)
+        if not rel:
+            return None
+        stem = rel.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]  # 'Jeep'
+        # Loose probe first (mod override wins).
+        for d in ("Interface", "INTERFACE", "interface"):
+            for ext in ("sti", "STI"):
+                r = f"{d}/{stem}.{ext}"
+                existing = self.layout.resolve_in_mod_content(r) or self.layout.resolve_read(r)
+                if existing is not None and existing.is_file():
+                    try:
+                        st = existing.stat()
+                        return (existing.read_bytes(), f"file:{st.st_mtime_ns}:{st.st_size}")
+                    except OSError:
+                        pass
+        # SLF probe — Interface*.slf, basename match (case-insensitive).
+        target = f"{stem}.sti".lower()
+        seen: set[str] = set()
+        for profile in reversed(self.layout.profiles):
+            for loc in profile.locations:
+                if not loc.is_directory:
+                    continue
+                key = str(loc.path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    slfs = sorted(loc.path.glob("*.slf")) + sorted(loc.path.glob("*.SLF"))
+                except OSError:
+                    continue
+                for slf_path in slfs:
+                    if "interface" not in slf_path.name.lower():
+                        continue
+                    slf = _open_slf_cached(slf_path)
+                    if slf is None:
+                        continue
+                    try:
+                        mtime = slf_path.stat().st_mtime_ns
+                    except OSError:
+                        mtime = 0
+                    try:
+                        for member in slf.walk.files():
+                            if os.path.basename(member).lower() == target:
+                                with slf.openbin(member, "r") as f:
+                                    return (f.read(), f"slf:{mtime}:{member}")
+                    except Exception:  # noqa: BLE001
+                        continue
         return None
 
     # ── Voice / audio ────────────────────────────────────────────────────
