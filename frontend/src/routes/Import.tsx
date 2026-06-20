@@ -87,6 +87,12 @@ export default function Import() {
       qc.invalidateQueries({ queryKey: ["roster"] });
       // Slot picker — bug-review finding E4.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
+      // Destination slot detail + voice when an explicit target was picked,
+      // so an open view of that slot refreshes post-import (matches Move).
+      if (targetSlot !== null) {
+        qc.invalidateQueries({ queryKey: ["slot", targetSlot] });
+        qc.invalidateQueries({ queryKey: ["voice", targetSlot] });
+      }
     },
   });
 

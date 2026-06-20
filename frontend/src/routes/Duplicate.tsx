@@ -89,6 +89,13 @@ export default function Duplicate() {
       qc.invalidateQueries({ queryKey: ["roster"] });
       // Slot picker — bug-review finding E4.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
+      // Destination slot detail + voice, so an open Edit / voice view of the
+      // new slot refreshes instead of showing stale pre-duplicate data
+      // (matches Move/Create's dest invalidation).
+      if (dest !== null) {
+        qc.invalidateQueries({ queryKey: ["slot", dest] });
+        qc.invalidateQueries({ queryKey: ["voice", dest] });
+      }
       // Fade the progress bar out a moment after success so the user
       // sees the green ✓ before it disappears. Tracked via ref so
       // unmount can cancel.

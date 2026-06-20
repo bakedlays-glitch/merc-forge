@@ -619,9 +619,12 @@ export async function getRosterPortraitSheet(opts?: {
     try { detail = await jsonRes.json(); } catch {}
     throw new ApiError(jsonRes.status, detail);
   }
+  // Parse the manifest BEFORE creating the object URL: if the JSON parse
+  // throws, an already-created blob URL would leak (never returned, never
+  // revoked). Ordering it first means a failure creates no URL to leak.
+  const manifest = (await jsonRes.json()) as PortraitSheetManifest;
   const pngBlob = await pngRes.blob();
   const blobUrl = URL.createObjectURL(pngBlob);
-  const manifest = (await jsonRes.json()) as PortraitSheetManifest;
   return { blobUrl, manifest };
 }
 

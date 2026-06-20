@@ -24,8 +24,13 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   private handleReset = (): void => {
-    this.setState({ error: null });
-    window.location.hash = "/";
+    // Full reload to the app root. The app mounts <BrowserRouter> (not
+    // HashRouter), so the old `window.location.hash = "/"` only appended
+    // "#/" and triggered NO route change — React re-rendered the SAME
+    // failed route, which usually threw again and trapped the user. A hard
+    // navigation to "/" both resets this boundary's state and lands on the
+    // Hub via the router's catch-all.
+    window.location.assign("/");
   };
 
   render(): ReactNode {

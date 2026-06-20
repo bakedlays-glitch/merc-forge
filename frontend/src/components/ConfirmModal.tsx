@@ -85,16 +85,20 @@ export default function ConfirmModal({
         <div className="text-sm text-wasteland-200 mb-4">{body}</div>
         {typeToConfirm && (
           <TypeToConfirmInput required={typeToConfirm} onMatch={onConfirm}>
-            <button
-              className={destructive ? "btn-primary bg-rust-600 hover:bg-rust-500" : "btn-primary"}
-              type="submit"
-              disabled={busy}
-            >
-              {confirmLabel}
-            </button>
-            <button type="button" className="btn-ghost" onClick={onCancel} disabled={busy}>
-              {cancelLabel}
-            </button>
+            {(matches) => (
+              <>
+                <button
+                  className={destructive ? "btn-primary bg-rust-600 hover:bg-rust-500" : "btn-primary"}
+                  type="submit"
+                  disabled={busy || !matches}
+                >
+                  {confirmLabel}
+                </button>
+                <button type="button" className="btn-ghost" onClick={onCancel} disabled={busy}>
+                  {cancelLabel}
+                </button>
+              </>
+            )}
           </TypeToConfirmInput>
         )}
         {!typeToConfirm && (
@@ -129,7 +133,10 @@ function TypeToConfirmInput({
 }: {
   required: string;
   onMatch: () => void;
-  children: ReactNode;
+  /** Render-prop so the Confirm button can disable until the input matches
+   * (it was visually enabled but inert before — clicking on a mismatch did
+   * nothing with no feedback). */
+  children: (matches: boolean) => ReactNode;
 }) {
   const [value, setValue] = useState("");
   const matches = value === required;
@@ -149,7 +156,7 @@ function TypeToConfirmInput({
         onChange={(e) => setValue(e.target.value)}
         autoFocus
       />
-      <div className="flex gap-2 justify-end">{children}</div>
+      <div className="flex gap-2 justify-end">{children(matches)}</div>
     </form>
   );
 }
