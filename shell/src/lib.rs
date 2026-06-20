@@ -13,6 +13,7 @@ mod sidecar;
 mod commands;
 
 use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 /// `%APPDATA%\MercWizard\logs\` on Windows; `~/.config/MercWizard/logs/` elsewhere.
 fn log_dir() -> std::path::PathBuf {
@@ -93,10 +94,37 @@ pub fn run() {
 
             let app_handle = app.handle().clone();
             // Spawn the sidecar and block until it reports its bound port.
-            let state = tauri::async_runtime::block_on(async {
+            // On failure DO NOT `.expect()` — in release `panic = "abort"`
+            // turns a panic into a silent crash-to-desktop (the window is
+            // never shown), so a first-launch AV quarantine of the bundled
+            // mercwizard_core.exe looks like the app simply doing nothing.
+            // Instead show a clear, actionable native dialog naming the most
+            // likely cause + the log path, then exit cleanly (no orphan —
+            // the spawn failed, so there is no sidecar to kill).
+            let state = match tauri::async_runtime::block_on(async {
                 sidecar::spawn_sidecar(&app_handle).await
-            })
-            .expect("Failed to spawn sidecar — is mercwizard_core.exe bundled in resources?");
+            }) {
+                Ok(state) => state,
+                Err(e) => {
+                    log::error!("Sidecar spawn failed — aborting startup: {}", e);
+                    let logs = log_dir();
+                    app_handle
+                        .dialog()
+                        .message(format!(
+                            "Merc Forge couldn't start its background service, \
+                             so it can't run.\n\n{e}\n\n\
+                             The most likely cause is your antivirus blocking or \
+                             quarantining the bundled helper (mercwizard_core.exe) \
+                             on first launch. Restore/allow it, then relaunch \
+                             Merc Forge.\n\nLog folder:\n{}",
+                            logs.display(),
+                        ))
+                        .title("Merc Forge — startup failed")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    std::process::exit(1);
+                }
+            };
             app.manage(state);
 
             // Start the watchdog so dead sidecars get restarted
