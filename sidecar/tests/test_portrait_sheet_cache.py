@@ -276,6 +276,50 @@ def test_bake_fallback_no_decodable_face_errors_not_crashes(monkeypatch):
     assert any(e["slot"] == 9 for e in manifest["errors"])
 
 
+def test_bake_type5_vehicle_falls_back_to_vehicle_icon(monkeypatch):
+    """A Type=5 vehicle whose face STI is absent (e.g. slot 199 'Jeep') must
+    fall back to its Vehicles.xml StiFaceIcon via ctx.vehicle_icon_bytes
+    instead of going blank — the bake branch added this session."""
+    import mercwizard_core.sti_decode as _stidecode
+    monkeypatch.setattr(
+        R.profiles_xml, "read_all_slots",
+        lambda p: {199: {"ubFaceIndex": "199", "zName": "Jeep", "Type": "5"}},
+    )
+    # Face never decodes (no STI anywhere); the icon bytes do.
+    monkeypatch.setattr(
+        _stidecode, "decode_sti_frame_to_png",
+        lambda b, frame_index=0: _tiny_png() if b == b"JEEP-ICON" else None,
+    )
+
+    class _VehCtx(_FallbackCtx):
+        def vehicle_icon_bytes(self, slot):
+            return (b"JEEP-ICON", f"icon:{slot}")
+
+    ctx = _VehCtx({"bigface": None, "smallface": None, "face_65": None, "face_33": None})
+    _png, manifest = R._bake_portrait_sheet(ctx, "bigface")
+    assert any(c["slot"] == 199 for c in manifest["cells"])      # rendered the icon
+    assert not any(e["slot"] == 199 for e in manifest["errors"])  # not blank
+
+
+def test_bake_type5_vehicle_with_no_icon_errors(monkeypatch):
+    """A faceless Type=5 with no resolvable icon still degrades to an error
+    (no crash) — the vehicle fallback returning None must not throw."""
+    import mercwizard_core.sti_decode as _stidecode
+    monkeypatch.setattr(
+        R.profiles_xml, "read_all_slots",
+        lambda p: {199: {"ubFaceIndex": "199", "zName": "Jeep", "Type": "5"}},
+    )
+    monkeypatch.setattr(_stidecode, "decode_sti_frame_to_png", lambda b, frame_index=0: None)
+
+    class _VehCtx(_FallbackCtx):
+        def vehicle_icon_bytes(self, slot):
+            return None
+
+    ctx = _VehCtx({"bigface": None, "smallface": None, "face_65": None, "face_33": None})
+    _png, manifest = R._bake_portrait_sheet(ctx, "bigface")
+    assert any(e["slot"] == 199 for e in manifest["errors"])
+
+
 def test_warm_install_dedups_per_install(tmp_path, monkeypatch):
     """At most one warm thread runs per install at a time; a second
     warm_install while the first is in flight is a no-op."""

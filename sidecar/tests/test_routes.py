@@ -809,6 +809,58 @@ def test_get_merc_portrait_returns_png_bytes(
     assert r.headers.get("etag")
 
 
+def test_get_merc_portrait_falls_back_to_sibling_size(
+    client: TestClient, registered_install: dict,
+) -> None:
+    """When the REQUESTED size is missing but a sibling decodes, the endpoint
+    serves the sibling (200) instead of 404 — matching the roster grid's
+    decode-aware fallback. Seed all sizes, delete the BigFace, request
+    bigface → must fall back to the SmallFace."""
+    install_root = Path(registered_install["path"])
+    _seed_face_sti(install_root, face_index=42)
+    # Remove every BigFace variant for face 42 so bigface must fall back.
+    faces = install_root / "Data-1.13" / "faces"
+    removed = 0
+    for p in faces.rglob("*.sti"):
+        if "bigface" in str(p).lower() and p.stem.lstrip("0") in ("42", ""):
+            p.unlink()
+            removed += 1
+    assert removed > 0, "no BigFace was seeded to delete — fixture changed"
+
+    client.post("/api/v1/merc", json={"merc": {
+        "uiIndex": 201, "ubFaceIndex": 42, "Type": 1,
+        "zName": "Fb", "zNickname": "Fb",
+    }})
+    r = client.get("/api/v1/merc/201/portrait?size=bigface")
+    assert r.status_code == 200, r.text  # fell back to SmallFace, not 404
+    assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_composite_animation_strip_layout_and_coords() -> None:
+    """The animation-strip compositor lays out one 48x43 cell per frame and
+    pastes eye/blink frames (1..4) at eye_xy, mouth/talk (5..) at mouth_xy."""
+    import io as _io
+    from PIL import Image
+    from routes.merc import _composite_animation_strip
+
+    base = Image.new("RGBA", (48, 43), (0, 0, 0, 255))
+    eye = Image.new("RGBA", (10, 6), (255, 0, 0, 255))      # red blink
+    mouth = Image.new("RGBA", (10, 6), (0, 255, 0, 255))    # green talk
+    frames = [base] + [eye] * 4 + [mouth] * 3               # base + 4 eye + 3 mouth
+    eye_xy, mouth_xy = (5, 8), (5, 30)
+
+    png = _composite_animation_strip(frames, eye_xy, mouth_xy)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    strip = Image.open(_io.BytesIO(png)).convert("RGBA")
+    assert strip.size == (48 * 8, 43)  # 8 cells
+    px = strip.load()
+    # Blink cell 1: red at the eye coord. Talk cell 5: green at the mouth coord.
+    assert px[48 * 1 + eye_xy[0] + 1, eye_xy[1] + 1][:3] == (255, 0, 0)
+    assert px[48 * 5 + mouth_xy[0] + 1, mouth_xy[1] + 1][:3] == (0, 255, 0)
+    # Base cell 0 is untouched (black at the eye coord).
+    assert px[eye_xy[0] + 1, eye_xy[1] + 1][:3] == (0, 0, 0)
+
+
 def test_get_merc_portrait_cache_invalidates_after_recompile(
     client: TestClient, registered_install: dict,
 ) -> None:

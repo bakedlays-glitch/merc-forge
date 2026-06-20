@@ -37,6 +37,29 @@ def test_filled_slot_appears_in_roster(tmp_path: Path) -> None:
     assert entry_10.face_index == 160
 
 
+def test_empty_imp_template_slot_reports_type(tmp_path: Path) -> None:
+    """A Type=6 IMP destination template with NO display name (like PGLady2 at
+    slot 55) is is_empty=True, but load_roster must still surface its Type so
+    the UI can label it 'IMP template' instead of a blank '+'. A slot with no
+    PROFILE element at all keeps profile_type=None."""
+    install = _setup_install(tmp_path)
+    xml = install / "Data-1.13" / "TableData" / "MercProfiles.xml"
+    xml.write_text(
+        "<MERCPROFILES>"
+        "<PROFILE><uiIndex>55</uiIndex><zName></zName><zNickname></zNickname>"
+        "<Type>6</Type><ubFaceIndex>55</ubFaceIndex></PROFILE>"
+        "</MERCPROFILES>",
+        encoding="utf-8",
+    )
+    roster = load_roster(install)
+    slot55 = next(e for e in roster if e.slot == 55)
+    assert slot55.is_empty is True          # no name → empty / available
+    assert slot55.profile_type == 6         # …but Type captured for the UI
+
+    slot200 = next(e for e in roster if e.slot == 200)
+    assert slot200.is_empty is True and slot200.profile_type is None
+
+
 def test_aim_binding_attached_to_roster(tmp_path: Path) -> None:
     install = _setup_install(tmp_path)
     merc = Merc(uiIndex=10, ubFaceIndex=160, zName="Carter", zNickname="Carter", Type=1)

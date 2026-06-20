@@ -871,39 +871,46 @@ def get_merc_animation_frames(
     eye_xy = (_coord("usEyesX"), _coord("usEyesY"))
     mouth_xy = (_coord("usMouthX"), _coord("usMouthY"))
 
-    base = frames[0]
-    n = len(frames)
-    # Canonical layout authored by the merc pipeline + shipped by vanilla:
-    # after the base, the next (up to) 4 frames are eye/blink, the rest are
-    # mouth/talk. min() guards a short STI.
-    eye_n = min(4, n - 1)
-    cw, ch = _CELL_SIZES_SMALLFACE
-    cells: list = []
-    for i, fr in enumerate(frames):
-        if i == 0:
-            cell = base.copy()
-        else:
-            cell = base.copy()
-            pos = eye_xy if i <= eye_n else mouth_xy
-            try:
-                cell.paste(fr, pos, fr)  # alpha-composite the sub-frame at its coord
-            except (ValueError, SystemError):
-                pass  # bad coord / size mismatch — leave the base for this cell
-        if cell.size != (cw, ch):
-            cell = cell.resize((cw, ch), _Image.NEAREST)
-        cells.append(cell)
-
-    strip = _Image.new("RGBA", (cw * len(cells), ch), (0, 0, 0, 0))
-    for idx, im in enumerate(cells):
-        strip.paste(im, (idx * cw, 0))
-    buf = _io.BytesIO()
-    strip.save(buf, format="PNG")
-    data = buf.getvalue()
+    data = _composite_animation_strip(frames, eye_xy, mouth_xy)
     return Response(
         content=data,
         media_type="image/png",
         headers={"Cache-Control": "private, max-age=60", "ETag": _etag_for_png(data)},
     )
+
+
+def _composite_animation_strip(frames: list, eye_xy: tuple, mouth_xy: tuple) -> bytes:
+    """Composite SmallFace animation frames into one horizontal strip
+    (base · blink · talk), one 48x43 cell per frame, returning PNG bytes.
+
+    frames[0] is the base face; frames[1..min(4,n-1)] are eye/blink sub-frames
+    pasted at eye_xy, the remainder are mouth/talk pasted at mouth_xy — the
+    engine's runtime composition. A bad coord or oversize sub-frame is
+    swallowed (that cell keeps the base). Extracted from the endpoint so the
+    composition is unit-testable without a multi-frame STI fixture."""
+    import io as _io
+    from PIL import Image as _Image
+    base = frames[0]
+    eye_n = min(4, len(frames) - 1)
+    cw, ch = _CELL_SIZES_SMALLFACE
+    cells: list = []
+    for i, fr in enumerate(frames):
+        cell = base.copy()
+        if i != 0:
+            pos = eye_xy if i <= eye_n else mouth_xy
+            try:
+                cell.paste(fr, pos, fr)  # alpha-composite the sub-frame at its coord
+            except (ValueError, SystemError):
+                pass  # bad coord / size mismatch — keep the base for this cell
+        if cell.size != (cw, ch):
+            cell = cell.resize((cw, ch), _Image.NEAREST)
+        cells.append(cell)
+    strip = _Image.new("RGBA", (cw * len(cells), ch), (0, 0, 0, 0))
+    for idx, im in enumerate(cells):
+        strip.paste(im, (idx * cw, 0))
+    buf = _io.BytesIO()
+    strip.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # Canonical SmallFace cell size — every composited animation frame is
