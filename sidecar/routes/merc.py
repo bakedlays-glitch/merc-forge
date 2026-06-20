@@ -730,55 +730,64 @@ def get_merc_portrait(
     # naturally invalidates without manual eviction. The stat to
     # compute source_id is ~0.1ms; the decode it short-circuits is
     # ~10-50ms — net win even when the cache misses.
-    result = ctx.face_sti_bytes(face_index, size=size)
-    if result is None:
-        raise HTTPException(status_code=404, detail={
-            "error": "PORTRAIT_NOT_FOUND",
-            "slot": slot,
-            "face_index": face_index,
-            "size": size,
-            "message": (
-                f"face {face_index} ({size}) not found loose or in any "
-                f"SLF archive under {info.path}"
-            ),
-        })
-    sti_bytes, source_id = result
+    # Resolve the requested size first, then the fallback chain — and accept
+    # the FIRST candidate that BOTH resolves AND decodes. This mirrors the
+    # roster grid bake (routes/roster.py _bake_portrait_sheet) so the sidebar
+    # BigFace never goes blank for a merc the grid renders: a BigFace-less
+    # NPC (most NPCs) downscales from its SmallFace instead of 404-ing, and a
+    # present-but-undecodable size (16-bit / malformed palette) is skipped in
+    # favour of a sibling size that decodes. Lazy import — ja2py is vendored.
+    from .roster import _FALLBACK_ORDER  # the grid bake's fallback policy
+    from mercwizard_core.sti_decode import decode_sti_frame_to_png
 
-    # Fast path: cached PNG keyed by source_id. After a recompile the
-    # mtime in source_id bumps → fresh cache slot → fresh decode.
-    cache_key = (info.id, face_index, size, source_id)
-    cached = _png_cache_get(cache_key)
-    if cached is not None:
+    last_reason = (
+        f"face {face_index} ({size}) not found loose or in any SLF "
+        f"archive under {info.path}"
+    )
+    for cand in (size, *_FALLBACK_ORDER.get(size, ())):
+        result = ctx.face_sti_bytes(face_index, size=cand)
+        if result is None:
+            continue
+        sti_bytes, source_id = result
+        # Cache key keeps the REQUESTED size + the chosen candidate's
+        # source_id (on-disk/SLF mtime), so a recompile or SLF replace
+        # invalidates naturally and repeat requests hit the cache.
+        cache_key = (info.id, face_index, size, source_id)
+        cached = _png_cache_get(cache_key)
+        if cached is not None:
+            return Response(
+                content=cached,
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "private, max-age=60",
+                    "ETag": _etag_for_png(cached),
+                },
+            )
+        png_bytes = decode_sti_frame_to_png(sti_bytes, frame_index=0)
+        if png_bytes is None:
+            last_reason = (
+                f"face {face_index} ({cand}) decode returned None "
+                f"(likely 16-bit STI or malformed palette)"
+            )
+            continue
+        _png_cache_put(cache_key, png_bytes)
         return Response(
-            content=cached,
+            content=png_bytes,
             media_type="image/png",
             headers={
                 "Cache-Control": "private, max-age=60",
-                "ETag": _etag_for_png(cached),
+                "ETag": _etag_for_png(png_bytes),
             },
         )
 
-    # Cold path: decode bytes → PNG, cache, return.
-    # Lazy import — ja2py is vendored and pays a non-trivial startup cost.
-    from mercwizard_core.sti_decode import decode_sti_frame_to_png
-    png_bytes = decode_sti_frame_to_png(sti_bytes, frame_index=0)
-    if png_bytes is None:
-        raise HTTPException(status_code=500, detail={
-            "error": "PORTRAIT_DECODE_FAILED",
-            "slot": slot,
-            "face_index": face_index,
-            "message": f"face {face_index} ({size}) — decoder returned no frames",
-        })
-
-    _png_cache_put(cache_key, png_bytes)
-    return Response(
-        content=png_bytes,
-        media_type="image/png",
-        headers={
-            "Cache-Control": "private, max-age=60",
-            "ETag": _etag_for_png(png_bytes),
-        },
-    )
+    # No candidate size resolved + decoded — the client renders a placeholder.
+    raise HTTPException(status_code=404, detail={
+        "error": "PORTRAIT_NOT_FOUND",
+        "slot": slot,
+        "face_index": face_index,
+        "size": size,
+        "message": last_reason,
+    })
 
 
 def _decode_face_sti_frame_zero(sti_path: Path) -> Optional[bytes]:

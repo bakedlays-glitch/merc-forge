@@ -1018,12 +1018,15 @@ function MenuItem({
   );
 }
 
+// Engine Type values (MercProfiles <Type>): 1 AIM, 2 MERC, 3 RPC, 4 NPC,
+// 5 Vehicle, 6 IMP — must match TYPE_STYLE above and models.py ProfileType.
+// (3/4 were previously swapped here, contradicting the card chip.)
 function profileTypeLabel(t: number): string {
   switch (t) {
     case 1: return "AIM mercenary";
     case 2: return "M.E.R.C. mercenary";
-    case 3: return "NPC";
-    case 4: return "RPC";
+    case 3: return "RPC";
+    case 4: return "NPC";
     case 5: return "Vehicle";
     case 6: return "IMP";
     default: return `Type ${t}`;
