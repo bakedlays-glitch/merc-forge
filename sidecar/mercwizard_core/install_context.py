@@ -443,6 +443,17 @@ class InstallContext:
             for name in names:
                 for ext in ("STI", "sti"):
                     candidates_in_slf.append(f"/{pre}{name}.{ext}")
+        # Vanilla Faces.slf stores the 90x100 talking-head BIG face at the
+        # archive ROOT as "B<NN>.STI" (e.g. /B75.STI = Deidranna), NOT under a
+        # BigFaces/ subdir. ~75 story NPCs (73-80, 82-87, 89, 91-155) ship ONLY
+        # this B-prefixed big face and no plain small face, so a bigface request
+        # must also probe the B-prefix; otherwise they resolve to nothing (blank
+        # roster cell) even though the engine shows them in dialogue. Appended
+        # after the subdir candidates so a mod's BigFaces/<idx>.sti still wins.
+        if size == "bigface":
+            for name in names:
+                for ext in ("STI", "sti"):
+                    candidates_in_slf.append(f"/B{name}.{ext}")
         # Walk every data-layer directory's SLF list. Layer priority =
         # mod content first (the engine's VFS reads in profile order,
         # mod data layers before vanilla), so a mod-shipped Faces.slf

@@ -73,6 +73,29 @@ def test_face_sti_bytes_resolves_root_stored_zero_padded_slf_entry(tmp_path: Pat
     assert big[0] == b"BIG_FACE_5_BYTES"
 
 
+def test_face_sti_bytes_resolves_b_prefixed_big_face(tmp_path: Path) -> None:
+    """Vanilla Faces.slf stores the 90x100 talking-head big face at the archive
+    ROOT as ``B<NN>.STI`` (``/B75.STI``). ~75 story NPCs (Deidranna 75, Kingpin
+    86, Walker 100, ...) ship ONLY this B-prefixed big face and no plain small
+    face, so a bigface request must probe the B-prefix or they blank in the
+    roster even though the engine shows them in dialogue. Lock that contract."""
+    install = tmp_path / "inst"
+    (install / "Data").mkdir(parents=True)
+    _faces_slf(install / "Data" / "Faces.slf", [
+        ("B75.STI", b"BIG_NPC_75_BYTES"),  # B-prefixed big face, no plain /75.STI
+    ])
+    ctx = make_install_context(install)
+
+    big = ctx.face_sti_bytes(75, "bigface")
+    assert big is not None, "B-prefixed root big face not resolved"
+    assert big[0] == b"BIG_NPC_75_BYTES"
+    assert big[1].startswith("slf:")
+
+    # The same NPC has no plain small face, so smallface correctly resolves to
+    # None — the roster bakes at bigface, so the B-prefix branch is what fills it.
+    assert ctx.face_sti_bytes(75, "smallface") is None
+
+
 def test_face_sti_bytes_returns_none_when_absent(tmp_path: Path) -> None:
     """A face index the archive doesn't carry resolves to None (the caller then
     falls back / serves a blank), not an exception."""
