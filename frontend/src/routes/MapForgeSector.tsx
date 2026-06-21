@@ -915,6 +915,7 @@ function MapForgeSectorInner() {
   const [showItems, setShowItems] = useState(false);
   const [showEntries, setShowEntries] = useState(true);
   const [showExits, setShowExits] = useState(true);
+  const [showSoldiers, setShowSoldiers] = useState(true);
   const [rendererLoading, setRendererLoading] = useState(false);
   // Phase + per-phase percent for the load progress bar. `null` when
   // not loading or when the bar has finished. The whole-load percent
@@ -4544,6 +4545,7 @@ function MapForgeSectorInner() {
               showItems={showItems}
               showEntries={showEntries}
               showExits={showExits}
+              showSoldiers={showSoldiers}
             />
             {/* Building-placement sprite ghost — drawn + positioned
                 imperatively by the placement-ghost effect. Above the
@@ -5120,6 +5122,10 @@ function MapForgeSectorInner() {
                 <input type="checkbox" checked={showExits} onChange={(e) => setShowExits(e.target.checked)} />
                 Exits{appendix ? ` (${appendix.exit_grids.length})` : ""}
               </label>
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showSoldiers} onChange={(e) => setShowSoldiers(e.target.checked)} />
+                NPCs{appendix ? ` (${appendix.soldiers.length})` : ""}
+              </label>
               {appendix?.blocked_at && (
                 <span className="text-xs text-amber-400">layer &ldquo;{appendix.blocked_at}&rdquo; not yet shown</span>
               )}
@@ -5252,6 +5258,7 @@ function IsoOverlay({
   showItems,
   showEntries,
   showExits,
+  showSoldiers,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -5282,11 +5289,12 @@ function IsoOverlay({
   /** Non-zero-height tiles to overlay while the height brush is active —
    * tinted by height, numbered when zoomed in. Null for other tools. */
   heightOverlay: Array<{ x: number; y: number; h: number }> | null;
-  /** Read-only tactical appendix (items / entry points / exit grids). */
+  /** Read-only tactical appendix (items / entry points / exit grids / soldiers). */
   appendix: AppendixEntities | null;
   showItems: boolean;
   showEntries: boolean;
   showExits: boolean;
+  showSoldiers: boolean;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -5487,6 +5495,21 @@ function IsoOverlay({
               return <circle key={`it-${i}`} cx={cx} cy={cy} r={3}
                 fill="rgba(120,255,160,0.9)" stroke="rgba(40,160,80,0.9)"
                 strokeWidth={1} vectorEffect="non-scaling-stroke" />;
+            })}
+            {showSoldiers && appendix.soldiers.map((s, i) => {
+              const { cx, cy } = c(s.x, s.y);
+              const color = s.team === 1 ? "rgba(255,80,80,0.95)"      // enemy
+                : s.team === 2 ? "rgba(120,255,120,0.95)"              // creature
+                : s.team === 3 ? "rgba(80,220,255,0.95)"               // militia
+                : s.team === 4 ? "rgba(120,160,255,0.95)"              // civilian
+                : "rgba(240,240,240,0.95)";                            // player/other
+              return (
+                <circle key={`sol-${i}`} cx={cx} cy={cy} r={4}
+                  fill={color} stroke="rgba(0,0,0,0.7)" strokeWidth={1}
+                  vectorEffect="non-scaling-stroke">
+                  <title>{`${s.team_label} (dir ${s.facing}, class ${s.soldier_class})`}</title>
+                </circle>
+              );
             })}
           </g>
         );
