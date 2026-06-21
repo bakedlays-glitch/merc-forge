@@ -1786,6 +1786,36 @@ export function getSessionParsed(sessionId: string): Promise<ParsedSector> {
   );
 }
 
+export interface AppendixItem {
+  gridno: number; x: number; y: number; usItem: number; level: number;
+}
+export interface AppendixEntryPoint {
+  kind: string; gridno: number; x: number; y: number;
+}
+export interface AppendixExitGrid {
+  gridno: number; x: number; y: number;
+  dest_gridno: number; sx: number; sy: number; sz: number;
+}
+export interface AppendixEntities {
+  session_id: string;
+  rows: number;
+  cols: number;
+  items: AppendixItem[];
+  entry_points: AppendixEntryPoint[];
+  exit_grids: AppendixExitGrid[];
+  reached: string[];
+  blocked_at: string | null;
+}
+
+/** Read-only appendix entities (items / entry points / exit grids) for the
+ * tactical overlay. Fetched once per session; the appendix is the on-disk
+ * tactical layer (MapForge cannot edit it). */
+export function getSessionAppendix(sessionId: string): Promise<AppendixEntities> {
+  return jsonGet<AppendixEntities>(
+    `/mapforge/sessions/${encodeURIComponent(sessionId)}/appendix`,
+  );
+}
+
 // ─── SLF → loose extraction (read-only SLF map → editable loose) ────
 // JA2's VFS prefers loose `.dat` files over SLF entries at load time,
 // so once a sector is extracted to the layer the active VFS profile
