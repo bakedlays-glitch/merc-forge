@@ -917,6 +917,8 @@ function MapForgeSectorInner() {
   const [showExits, setShowExits] = useState(true);
   const [showSoldiers, setShowSoldiers] = useState(true);
   const [showLights, setShowLights] = useState(false);
+  const [showDoors, setShowDoors] = useState(false);
+  const [showEdges, setShowEdges] = useState(false);
   const [rendererLoading, setRendererLoading] = useState(false);
   // Phase + per-phase percent for the load progress bar. `null` when
   // not loading or when the bar has finished. The whole-load percent
@@ -4548,6 +4550,8 @@ function MapForgeSectorInner() {
               showExits={showExits}
               showSoldiers={showSoldiers}
               showLights={showLights}
+              showDoors={showDoors}
+              showEdges={showEdges}
             />
             {/* Building-placement sprite ghost — drawn + positioned
                 imperatively by the placement-ghost effect. Above the
@@ -5132,6 +5136,14 @@ function MapForgeSectorInner() {
                 <input type="checkbox" checked={showLights} onChange={(e) => setShowLights(e.target.checked)} />
                 Lights{appendix ? ` (${appendix.lights.length})` : ""}
               </label>
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showDoors} onChange={(e) => setShowDoors(e.target.checked)} />
+                Doors{appendix ? ` (${appendix.doors.length})` : ""}
+              </label>
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showEdges} onChange={(e) => setShowEdges(e.target.checked)} />
+                Edges{appendix ? ` (${appendix.edgepoints.length})` : ""}
+              </label>
               {appendix?.blocked_at && (
                 <span className="text-xs text-amber-400">layer &ldquo;{appendix.blocked_at}&rdquo; not yet shown</span>
               )}
@@ -5266,6 +5278,8 @@ function IsoOverlay({
   showExits,
   showSoldiers,
   showLights,
+  showDoors,
+  showEdges,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -5303,6 +5317,8 @@ function IsoOverlay({
   showExits: boolean;
   showSoldiers: boolean;
   showLights: boolean;
+  showDoors: boolean;
+  showEdges: boolean;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -5528,6 +5544,21 @@ function IsoOverlay({
                   <title>{l.template}</title>
                 </circle>
               );
+            })}
+            {showDoors && appendix.doors.map((d, i) => {
+              const { cx, cy } = c(d.x, d.y);
+              return <rect key={`dr-${i}`} x={cx - 4} y={cy - 4} width={8} height={8}
+                fill={d.locked ? "rgba(200,120,255,0.85)" : "rgba(200,180,255,0.6)"}
+                stroke="rgba(120,40,200,0.9)" strokeWidth={1} vectorEffect="non-scaling-stroke">
+                <title>{d.locked ? "locked door" : "door"}</title>
+              </rect>;
+            })}
+            {showEdges && appendix.edgepoints.map((e, i) => {
+              const { cx, cy } = c(e.x, e.y);
+              return <circle key={`eg-${i}`} cx={cx} cy={cy} r={2}
+                fill="rgba(160,160,160,0.7)" stroke="rgba(80,80,80,0.6)" strokeWidth={1} vectorEffect="non-scaling-stroke">
+                <title>{`edge: ${e.edge}`}</title>
+              </circle>;
             })}
           </g>
         );

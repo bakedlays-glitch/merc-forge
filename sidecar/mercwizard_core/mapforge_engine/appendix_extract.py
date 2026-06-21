@@ -1,8 +1,10 @@
 """Read-only extraction of positioned appendix entities for the MapForge
 tactical overlay. Walks the appendix region (never writes), returns entity
-lists keyed by tile position. Scope: items + entry points + exit grids;
-later sections (lights records, soldiers, doors, edgepoints) are marked
-`blocked_at` and deferred. See docs/superpowers/specs/2026-06-20-mapforge-tactical-overlay-design.md.
+lists keyed by tile position. Scope: items, entry points, exit grids, world
+lights, soldiers (incl. legacy 1040-byte detailed-placement skip), doors, and
+edgepoints. Only schedules and the modern (major>=7.0) variable-inventory
+detailed-soldier path remain deferred/bailed. See
+docs/superpowers/specs/2026-06-20-mapforge-tactical-overlay-design.md.
 """
 from __future__ import annotations
 
@@ -47,7 +49,8 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
 
     out: Dict[str, Any] = {
         "items": [], "entry_points": [], "exit_grids": [], "soldiers": [],
-        "lights": [], "reached": [], "blocked_at": None, "rows": rows, "cols": cols,
+        "lights": [], "doors": [], "edgepoints": [],
+        "reached": [], "blocked_at": None, "rows": rows, "cols": cols,
     }
 
     def blocked(reason: str) -> Dict[str, Any]:
@@ -182,5 +185,47 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
             out["exit_grids"].append({"gridno": map_index, "x": x, "y": y,
                                       "dest_gridno": grid_no, "sx": sx, "sy": sy, "sz": sz})
         out["reached"].append("exitgrids")
+
+    # 7. DOOR TABLE — uint8 count + 14-byte _OLD_DOOR records.
+    if flags & AW.MAP_DOORTABLE_SAVED:
+        if pos + 1 > n:
+            return blocked("doortable_count_truncated")
+        dt_count = data[pos]
+        pos += 1
+        for _ in range(dt_count):
+            if pos + 14 > n:
+                return blocked("doortable_records_overrun")
+            g = struct.unpack_from("<h", data, pos)[0]
+            locked = data[pos + 2]
+            pos += 14
+            if g < 0:
+                continue
+            x, y = _xy(g, cols)
+            out["doors"].append({"gridno": g, "x": x, "y": y, "locked": bool(locked)})
+        out["reached"].append("doortable")
+
+    # 8. EDGEPOINTS — 8 sub-sections (primary N/E/S/W, secondary N/E/S/W).
+    # Each: uint16 size + uint16 middle + size * gridno (INT16 v<7 / INT32 v>=7).
+    if flags & AW.MAP_EDGEPOINTS_SAVED:
+        elem_fmt = "<h" if major < 7.0 else "<i"
+        elem_size = 2 if major < 7.0 else 4
+        edge_names = ["north", "east", "south", "west",
+                      "north2", "east2", "south2", "west2"]
+        for si in range(8):
+            if pos + 4 > n:
+                return blocked("edgepoint_header_truncated")
+            size = struct.unpack_from("<H", data, pos)[0]
+            pos += 4  # uint16 size + uint16 middle (middle ignored)
+            for _ in range(size):
+                if pos + elem_size > n:
+                    return blocked("edgepoint_records_overrun")
+                g = struct.unpack_from(elem_fmt, data, pos)[0]
+                pos += elem_size
+                if g < 0:
+                    continue
+                x, y = _xy(g, cols)
+                out["edgepoints"].append({"gridno": g, "x": x, "y": y,
+                                          "edge": edge_names[si]})
+        out["reached"].append("edgepoints")
 
     return out

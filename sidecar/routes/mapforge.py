@@ -5868,6 +5868,18 @@ class AppendixLight(BaseModel):
     gridno: int
     template: str
 
+class AppendixDoor(BaseModel):
+    gridno: int
+    x: int
+    y: int
+    locked: bool
+
+class AppendixEdgepoint(BaseModel):
+    gridno: int
+    x: int
+    y: int
+    edge: str
+
 class AppendixEntities(BaseModel):
     session_id: str
     rows: int
@@ -5877,6 +5889,8 @@ class AppendixEntities(BaseModel):
     exit_grids: list[AppendixExitGrid]
     soldiers: list[AppendixSoldier]
     lights: list[AppendixLight]
+    doors: list[AppendixDoor]
+    edgepoints: list[AppendixEdgepoint]
     reached: list[str]
     blocked_at: str | None
 

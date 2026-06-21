@@ -267,6 +267,8 @@ from mercwizard_core.mapforge_engine.parse_dat_ext import parse_dat_full
 
 _A6 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
        r"\Data-1.13\Maps\A6.DAT")
+_A2 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+       r"\Data-1.13\Maps\A2.DAT")
 
 @pytest.mark.skipif(not os.path.exists(_A6), reason="canonical install not present")
 def test_real_a6_soldiers():
@@ -337,3 +339,94 @@ def test_appendix_endpoint_returns_lights():
     assert res.lights[0].x == 10 and res.lights[0].y == 20
     assert res.lights[0].template == "L-R05.LHT"
     assert res.lights[0].gridno == 3210
+
+
+# ---------------------------------------------------------------------------
+# Door table + edgepoint tests (Task 1)
+# ---------------------------------------------------------------------------
+
+def _door_record(gridno, locked=1):
+    """14-byte _OLD_DOOR. sGridNo @0 (int16), fLocked @2 (u8)."""
+    b = bytearray(14)
+    struct.pack_into("<h", b, 0, gridno)
+    b[2] = locked
+    return bytes(b)
+
+def _edge_section(gridnos, middle=0):
+    """One edgepoint sub-section: u16 size + u16 middle + size*int16."""
+    b = bytearray(struct.pack("<HH", len(gridnos), middle))
+    for g in gridnos:
+        b += struct.pack("<h", g)
+    return bytes(b)
+
+def test_extracts_doors():
+    # flags=DOOR only: tail(100) -> (no soldiers) -> (no exitgrids) -> door table.
+    data = _old_tail_100()
+    data += bytes([2])                       # uint8 door count
+    data += _door_record(12880, locked=1)    # (80,80) locked
+    data += _door_record(160, locked=0)      # (0,1) unlocked
+    out = extract_appendix_entities(data, _parsed(AW.MAP_DOORTABLE_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] is None
+    assert "doortable" in out["reached"]
+    assert [(d["gridno"], d["x"], d["y"], d["locked"]) for d in out["doors"]] == [
+        (12880, 80, 80, True), (160, 0, 1, False)]
+
+def test_extracts_edgepoints():
+    # flags=EDGE only: tail(100) -> 8 edge sub-sections (only 1st north populated).
+    data = _old_tail_100()
+    data += _edge_section([100, 260])        # primary north: 2 entry tiles
+    for _ in range(7):
+        data += _edge_section([])            # remaining 7 sections empty
+    out = extract_appendix_entities(data, _parsed(AW.MAP_EDGEPOINTS_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] is None
+    assert "edgepoints" in out["reached"]
+    assert [(e["gridno"], e["x"], e["y"], e["edge"]) for e in out["edgepoints"]] == [
+        (100, 100, 0, "north"), (260, 100, 1, "north")]
+
+def test_doortable_overrun_degrades():
+    data = _old_tail_100()
+    data += bytes([2]) + _door_record(100)   # count says 2, only 1 record
+    out = extract_appendix_entities(data, _parsed(AW.MAP_DOORTABLE_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] == "doortable_records_overrun"
+    assert [d["gridno"] for d in out["doors"]] == [100]
+
+def test_appendix_endpoint_returns_doors_and_edges():
+    data = _old_tail_100()
+    data += bytes([1]) + _door_record(320, locked=1)   # 1 door (note: flags include DOOR+EDGE)
+    data += _edge_section([200])                        # north
+    for _ in range(7):
+        data += _edge_section([])
+    parsed = {"flags": AW.MAP_DOORTABLE_SAVED | AW.MAP_EDGEPOINTS_SAVED,
+              "major": 5.0, "minor": 25, "cols": 160, "rows": 160, "appendix_offset": 0}
+    sess = _fake_session(data, parsed)
+    _session_store._sessions[sess.id] = sess
+    try:
+        res = session_appendix(sess.id)
+    finally:
+        del _session_store._sessions[sess.id]
+    assert len(res.doors) == 1 and res.doors[0].gridno == 320 and res.doors[0].locked is True
+    assert len(res.edgepoints) == 1 and res.edgepoints[0].edge == "north"
+
+
+@pytest.mark.skipif(not os.path.exists(_A2), reason="canonical install not present")
+def test_real_a2_doors_and_edges():
+    with open(_A2, "rb") as f:
+        data = f.read()
+    out = extract_appendix_entities(data, parse_dat_full(data))
+    assert out["blocked_at"] is None
+    assert len(out["doors"]) == 3                         # A2 has 3 doors
+    assert all(0 <= d["gridno"] < 25600 for d in out["doors"])
+    assert all(d["locked"] for d in out["doors"])          # all 3 are locked
+    assert len(out["edgepoints"]) > 0
+    assert all(0 <= e["gridno"] < 25600 for e in out["edgepoints"])
+    assert "doortable" in out["reached"] and "edgepoints" in out["reached"]
+
+def test_edgepoint_overrun_degrades_gracefully():
+    # North sub-section claims size=3 but only 2 int16s follow (last 2 bytes dropped).
+    data = _old_tail_100()
+    full = _edge_section([100, 200, 300])   # u16 size=3 + u16 middle + 3*int16
+    data += full[:-2]                        # drop the last gridno's 2 bytes
+    out = extract_appendix_entities(data, _parsed(AW.MAP_EDGEPOINTS_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] == "edgepoint_records_overrun"
+    # the gridnos read before the truncation are retained
+    assert [e["gridno"] for e in out["edgepoints"]] == [100, 200]

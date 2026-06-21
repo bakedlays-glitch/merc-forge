@@ -1803,6 +1803,12 @@ export interface AppendixSoldier {
 export interface AppendixLight {
   x: number; y: number; gridno: number; template: string;
 }
+export interface AppendixDoor {
+  gridno: number; x: number; y: number; locked: boolean;
+}
+export interface AppendixEdgepoint {
+  gridno: number; x: number; y: number; edge: string;
+}
 export interface AppendixEntities {
   session_id: string;
   rows: number;
@@ -1812,13 +1818,15 @@ export interface AppendixEntities {
   exit_grids: AppendixExitGrid[];
   soldiers: AppendixSoldier[];
   lights: AppendixLight[];
+  doors: AppendixDoor[];
+  edgepoints: AppendixEdgepoint[];
   reached: string[];
   blocked_at: string | null;
 }
 
-/** Read-only appendix entities (items / entry points / exit grids) for the
- * tactical overlay. Fetched once per session; the appendix is the on-disk
- * tactical layer (MapForge cannot edit it). */
+/** Read-only appendix entities (items / entry points / exit grids / doors /
+ * edgepoints) for the tactical overlay. Fetched once per session; the appendix
+ * is the on-disk tactical layer (MapForge cannot edit it). */
 export function getSessionAppendix(sessionId: string): Promise<AppendixEntities> {
   return jsonGet<AppendixEntities>(
     `/mapforge/sessions/${encodeURIComponent(sessionId)}/appendix`,
