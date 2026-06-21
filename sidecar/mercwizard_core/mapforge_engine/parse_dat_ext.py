@@ -9,8 +9,8 @@ from SLF archives) and extracts everything the corpus analyzer needs:
   - per-tile layer counts (land/obj/struct/shadow/roof/onroof) + world_flags
   - all 6 layer passes
   - room IDs per tile
-  - the 99-byte MapInformation tail (entry points, center, isolated, smoothing,
-    map version, num individuals)
+  - the MapInformation tail (entry points, center, isolated, smoothing,
+    map version, num individuals) — 100 bytes for major<7.0, 32 bytes for major>=7.0
 
 Format reference: the JA2 1.13 map/tile format (worlddef.h / SaveLoadMap.cpp).
 
@@ -65,13 +65,13 @@ def parse_appendix_minimal(
       1. items       (MAP_WORLDITEMS_SAVED)        - VARIABLE-SIZE per record (BLOCKS further parse)
       2. ambient     (MAP_AMBIENTLIGHTLEVEL_SAVED) - 3 bytes (basement, caves, level)
       3. lights      (MAP_WORLDLIGHTS_SAVED)       - uint16 count + count*16 bytes
-      4. mapinfo     (mandatory)                   - 32 bytes (major>=7.0) or 99 bytes (older)
+      4. mapinfo     (mandatory)                   - 32 bytes (major>=7.0) or 100 bytes (older)
       5. soldiers    (MAP_FULLSOLDIER_SAVED)       - VARIABLE-SIZE (BLOCKS)
-      6. exit grids  (MAP_EXITGRIDS_SAVED)         - uint16 count + count*8 bytes
-      7. door table  (MAP_DOORTABLE_SAVED)         - uint16 count + count*10 bytes
+      6. exit grids  (MAP_EXITGRIDS_SAVED)         - uint16 count + count*12 bytes
+      7. door table  (MAP_DOORTABLE_SAVED)         - uint8 count + count*14 bytes
       8. edge points (MAP_EDGEPOINTS_SAVED)        - 8 sections (north/east/south/west x primary/2nd),
                                                      each (uint16 size + uint16 middle + size*record),
-                                                     record_size = 2 if major<7.0 else 4
+                                                     record_size = 2 (INT16) if major<7.0 else 4 (INT32)
       9. schedules   (MAP_NPCSCHEDULES_SAVED)      - VARIABLE-SIZE (BLOCKS)
 
     Variable-size sections (items, soldiers, schedules) block further parse
@@ -116,7 +116,7 @@ def parse_appendix_minimal(
         # Phase 2C originally nullified every appendix field on any bail because
         # we couldn't trust intermediate values. Phase WA validated the items
         # (52-byte Path B), lights-header (uint8 colors + 4*N palette + uint16
-        # count), and MapInfo (32B major>=7.0 / 99B legacy) byte layouts via
+        # count), and MapInfo (32B major>=7.0 / 100B legacy) byte layouts via
         # hex-dump on Arulco Revisited p1.dat. Fields successfully assigned
         # before the bail point stay at their parsed value; fields after the
         # bail stay None (they were never assigned).
@@ -177,13 +177,14 @@ def parse_appendix_minimal(
                 return bail("lights_records_variable")
 
         # 4. MAPINFO tail. Engine LoadMapInformation reads version-dependent
-        # data: 99 bytes for major<7.0 (_OLD_MAPCREATE_STRUCT), 32 bytes for
-        # major>=7.0 (MAPCREATE_STRUCT with MSVC 4-byte alignment).
-        # Phase WA: re-enabled the legacy 99-byte path now that items + lights
+        # data: 100 bytes for major<7.0 (_OLD_MAPCREATE_STRUCT, MSVC align-2
+        # rounds 99 raw fields up to 100), 32 bytes for major>=7.0
+        # (MAPCREATE_STRUCT with MSVC 4-byte alignment).
+        # Phase WA: re-enabled the legacy path now that items + lights
         # parsing advances the cursor correctly to the tail. Validated on
         # Arulco Revisited p1.dat (major=5.0, flags=0x17d): 4 plausible edge
         # gridnos parse at the expected offset.
-        tail_size = 32 if major >= 7.0 else 99
+        tail_size = 32 if major >= 7.0 else 100
         if pos + tail_size > end:
             return bail("mapinfo_truncated")
         pos += tail_size
@@ -205,19 +206,22 @@ def parse_appendix_minimal(
             if pos > end:
                 return bail("exitgrid_records_overrun")
 
-        # 7. DOORTABLE — uint16 count + count * 10 bytes (per appendices.py write side).
+        # 7. DOORTABLE — uint8 count + count * 14 bytes (_OLD_DOOR is 14 bytes;
+        # the count is a single byte, not uint16).
         if flags & MAP_DOORTABLE_SAVED:
-            if pos + 2 > end:
+            if pos + 1 > end:
                 return bail("doortable_count_truncated")
-            dt_count = safe_uint16(pos)
+            dt_count = data[pos]
             out["appendix_doortable_count"] = dt_count
-            pos += 2 + 10 * dt_count
+            pos += 1 + 14 * dt_count
             if pos > end:
                 return bail("doortable_records_overrun")
 
-        # 8. EDGEPOINTS — 8 sections. Each: uint16 size + uint16 middle + size * INT32.
+        # 8. EDGEPOINTS — 8 sections. Each: uint16 size + uint16 middle +
+        # size * element, where element is INT16 (2 bytes) for major<7.0 and
+        # INT32 (4 bytes) for major>=7.0.
         if flags & MAP_EDGEPOINTS_SAVED:
-            record_size = 4  # major>=7.0 only — older format already returned
+            record_size = 2 if major < 7.0 else 4
             total_edges = 0
             for _ in range(8):  # N/E/S/W x primary/secondary
                 if pos + 4 > end:
@@ -419,12 +423,12 @@ def parse_dat_full(
     # Strategy: extract the tail ONLY when there's no appendix to navigate.
     # That covers:
     #   * flags == 0: tail starts immediately after room info
-    #     (size 99 bytes for major < 7.0, 32 bytes for major >= 7.0)
+    #     (size 100 bytes for major < 7.0, 32 bytes for major >= 7.0)
     #   * everything else: tail is unrecoverable, return None
     tail = None
     if flags == 0:
         if major < 7.0:
-            tail_size = 99
+            tail_size = 100  # _OLD_MAPCREATE_STRUCT: MSVC align-2 rounds 99 raw fields to 100
         else:
             tail_size = 32  # sizeof(MAPCREATE_STRUCT) with MSVC 4-byte alignment
         if pos + tail_size <= n:
