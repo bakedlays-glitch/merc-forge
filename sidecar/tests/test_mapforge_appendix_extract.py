@@ -14,11 +14,14 @@ def _old_worlditem(gridno, usItem=264, level=0, exists=True):
     struct.pack_into("<H", b, 8, usItem)
     return bytes(b)
 
-def _old_tail_99(north=-1, east=-1, south=-1, west=-1, center=-1, isolated=-1):
-    """99-byte _OLD_MAPCREATE_STRUCT (v<7). N/E/S/W int16 @0/2/4/6,
-    center@12, isolated@14, padded to 99."""
-    b = bytearray(b"\x00" * 99)
+def _old_tail_100(north=-1, east=-1, south=-1, west=-1, center=-1, isolated=-1,
+                  num_individuals=0):
+    """100-byte _OLD_MAPCREATE_STRUCT (v<7) — sizeof is 100 (99 raw fields,
+    MSVC align-2 round-up). N/E/S/W int16 @0/2/4/6, ubNumIndividuals @8,
+    center @12, isolated @14, padded to 100."""
+    b = bytearray(b"\x00" * 100)
     struct.pack_into("<hhhh", b, 0, north, east, south, west)
+    b[8] = num_individuals & 0xFF
     struct.pack_into("<hh", b, 12, center, isolated)
     return bytes(b)
 
@@ -30,7 +33,7 @@ def test_extracts_world_items_with_positions():
     data = struct.pack("<I", 2)                       # u32 item count
     data += _old_worlditem(gridno=12880, usItem=264)  # tile (80,80)
     data += _old_worlditem(gridno=1, usItem=99)       # tile (1,0)
-    data += _old_tail_99()                            # unconditional tail (no entries)
+    data += _old_tail_100()                           # unconditional tail (no entries)
     out = extract_appendix_entities(data, _parsed(AW.MAP_WORLDITEMS_SAVED))
     assert out["blocked_at"] is None
     assert "items" in out["reached"] and "mapinfo" in out["reached"]
@@ -67,12 +70,14 @@ def test_lights_zero_count_falls_through_to_tail():
     assert out["entry_points"][0] == {"kind": "north", "gridno": 500,
                                       "x": 500 % 160, "y": 500 // 160}
 
-def test_blocks_on_soldiers_after_tail():
-    # flags=SOLDIER: tail parses, then soldier block defers.
-    data = AW.pack_map_tail(north=10, map_version=31)
+def test_soldiers_zero_individuals_v7_continues():
+    # flags=SOLDIER, v7 tail with num_individuals=0 -> soldiers section passes through.
+    data = AW.pack_map_tail(north=10, map_version=31, num_individuals=0)
     out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=7.0, minor=31))
-    assert out["blocked_at"] == "soldiers"
+    assert out["blocked_at"] is None
     assert "mapinfo" in out["reached"]
+    assert "soldiers" in out["reached"]
+    assert out["soldiers"] == []
     assert out["entry_points"][0]["kind"] == "north"
 
 def test_exit_grids_after_tail_when_no_soldiers():
@@ -121,3 +126,72 @@ def test_exit_grid_truncation_degrades_gracefully():
     out = extract_appendix_entities(data, _parsed(AW.MAP_EXITGRIDS_SAVED, major=7.0, minor=31))
     assert out["blocked_at"] == "exitgrid_records_overrun"
     assert out["exit_grids"] == []      # nothing fully parsed
+
+
+# ---------------------------------------------------------------------------
+# Soldier tests (Step 2 — new)
+# ---------------------------------------------------------------------------
+
+def _old_soldier(gridno, team=1, facing=2, sclass=3, detailed=0):
+    """One 52-byte _OLD_BASIC_SOLDIERCREATE_STRUCT (v<7). fDetailed@0,
+    sStartingGridNo@2 (int16), bTeam@4 (int8), ubDirection@7, ubSoldierClass@34."""
+    b = bytearray(52)
+    b[0] = detailed
+    struct.pack_into("<h", b, 2, gridno)
+    struct.pack_into("<b", b, 4, team)
+    b[7] = facing
+    b[34] = sclass
+    return bytes(b)
+
+def test_extracts_soldiers_with_positions_and_team():
+    # flags=SOLDIER only: no items/ambient/lights -> tail(100) -> 2 soldiers.
+    data = _old_tail_100(num_individuals=2)
+    data += _old_soldier(gridno=12880, team=1, facing=6, sclass=3)   # enemy at (80,80)
+    data += _old_soldier(gridno=160,   team=4, facing=2, sclass=0)   # civilian at (0,1)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] is None
+    assert "soldiers" in out["reached"]
+    assert [(s["gridno"], s["x"], s["y"], s["team"], s["team_label"], s["facing"], s["soldier_class"])
+            for s in out["soldiers"]] == [
+        (12880, 80, 80, 1, "enemy", 6, 3),
+        (160, 0, 1, 4, "civilian", 2, 0)]
+
+def test_soldier_detailed_placement_bails():
+    # one basic, one detailed (fDetailed=1) -> bail after the detailed record's basic part.
+    data = _old_tail_100(num_individuals=2)
+    data += _old_soldier(gridno=100, team=1)
+    data += _old_soldier(gridno=200, team=1, detailed=1)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] == "soldier_detailed"
+    # the first (basic) soldier was emitted before the detailed one bailed
+    assert [s["gridno"] for s in out["soldiers"]] == [100]
+
+def test_zero_soldiers_section_is_empty():
+    # SOLDIER flag set but ubNumIndividuals=0 -> empty soldier section, continue.
+    data = _old_tail_100(num_individuals=0)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] is None
+    assert out["soldiers"] == []
+    assert "soldiers" in out["reached"]
+
+
+# ---------------------------------------------------------------------------
+# Real-map regression test (Step 6 — install-gated)
+# ---------------------------------------------------------------------------
+
+import os
+import pytest
+from mercwizard_core.mapforge_engine.parse_dat_ext import parse_dat_full
+
+_A6 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+       r"\Data-1.13\Maps\A6.DAT")
+
+@pytest.mark.skipif(not os.path.exists(_A6), reason="canonical install not present")
+def test_real_a6_soldiers():
+    data = open(_A6, "rb").read()
+    out = extract_appendix_entities(data, parse_dat_full(data))
+    assert out["blocked_at"] is None
+    assert len(out["soldiers"]) == 32                 # ubNumIndividuals
+    assert all(0 <= s["gridno"] < 25600 for s in out["soldiers"])
+    assert all(s["team"] == 1 for s in out["soldiers"])   # all ENEMY in A6
+    assert all(s["soldier_class"] == 3 for s in out["soldiers"])  # ARMY

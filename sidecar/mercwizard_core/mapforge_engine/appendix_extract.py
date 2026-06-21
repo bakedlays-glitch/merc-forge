@@ -12,6 +12,15 @@ from typing import Any, Dict
 from .parse_world_items import parse_world_items
 from . import appendix_writer as AW
 
+TEAM_LABELS = {0: "player", 1: "enemy", 2: "creature", 3: "militia", 4: "civilian"}
+
+# Basic soldier record (BASIC_SOLDIERCREATE_STRUCT). Vanilla/major<7.0 = 52 bytes;
+# modern/major>=7.0 = 64 bytes. Offsets per soldier-layout-research.md.
+_SOLDIER_OLD = {"size": 52, "grid_fmt": "<h", "grid_off": 2, "team_off": 4,
+                "dir_off": 7, "class_off": 34}
+_SOLDIER_NEW = {"size": 64, "grid_fmt": "<i", "grid_off": 4, "team_off": 8,
+                "dir_off": 11, "class_off": 58}
+
 
 def _xy(gridno: int, cols: int) -> tuple[int, int]:
     return gridno % cols, gridno // cols
@@ -27,7 +36,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
     n = len(data)
 
     out: Dict[str, Any] = {
-        "items": [], "entry_points": [], "exit_grids": [],
+        "items": [], "entry_points": [], "exit_grids": [], "soldiers": [],
         "reached": [], "blocked_at": None, "rows": rows, "cols": cols,
     }
 
@@ -77,7 +86,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
             return blocked("lights_records")
 
     # 4. MAPINFO TAIL (unconditional) — entry points
-    tail_size = 32 if major >= 7.0 else 99
+    tail_size = 32 if major >= 7.0 else 100  # _OLD_MAPCREATE_STRUCT sizeof = 100 (99 raw, align-2)
     if pos + tail_size > n:
         return blocked("mapinfo_truncated")
     if major >= 7.0:
@@ -91,12 +100,31 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
             continue
         x, y = _xy(g, cols)
         out["entry_points"].append({"kind": kind, "gridno": g, "x": x, "y": y})
+    num_individuals = data[pos + 8] if major < 7.0 else struct.unpack_from("<H", data, pos + 24)[0]
     pos += tail_size
     out["reached"].append("mapinfo")
 
-    # 5. SOLDIERS — deferred to a later plan.
+    # 5. SOLDIERS — fixed-stride basic placements (BASIC_SOLDIERCREATE_STRUCT).
+    # Count is the MapInfo tail's ubNumIndividuals; no marker bytes around records.
     if flags & AW.MAP_FULLSOLDIER_SAVED:
-        return blocked("soldiers")
+        spec = _SOLDIER_NEW if major >= 7.0 else _SOLDIER_OLD
+        for _ in range(num_individuals):
+            if pos + spec["size"] > n:
+                return blocked("soldier_records_overrun")
+            if data[pos] == 1:  # fDetailedPlacement -> variable/unsized block follows
+                return blocked("soldier_detailed")
+            g = struct.unpack_from(spec["grid_fmt"], data, pos + spec["grid_off"])[0]
+            team = struct.unpack_from("<b", data, pos + spec["team_off"])[0]
+            facing = data[pos + spec["dir_off"]]
+            sclass = data[pos + spec["class_off"]]
+            pos += spec["size"]
+            if g < 0:
+                continue
+            x, y = _xy(g, cols)
+            out["soldiers"].append({"gridno": g, "x": x, "y": y, "team": team,
+                                    "team_label": TEAM_LABELS.get(team, "other"),
+                                    "facing": facing, "soldier_class": sclass})
+        out["reached"].append("soldiers")
 
     # 6. EXIT GRIDS — uint16 count + 12-byte records (<iiBBBx).
     if flags & AW.MAP_EXITGRIDS_SAVED:
