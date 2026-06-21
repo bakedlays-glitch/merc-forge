@@ -31,7 +31,7 @@ import {
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
-import { formatApiError } from "../lib/api";
+import { formatApiError, mediaUrl } from "../lib/api";
 import {
   applyEdits,
   closeSession,
@@ -920,6 +920,33 @@ function MapForgeSectorInner() {
   const [showDoors, setShowDoors] = useState(false);
   const [showEdges, setShowEdges] = useState(false);
   const [showSchedules, setShowSchedules] = useState(false);
+  // Sprite cache for soldier body-type sprites. Keyed by `${body_type}-${facing}`.
+  // Value is {url, w, h} on success, null sentinel on failure (→ circle fallback).
+  const [spriteCache, setSpriteCache] = useState<Map<string, { url: string; w: number; h: number } | null>>(new Map());
+  useEffect(() => {
+    if (!appendix || !showSoldiers) return;
+    let cancelled = false;
+    const pairs = new Map<string, { bt: number; dir: number }>();
+    for (const s of appendix.soldiers) {
+      const key = `${s.body_type}-${s.facing}`;
+      if (!spriteCache.has(key)) pairs.set(key, { bt: s.body_type, dir: s.facing });
+    }
+    (async () => {
+      await Promise.all(Array.from(pairs, async ([key, { bt, dir }]) => {
+        try {
+          const url = await mediaUrl(`/mapforge/soldier-sprite?bodytype=${bt}&dir=${dir}`);
+          const img = new Image();
+          await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(); img.src = url; });
+          if (cancelled) return;
+          setSpriteCache((m) => new Map(m).set(key, { url, w: img.naturalWidth, h: img.naturalHeight }));
+        } catch {
+          if (cancelled) return;
+          setSpriteCache((m) => new Map(m).set(key, null));
+        }
+      }));
+    })();
+    return () => { cancelled = true; };
+  }, [appendix, showSoldiers]); // eslint-disable-line react-hooks/exhaustive-deps
   const [rendererLoading, setRendererLoading] = useState(false);
   // Phase + per-phase percent for the load progress bar. `null` when
   // not loading or when the bar has finished. The whole-load percent
@@ -1744,6 +1771,7 @@ function MapForgeSectorInner() {
   // Fetched once per session; the overlay is purely visual.
   useEffect(() => {
     setAppendix(null);
+    setSpriteCache(new Map());
     if (!session) return;
     let cancelled = false;
     getSessionAppendix(session.session_id)
@@ -4554,6 +4582,7 @@ function MapForgeSectorInner() {
               showDoors={showDoors}
               showEdges={showEdges}
               showSchedules={showSchedules}
+              spriteCache={spriteCache}
             />
             {/* Building-placement sprite ghost — drawn + positioned
                 imperatively by the placement-ghost effect. Above the
@@ -5287,6 +5316,7 @@ function IsoOverlay({
   showDoors,
   showEdges,
   showSchedules,
+  spriteCache,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -5327,6 +5357,7 @@ function IsoOverlay({
   showDoors: boolean;
   showEdges: boolean;
   showSchedules: boolean;
+  spriteCache: Map<string, { url: string; w: number; h: number } | null>;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -5530,6 +5561,14 @@ function IsoOverlay({
             })}
             {showSoldiers && appendix.soldiers.map((s, i) => {
               const { cx, cy } = c(s.x, s.y);
+              const sprite = spriteCache.get(`${s.body_type}-${s.facing}`);
+              if (sprite) {
+                return <image key={`sol-${i}`} href={sprite.url} width={sprite.w} height={sprite.h}
+                  x={cx - sprite.w / 2} y={cy - sprite.h + meta.tileH / 2}
+                  style={{ imageRendering: "pixelated" }}>
+                  <title>{`${s.team_label} (body ${s.body_type}, dir ${s.facing})`}</title>
+                </image>;
+              }
               const color = s.team === 1 ? "rgba(255,80,80,0.95)"      // enemy
                 : s.team === 2 ? "rgba(120,255,120,0.95)"              // creature
                 : s.team === 3 ? "rgba(80,220,255,0.95)"               // militia
@@ -5539,7 +5578,7 @@ function IsoOverlay({
                 <circle key={`sol-${i}`} cx={cx} cy={cy} r={4}
                   fill={color} stroke="rgba(0,0,0,0.7)" strokeWidth={1}
                   vectorEffect="non-scaling-stroke">
-                  <title>{`${s.team_label} (dir ${s.facing}, class ${s.soldier_class})`}</title>
+                  <title>{`${s.team_label} (body ${s.body_type}, dir ${s.facing})`}</title>
                 </circle>
               );
             })}

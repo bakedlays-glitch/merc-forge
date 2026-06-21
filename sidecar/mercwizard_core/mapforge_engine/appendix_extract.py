@@ -154,13 +154,15 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
             g = struct.unpack_from(spec["grid_fmt"], data, pos + spec["grid_off"])[0]
             team = struct.unpack_from("<b", data, pos + spec["team_off"])[0]
             facing = data[pos + spec["dir_off"]]
+            body = data[pos + (10 if major < 7.0 else 14)]
             sclass = data[pos + spec["class_off"]]
             pos += spec["size"]
             if g >= 0:
                 x, y = _xy(g, cols)
                 out["soldiers"].append({"gridno": g, "x": x, "y": y, "team": team,
                                         "team_label": TEAM_LABELS.get(team, "other"),
-                                        "facing": facing, "soldier_class": sclass})
+                                        "facing": facing, "soldier_class": sclass,
+                                        "body_type": body})
             if f_detailed == 1:
                 if is_legacy:
                     if pos + _DETAILED_POD_OLD > n:

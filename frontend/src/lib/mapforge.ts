@@ -1799,6 +1799,7 @@ export interface AppendixExitGrid {
 export interface AppendixSoldier {
   gridno: number; x: number; y: number;
   team: number; team_label: string; facing: number; soldier_class: number;
+  body_type: number;
 }
 export interface AppendixLight {
   x: number; y: number; gridno: number; template: string;

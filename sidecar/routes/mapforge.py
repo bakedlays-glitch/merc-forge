@@ -5861,6 +5861,7 @@ class AppendixSoldier(BaseModel):
     team_label: str
     facing: int
     soldier_class: int
+    body_type: int = 0
 
 class AppendixLight(BaseModel):
     x: int
@@ -5920,6 +5921,22 @@ def session_appendix(session_id: str):
     sess = _session_store.get(session_id)
     ents = extract_appendix_entities(sess.original_bytes, sess.parsed)
     return AppendixEntities(session_id=sess.id, **ents)
+
+
+# Install-scoped (not session-scoped): bodytype is a global asset lookup.
+@router.get("/soldier-sprite")
+def soldier_sprite(bodytype: int = Query(...), dir: int = Query(0, ge=0, le=7)):
+    """PNG of a body type's standing sprite facing `dir` (read-only asset decode).
+    Falls back to REGMALE for unmapped body types; 404 if no install/asset."""
+    root = _active_install_root()
+    if root is None:
+        raise HTTPException(status_code=400, detail="no active install")
+    from mercwizard_core.mapforge_engine.soldier_sprite import render_standing_sprite
+    png = render_standing_sprite(str(root), bodytype, dir)
+    if png is None:
+        raise HTTPException(status_code=404, detail="sprite unavailable")
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
 
 
 @router.get("/sessions/{session_id}/parsed", response_model=ParsedSector)

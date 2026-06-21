@@ -174,29 +174,32 @@ def test_exit_grid_truncation_degrades_gracefully():
 # Soldier tests (Step 2 â€” new)
 # ---------------------------------------------------------------------------
 
-def _old_soldier(gridno, team=1, facing=2, sclass=3, detailed=0):
+def _old_soldier(gridno, team=1, facing=2, sclass=3, detailed=0, body_type=0):
     """One 52-byte _OLD_BASIC_SOLDIERCREATE_STRUCT (v<7). fDetailed@0,
-    sStartingGridNo@2 (int16), bTeam@4 (int8), ubDirection@7, ubSoldierClass@34."""
+    sStartingGridNo@2 (int16), bTeam@4 (int8), ubDirection@7,
+    ubBodyType@10 (u8), ubSoldierClass@34."""
     b = bytearray(52)
     b[0] = detailed
     struct.pack_into("<h", b, 2, gridno)
     struct.pack_into("<b", b, 4, team)
     b[7] = facing
+    b[10] = body_type
     b[34] = sclass
     return bytes(b)
 
 def test_extracts_soldiers_with_positions_and_team():
     # flags=SOLDIER only: no items/ambient/lights -> tail(100) -> 2 soldiers.
     data = _old_tail_100(num_individuals=2)
-    data += _old_soldier(gridno=12880, team=1, facing=6, sclass=3)   # enemy at (80,80)
-    data += _old_soldier(gridno=160,   team=4, facing=2, sclass=0)   # civilian at (0,1)
+    data += _old_soldier(gridno=12880, team=1, facing=6, sclass=3, body_type=1)  # enemy at (80,80)
+    data += _old_soldier(gridno=160,   team=4, facing=2, sclass=0, body_type=29) # civilian at (0,1)
     out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=5.0, minor=25))
     assert out["blocked_at"] is None
     assert "soldiers" in out["reached"]
-    assert [(s["gridno"], s["x"], s["y"], s["team"], s["team_label"], s["facing"], s["soldier_class"])
+    assert [(s["gridno"], s["x"], s["y"], s["team"], s["team_label"], s["facing"], s["soldier_class"],
+             s["body_type"])
             for s in out["soldiers"]] == [
-        (12880, 80, 80, 1, "enemy", 6, 3),
-        (160, 0, 1, 4, "civilian", 2, 0)]
+        (12880, 80, 80, 1, "enemy", 6, 3, 1),
+        (160, 0, 1, 4, "civilian", 2, 0, 29)]
 
 def test_soldier_detailed_placement_legacy_skip():
     # Legacy map (major=5.0, minor=25): one basic soldier, one detailed soldier
