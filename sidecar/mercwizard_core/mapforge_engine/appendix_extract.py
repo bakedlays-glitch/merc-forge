@@ -26,6 +26,11 @@ _SOLDIER_NEW = {"size": 64, "grid_fmt": "<i", "grid_off": 4, "team_off": 8,
 # SaveMapLights (worlddef.cpp:4168, sizeof(LIGHT_SPRITE)).
 _LIGHT_SPRITE_SIZE = 24
 
+# Legacy/vanilla detailed SOLDIERCREATE block = fixed 1040-byte POD, no trailing
+# inventory (SaveLoadGame.cpp:1064-1071). Modern (major>=6.0 & minor>26) appends a
+# variable inventory and can't be fixed-skipped. See detailed-placement-research.md.
+_DETAILED_POD_OLD = 1040
+
 
 def _xy(gridno: int, cols: int) -> tuple[int, int]:
     return gridno % cols, gridno // cols
@@ -132,24 +137,34 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
 
     # 5. SOLDIERS — fixed-stride basic placements (BASIC_SOLDIERCREATE_STRUCT).
     # Count is the MapInfo tail's ubNumIndividuals; no marker bytes around records.
+    # On the legacy path (major<6.0 or minor<=26) a detailed block is a fixed
+    # 1040-byte POD with no trailing inventory — we read the basic fields, emit
+    # the soldier, then skip the POD.  On the modern path the detailed block
+    # carries a variable inventory and cannot be fixed-skipped, so we still bail.
     if flags & AW.MAP_FULLSOLDIER_SAVED:
         spec = _SOLDIER_NEW if major >= 7.0 else _SOLDIER_OLD
+        is_legacy = major < 6.0 or minor <= 26
         for _ in range(num_individuals):
             if pos + spec["size"] > n:
                 return blocked("soldier_records_overrun")
-            if data[pos] == 1:  # fDetailedPlacement -> variable/unsized block follows
-                return blocked("soldier_detailed")
+            f_detailed = data[pos]
             g = struct.unpack_from(spec["grid_fmt"], data, pos + spec["grid_off"])[0]
             team = struct.unpack_from("<b", data, pos + spec["team_off"])[0]
             facing = data[pos + spec["dir_off"]]
             sclass = data[pos + spec["class_off"]]
             pos += spec["size"]
-            if g < 0:
-                continue
-            x, y = _xy(g, cols)
-            out["soldiers"].append({"gridno": g, "x": x, "y": y, "team": team,
-                                    "team_label": TEAM_LABELS.get(team, "other"),
-                                    "facing": facing, "soldier_class": sclass})
+            if g >= 0:
+                x, y = _xy(g, cols)
+                out["soldiers"].append({"gridno": g, "x": x, "y": y, "team": team,
+                                        "team_label": TEAM_LABELS.get(team, "other"),
+                                        "facing": facing, "soldier_class": sclass})
+            if f_detailed == 1:
+                if is_legacy:
+                    if pos + _DETAILED_POD_OLD > n:
+                        return blocked("soldier_detailed_overrun")
+                    pos += _DETAILED_POD_OLD
+                else:
+                    return blocked("soldier_detailed")
         out["reached"].append("soldiers")
 
     # 6. EXIT GRIDS — uint16 count + 12-byte records (<iiBBBx).

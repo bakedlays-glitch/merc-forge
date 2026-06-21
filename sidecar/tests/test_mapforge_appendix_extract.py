@@ -198,15 +198,48 @@ def test_extracts_soldiers_with_positions_and_team():
         (12880, 80, 80, 1, "enemy", 6, 3),
         (160, 0, 1, 4, "civilian", 2, 0)]
 
-def test_soldier_detailed_placement_bails():
-    # one basic, one detailed (fDetailed=1) -> bail after the detailed record's basic part.
+def test_soldier_detailed_placement_legacy_skip():
+    # Legacy map (major=5.0, minor=25): one basic soldier, one detailed soldier
+    # (fDetailed=1) followed by the fixed 1040-byte POD, then another basic soldier.
+    # All THREE soldiers must be emitted (detailed one from its basic fields) and
+    # blocked_at must be None.
+    data = _old_tail_100(num_individuals=3)
+    data += _old_soldier(gridno=100, team=1)
+    data += _old_soldier(gridno=200, team=1, detailed=1)
+    data += b"\x00" * 1040          # the 1040-byte detailed POD
+    data += _old_soldier(gridno=300, team=4)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] is None
+    assert [s["gridno"] for s in out["soldiers"]] == [100, 200, 300]
+
+def test_soldier_detailed_legacy_skip_truncated():
+    # Legacy map: detailed soldier whose 1040-byte POD is truncated (only partial
+    # bytes follow). Must bail with "soldier_detailed_overrun"; soldiers BEFORE it retained.
     data = _old_tail_100(num_individuals=2)
     data += _old_soldier(gridno=100, team=1)
     data += _old_soldier(gridno=200, team=1, detailed=1)
+    data += b"\x00" * 500           # truncated POD (< 1040)
     out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] == "soldier_detailed_overrun"
+    # both basic records are emitted; the truncated 1040B POD after the detailed one trips soldier_detailed_overrun
+    assert [s["gridno"] for s in out["soldiers"]] == [100, 200]
+
+
+def test_soldier_detailed_modern_bails():
+    # Modern map (major=7.0): detailed soldier must still bail with "soldier_detailed"
+    # (variable inventory; cannot be fixed-skipped).
+    # Build a minimal 64-byte modern basic record with fDetailed=1 at byte 0.
+    modern_record = bytearray(64)
+    modern_record[0] = 1            # fDetailedPlacement = 1
+    struct.pack_into("<i", modern_record, 4, 5000)  # sStartingGridNo @4 (v7 format)
+    struct.pack_into("<b", modern_record, 8, 1)     # bTeam @8 (v7 format)
+    # Build a v7 32-byte tail with num_individuals=1 (ubNumIndividuals @24 as uint16).
+    tail = AW.pack_map_tail(map_version=31, num_individuals=1)
+    data = tail + bytes(modern_record)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=7.0, minor=31))
     assert out["blocked_at"] == "soldier_detailed"
-    # the first (basic) soldier was emitted before the detailed one bailed
-    assert [s["gridno"] for s in out["soldiers"]] == [100]
+    assert [s["gridno"] for s in out["soldiers"]] == [5000]
+
 
 def test_zero_soldiers_section_is_empty():
     # SOLDIER flag set but ubNumIndividuals=0 -> empty soldier section, continue.
@@ -257,9 +290,7 @@ _MAPS_DIR = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - 
 ])
 def test_real_town_lights_walk_to_tail(name, count, template):
     """LIT town sectors: the per-light walk (24B LIGHT_SPRITE + u8 len + str)
-    must clear the variable-length lights section and reach the MapInfo tail.
-    These maps then bail at soldier_detailed (a separate, pre-existing limit),
-    so we assert on the lights + tail reach, not full chain closure."""
+    must clear the variable-length lights section and reach the MapInfo tail."""
     with open(os.path.join(_MAPS_DIR, f"{name}.DAT"), "rb") as f:
         data = f.read()
     out = extract_appendix_entities(data, parse_dat_full(data))
@@ -268,6 +299,25 @@ def test_real_town_lights_walk_to_tail(name, count, template):
     assert len(out["lights"]) == count
     assert all(l["template"] == template for l in out["lights"])
     assert all(0 <= l["x"] < 160 and 0 <= l["y"] < 160 for l in out["lights"])
+
+
+@pytest.mark.skipif(not os.path.exists(_MAPS_DIR), reason="canonical install not present")
+@pytest.mark.parametrize("name,expected_count", [
+    ("A1", 33),
+    ("A2", 39),
+])
+def test_real_legacy_detailed_soldiers_emitted(name, expected_count):
+    """Legacy town sectors with detailed placements (major=5.0, minor=25): after the
+    1040-byte POD skip, ALL soldiers must be emitted and blocked_at must be None.
+    A1=33, A2=39 (ubNumIndividuals from the map tail). Real-map proof of the fix."""
+    with open(os.path.join(_MAPS_DIR, f"{name}.DAT"), "rb") as f:
+        data = f.read()
+    out = extract_appendix_entities(data, parse_dat_full(data))
+    assert out["blocked_at"] is None, f"{name}: blocked at {out['blocked_at']!r}"
+    assert len(out["soldiers"]) == expected_count, (
+        f"{name}: got {len(out['soldiers'])} soldiers, expected {expected_count}"
+    )
+    assert "soldiers" in out["reached"]
 
 
 def test_appendix_endpoint_returns_lights():
