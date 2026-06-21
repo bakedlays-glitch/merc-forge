@@ -5880,6 +5880,13 @@ class AppendixEdgepoint(BaseModel):
     y: int
     edge: str
 
+class AppendixSchedule(BaseModel):
+    gridno: int
+    x: int
+    y: int
+    schedule_id: int
+    action: int
+
 class AppendixEntities(BaseModel):
     session_id: str
     rows: int
@@ -5891,6 +5898,7 @@ class AppendixEntities(BaseModel):
     lights: list[AppendixLight]
     doors: list[AppendixDoor]
     edgepoints: list[AppendixEdgepoint]
+    schedules: list[AppendixSchedule]
     reached: list[str]
     blocked_at: str | None
 

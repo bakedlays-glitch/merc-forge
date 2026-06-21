@@ -919,6 +919,7 @@ function MapForgeSectorInner() {
   const [showLights, setShowLights] = useState(false);
   const [showDoors, setShowDoors] = useState(false);
   const [showEdges, setShowEdges] = useState(false);
+  const [showSchedules, setShowSchedules] = useState(false);
   const [rendererLoading, setRendererLoading] = useState(false);
   // Phase + per-phase percent for the load progress bar. `null` when
   // not loading or when the bar has finished. The whole-load percent
@@ -4552,6 +4553,7 @@ function MapForgeSectorInner() {
               showLights={showLights}
               showDoors={showDoors}
               showEdges={showEdges}
+              showSchedules={showSchedules}
             />
             {/* Building-placement sprite ghost — drawn + positioned
                 imperatively by the placement-ghost effect. Above the
@@ -5144,6 +5146,10 @@ function MapForgeSectorInner() {
                 <input type="checkbox" checked={showEdges} onChange={(e) => setShowEdges(e.target.checked)} />
                 Edges{appendix ? ` (${appendix.edgepoints.length})` : ""}
               </label>
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showSchedules} onChange={(e) => setShowSchedules(e.target.checked)} />
+                Schedules{appendix ? ` (${appendix.schedules.length})` : ""}
+              </label>
               {appendix?.blocked_at && (
                 <span className="text-xs text-amber-400">layer &ldquo;{appendix.blocked_at}&rdquo; not yet shown</span>
               )}
@@ -5280,6 +5286,7 @@ function IsoOverlay({
   showLights,
   showDoors,
   showEdges,
+  showSchedules,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -5319,6 +5326,7 @@ function IsoOverlay({
   showLights: boolean;
   showDoors: boolean;
   showEdges: boolean;
+  showSchedules: boolean;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -5559,6 +5567,15 @@ function IsoOverlay({
                 fill="rgba(160,160,160,0.7)" stroke="rgba(80,80,80,0.6)" strokeWidth={1} vectorEffect="non-scaling-stroke">
                 <title>{`edge: ${e.edge}`}</title>
               </circle>;
+            })}
+            {showSchedules && appendix.schedules.map((s, i) => {
+              const { cx, cy } = c(s.x, s.y);
+              return <rect key={`sc-${i}`} x={cx - 3} y={cy - 3} width={6} height={6}
+                transform={`rotate(45 ${cx} ${cy})`}
+                fill="rgba(255,160,60,0.85)" stroke="rgba(160,90,0,0.9)" strokeWidth={1}
+                vectorEffect="non-scaling-stroke">
+                <title>{`schedule #${s.schedule_id} (action ${s.action})`}</title>
+              </rect>;
             })}
           </g>
         );

@@ -1,4 +1,4 @@
-"""Read-only extraction of positioned appendix entities for the MapForge
+﻿"""Read-only extraction of positioned appendix entities for the MapForge
 tactical overlay. Walks the appendix region (never writes), returns entity
 lists keyed by tile position. Scope: items, entry points, exit grids, world
 lights, soldiers (incl. legacy 1040-byte detailed-placement skip), doors, and
@@ -49,7 +49,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
 
     out: Dict[str, Any] = {
         "items": [], "entry_points": [], "exit_grids": [], "soldiers": [],
-        "lights": [], "doors": [], "edgepoints": [],
+        "lights": [], "doors": [], "edgepoints": [], "schedules": [],
         "reached": [], "blocked_at": None, "rows": rows, "cols": cols,
     }
 
@@ -76,14 +76,14 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
         if bail:
             return blocked(bail)
 
-    # 2. AMBIENT — fixed 3 bytes, no count.
+    # 2. AMBIENT â€” fixed 3 bytes, no count.
     if flags & AW.MAP_AMBIENTLIGHTLEVEL_SAVED:
         if pos + 3 > n:
             return blocked("ambient_truncated")
         pos += 3
         out["reached"].append("ambient")
 
-    # 3. LIGHTS — header + per-light records. See lights-layout-research.md.
+    # 3. LIGHTS â€” header + per-light records. See lights-layout-research.md.
     #   header: u8 ubNumColors + ubNumColors*SGPPaletteEntry(4B) + u16 usNumLights.
     #   per-light (SaveMapLights, worlddef.cpp:4153-4176, repeated usNumLights):
     #     LIGHT_SPRITE (24B, lighting.h:90-97) + u8 ubStrLen + ubStrLen string
@@ -119,7 +119,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
                                       "gridno": iY * cols + iX, "template": tmpl})
         out["reached"].append("lights")
 
-    # 4. MAPINFO TAIL (unconditional) — entry points
+    # 4. MAPINFO TAIL (unconditional) â€” entry points
     tail_size = 32 if major >= 7.0 else 100  # _OLD_MAPCREATE_STRUCT sizeof = 100 (99 raw, align-2)
     if pos + tail_size > n:
         return blocked("mapinfo_truncated")
@@ -138,10 +138,10 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
     pos += tail_size
     out["reached"].append("mapinfo")
 
-    # 5. SOLDIERS — fixed-stride basic placements (BASIC_SOLDIERCREATE_STRUCT).
+    # 5. SOLDIERS â€” fixed-stride basic placements (BASIC_SOLDIERCREATE_STRUCT).
     # Count is the MapInfo tail's ubNumIndividuals; no marker bytes around records.
     # On the legacy path (major<6.0 or minor<=26) a detailed block is a fixed
-    # 1040-byte POD with no trailing inventory — we read the basic fields, emit
+    # 1040-byte POD with no trailing inventory â€” we read the basic fields, emit
     # the soldier, then skip the POD.  On the modern path the detailed block
     # carries a variable inventory and cannot be fixed-skipped, so we still bail.
     if flags & AW.MAP_FULLSOLDIER_SAVED:
@@ -170,7 +170,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
                     return blocked("soldier_detailed")
         out["reached"].append("soldiers")
 
-    # 6. EXIT GRIDS — uint16 count + 12-byte records (<iiBBBx).
+    # 6. EXIT GRIDS â€” uint16 count + 12-byte records (<iiBBBx).
     if flags & AW.MAP_EXITGRIDS_SAVED:
         if pos + 2 > n:
             return blocked("exitgrid_count_truncated")
@@ -186,7 +186,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
                                       "dest_gridno": grid_no, "sx": sx, "sy": sy, "sz": sz})
         out["reached"].append("exitgrids")
 
-    # 7. DOOR TABLE — uint8 count + 14-byte _OLD_DOOR records.
+    # 7. DOOR TABLE â€” uint8 count + 14-byte _OLD_DOOR records.
     if flags & AW.MAP_DOORTABLE_SAVED:
         if pos + 1 > n:
             return blocked("doortable_count_truncated")
@@ -204,7 +204,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
             out["doors"].append({"gridno": g, "x": x, "y": y, "locked": bool(locked)})
         out["reached"].append("doortable")
 
-    # 8. EDGEPOINTS — 8 sub-sections (primary N/E/S/W, secondary N/E/S/W).
+    # 8. EDGEPOINTS â€” 8 sub-sections (primary N/E/S/W, secondary N/E/S/W).
     # Each: uint16 size + uint16 middle + size * gridno (INT16 v<7 / INT32 v>=7).
     if flags & AW.MAP_EDGEPOINTS_SAVED:
         elem_fmt = "<h" if major < 7.0 else "<i"
@@ -227,5 +227,30 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
                 out["edgepoints"].append({"gridno": g, "x": x, "y": y,
                                           "edge": edge_names[si]})
         out["reached"].append("edgepoints")
+
+    # 9. SCHEDULES â€” uint8 count + 36-byte _OLD_SCHEDULENODE (major<7.0).
+    # Plot usData1[j] waypoint gridnos (valid in-map only). v7 records (52/56B)
+    # are advanced-only (field offsets derivation-only â€” no stock v7 map).
+    if flags & AW.MAP_NPCSCHEDULES_SAVED:
+        rec_size = 36 if major < 7.0 else (52 if major < 8.0 else 56)
+        if pos + 1 > n:
+            return blocked("schedules_count_truncated")
+        sc_count = data[pos]
+        pos += 1
+        world_max = rows * cols
+        for _ in range(sc_count):
+            if pos + rec_size > n:
+                return blocked("schedules_records_overrun")
+            if major < 7.0:
+                sid = data[pos + 32]
+                for j in range(4):
+                    g = struct.unpack_from("<H", data, pos + 12 + 2 * j)[0]
+                    if 0 <= g < world_max:
+                        x, y = _xy(g, cols)
+                        out["schedules"].append({"gridno": g, "x": x, "y": y,
+                                                 "schedule_id": sid,
+                                                 "action": data[pos + 28 + j]})
+            pos += rec_size
+        out["reached"].append("schedules")
 
     return out

@@ -1809,6 +1809,9 @@ export interface AppendixDoor {
 export interface AppendixEdgepoint {
   gridno: number; x: number; y: number; edge: string;
 }
+export interface AppendixSchedule {
+  gridno: number; x: number; y: number; schedule_id: number; action: number;
+}
 export interface AppendixEntities {
   session_id: string;
   rows: number;
@@ -1820,6 +1823,7 @@ export interface AppendixEntities {
   lights: AppendixLight[];
   doors: AppendixDoor[];
   edgepoints: AppendixEdgepoint[];
+  schedules: AppendixSchedule[];
   reached: string[];
   blocked_at: string | null;
 }

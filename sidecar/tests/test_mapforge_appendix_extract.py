@@ -1,4 +1,4 @@
-import os
+﻿import os
 import struct
 import pytest
 from mercwizard_core.mapforge_engine.appendix_extract import extract_appendix_entities
@@ -18,7 +18,7 @@ def _old_worlditem(gridno, usItem=264, level=0, exists=True):
 
 def _old_tail_100(north=-1, east=-1, south=-1, west=-1, center=-1, isolated=-1,
                   num_individuals=0):
-    """100-byte _OLD_MAPCREATE_STRUCT (v<7) — sizeof is 100 (99 raw fields,
+    """100-byte _OLD_MAPCREATE_STRUCT (v<7) â€” sizeof is 100 (99 raw fields,
     MSVC align-2 round-up). N/E/S/W int16 @0/2/4/6, ubNumIndividuals @8,
     center @12, isolated @14, padded to 100."""
     b = bytearray(b"\x00" * 100)
@@ -88,7 +88,7 @@ def test_light_string_overrun_degrades_gracefully():
     assert out["blocked_at"] == "light_string_overrun"
 
 def test_lights_zero_count_falls_through_to_tail():
-    # flags=LIGHTS, count=0 — no deferral; continues to mapinfo tail.
+    # flags=LIGHTS, count=0 â€” no deferral; continues to mapinfo tail.
     data = bytes([1]) + bytes(4) + struct.pack("<H", 0)   # numColors=1, 1 palette, count=0
     data += AW.pack_map_tail(north=500, map_version=31)
     out = extract_appendix_entities(data, _parsed(AW.MAP_WORLDLIGHTS_SAVED, major=7.0, minor=31))
@@ -171,7 +171,7 @@ def test_exit_grid_truncation_degrades_gracefully():
 
 
 # ---------------------------------------------------------------------------
-# Soldier tests (Step 2 — new)
+# Soldier tests (Step 2 â€” new)
 # ---------------------------------------------------------------------------
 
 def _old_soldier(gridno, team=1, facing=2, sclass=3, detailed=0):
@@ -260,7 +260,7 @@ def test_soldier_records_overrun_degrades_gracefully():
 
 
 # ---------------------------------------------------------------------------
-# Real-map regression test (Step 6 — install-gated)
+# Real-map regression test (Step 6 â€” install-gated)
 # ---------------------------------------------------------------------------
 
 from mercwizard_core.mapforge_engine.parse_dat_ext import parse_dat_full
@@ -430,3 +430,72 @@ def test_edgepoint_overrun_degrades_gracefully():
     assert out["blocked_at"] == "edgepoint_records_overrun"
     # the gridnos read before the truncation are retained
     assert [e["gridno"] for e in out["edgepoints"]] == [100, 200]
+
+
+# ---------------------------------------------------------------------------
+# Schedule tests (Task 1 â€” schedules)
+# ---------------------------------------------------------------------------
+
+def _schedule_record(usdata1, actions, schedule_id=1):
+    """36-byte _OLD_SCHEDULENODE (v5). next@0(4), usTime[4]@4(8), usData1[4]@12(8),
+    usData2[4]@20(8), ubAction[4]@28(4), ubScheduleID@32, ubSoldierID@33, usFlags@34(2).
+    usdata1/actions are length-4 lists."""
+    b = bytearray(36)
+    for j in range(4):
+        struct.pack_into("<H", b, 12 + 2 * j, usdata1[j] & 0xFFFF)
+        b[28 + j] = actions[j] & 0xFF
+    b[32] = schedule_id & 0xFF
+    return bytes(b)
+
+def test_extracts_schedule_waypoints():
+    # flags=SCHED only: tail(100) -> (no soldiers/exit/door/edge) -> schedules.
+    data = _old_tail_100()
+    data += bytes([2])   # uint8 schedule count
+    # schedule 1: two real waypoints (gridno 100 action 5, gridno 260 action 9), two empty.
+    data += _schedule_record([100, 260, 0xFFFF, 0xFFFF], [5, 9, 8, 8], schedule_id=1)
+    # schedule 2: one waypoint (gridno 320 action 5).
+    data += _schedule_record([320, 0xFFFF, 0xFFFF, 0xFFFF], [5, 8, 8, 8], schedule_id=2)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_NPCSCHEDULES_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] is None
+    assert "schedules" in out["reached"]
+    assert [(s["gridno"], s["x"], s["y"], s["schedule_id"], s["action"]) for s in out["schedules"]] == [
+        (100, 100, 0, 1, 5), (260, 100, 1, 1, 9), (320, 0, 2, 2, 5)]
+
+def test_schedules_overrun_degrades():
+    data = _old_tail_100()
+    data += bytes([2]) + _schedule_record([100, 0xFFFF, 0xFFFF, 0xFFFF], [5, 8, 8, 8])  # count 2, only 1 record
+    out = extract_appendix_entities(data, _parsed(AW.MAP_NPCSCHEDULES_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] == "schedules_records_overrun"
+    assert [s["gridno"] for s in out["schedules"]] == [100]
+
+def test_appendix_endpoint_returns_schedules():
+    data = _old_tail_100()
+    data += bytes([1]) + _schedule_record([200, 0xFFFF, 0xFFFF, 0xFFFF], [5, 8, 8, 8], schedule_id=3)
+    parsed = {"flags": AW.MAP_NPCSCHEDULES_SAVED, "major": 5.0, "minor": 25,
+              "cols": 160, "rows": 160, "appendix_offset": 0}
+    sess = _fake_session(data, parsed)
+    _session_store._sessions[sess.id] = sess
+    try:
+        res = session_appendix(sess.id)
+    finally:
+        del _session_store._sessions[sess.id]
+    assert len(res.schedules) == 1
+    assert res.schedules[0].gridno == 200 and res.schedules[0].schedule_id == 3
+
+
+def test_schedule_waypoint_at_gridno_zero_is_emitted():
+    data = _old_tail_100()
+    data += bytes([1]) + _schedule_record([0, 0xFFFF, 0xFFFF, 0xFFFF], [5, 8, 8, 8], schedule_id=1)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_NPCSCHEDULES_SAVED, major=5.0, minor=25))
+    assert [(s["gridno"], s["x"], s["y"]) for s in out["schedules"]] == [(0, 0, 0)]
+
+@pytest.mark.skipif(not os.path.exists(_A2), reason="canonical install not present")
+def test_real_a2_schedules():
+    with open(_A2, "rb") as f:
+        data = f.read()
+    out = extract_appendix_entities(data, parse_dat_full(data))
+    assert out["blocked_at"] is None
+    assert "schedules" in out["reached"]
+    # A2 has 7 schedule nodes; several carry valid waypoint gridnos.
+    assert len(out["schedules"]) >= 1
+    assert all(0 <= s["gridno"] < 25600 for s in out["schedules"])
