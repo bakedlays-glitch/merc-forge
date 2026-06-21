@@ -57,6 +57,16 @@ def test_blocks_on_light_records():
     assert out["blocked_at"] == "lights_records"
     assert "lights_header" in out["reached"]
 
+def test_lights_zero_count_falls_through_to_tail():
+    # flags=LIGHTS, count=0 — no deferral; continues to mapinfo tail.
+    data = bytes([1]) + bytes(4) + struct.pack("<H", 0)   # numColors=1, 1 palette, count=0
+    data += AW.pack_map_tail(north=500, map_version=31)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_WORLDLIGHTS_SAVED, major=7.0, minor=31))
+    assert out["blocked_at"] is None
+    assert "lights_header" in out["reached"] and "mapinfo" in out["reached"]
+    assert out["entry_points"][0] == {"kind": "north", "gridno": 500,
+                                      "x": 500 % 160, "y": 500 // 160}
+
 def test_blocks_on_soldiers_after_tail():
     # flags=SOLDIER: tail parses, then soldier block defers.
     data = AW.pack_map_tail(north=10, map_version=31)
