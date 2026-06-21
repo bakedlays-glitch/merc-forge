@@ -108,7 +108,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
             if pos + 12 > n:
                 return blocked("exitgrid_records_overrun")
             map_index, grid_no, sx, sy, sz = struct.unpack_from("<iiBBB", data, pos)
-            pos += 12
+            pos += 12  # 12B record: <iiBBBx>, trailing pad byte not unpacked
             x, y = _xy(map_index, cols)
             out["exit_grids"].append({"gridno": map_index, "x": x, "y": y,
                                       "dest_gridno": grid_no, "sx": sx, "sy": sy, "sz": sz})

@@ -87,9 +87,7 @@ def test_exit_grids_after_tail_when_no_soldiers():
                                   "dest_gridno": 13000, "sx": 9, "sy": 1, "sz": 0}]
 
 
-import struct as _struct
 from routes.mapforge import MapForgeSession, _session_store, session_appendix
-from mercwizard_core.mapforge_engine import appendix_writer as _AW
 
 def _fake_session(data, parsed):
     """Build a MapForgeSession without touching disk (bypass __init__)."""
@@ -100,9 +98,9 @@ def _fake_session(data, parsed):
     return s
 
 def test_appendix_endpoint_returns_entities():
-    data = _AW.pack_map_tail(north=1000, map_version=31)
-    data += _AW.pack_exit_grids([{"map_index": 320, "grid_no": 9, "sx": 1, "sy": 2, "sz": 0}])
-    parsed = {"flags": _AW.MAP_EXITGRIDS_SAVED, "major": 7.0, "minor": 31,
+    data = AW.pack_map_tail(north=1000, map_version=31)
+    data += AW.pack_exit_grids([{"map_index": 320, "grid_no": 9, "sx": 1, "sy": 2, "sz": 0}])
+    parsed = {"flags": AW.MAP_EXITGRIDS_SAVED, "major": 7.0, "minor": 31,
               "cols": 160, "rows": 160, "appendix_offset": 0}
     sess = _fake_session(data, parsed)
     _session_store._sessions[sess.id] = sess
@@ -114,3 +112,12 @@ def test_appendix_endpoint_returns_entities():
     assert res.blocked_at is None
     assert res.entry_points[0].kind == "north"
     assert res.exit_grids[0].gridno == 320 and res.exit_grids[0].y == 2
+
+def test_exit_grid_truncation_degrades_gracefully():
+    # flags=EXITGRIDS, valid tail, count says 2 but only partial bytes follow.
+    data = AW.pack_map_tail(map_version=31)
+    data += struct.pack("<H", 2)        # count=2 ...
+    data += b"\x00" * 6                 # ...but far fewer than 2*12 bytes
+    out = extract_appendix_entities(data, _parsed(AW.MAP_EXITGRIDS_SAVED, major=7.0, minor=31))
+    assert out["blocked_at"] == "exitgrid_records_overrun"
+    assert out["exit_grids"] == []      # nothing fully parsed

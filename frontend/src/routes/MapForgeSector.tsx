@@ -1745,7 +1745,7 @@ function MapForgeSectorInner() {
       .then((a) => { if (!cancelled) setAppendix(a); })
       .catch(() => { if (!cancelled) setAppendix(null); });
     return () => { cancelled = true; };
-  }, [session]);
+  }, [session?.session_id]);
 
   // Derived overall percent — floor (sum of completed phase weights)
   // plus the current phase's weight × phasePct.
