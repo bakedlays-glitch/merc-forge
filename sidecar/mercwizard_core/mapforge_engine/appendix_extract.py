@@ -54,6 +54,28 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
         if bail:
             return blocked(bail)
 
+    # 2. AMBIENT — fixed 3 bytes, no count.
+    if flags & AW.MAP_AMBIENTLIGHTLEVEL_SAVED:
+        if pos + 3 > n:
+            return blocked("ambient_truncated")
+        pos += 3
+        out["reached"].append("ambient")
+
+    # 3. LIGHTS — header is parseable; records deferred to a later plan.
+    if flags & AW.MAP_WORLDLIGHTS_SAVED:
+        if pos + 1 > n:
+            return blocked("lights_header_truncated")
+        num_colors = data[pos]
+        pos += 1
+        if pos + 4 * num_colors + 2 > n:
+            return blocked("lights_palette_truncated")
+        pos += 4 * num_colors
+        light_count = struct.unpack_from("<H", data, pos)[0]
+        pos += 2
+        out["reached"].append("lights_header")
+        if light_count > 0:
+            return blocked("lights_records")
+
     # 4. MAPINFO TAIL (unconditional) — entry points
     tail_size = 32 if major >= 7.0 else 99
     if pos + tail_size > n:
@@ -71,5 +93,9 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
         out["entry_points"].append({"kind": kind, "gridno": g, "x": x, "y": y})
     pos += tail_size
     out["reached"].append("mapinfo")
+
+    # 5. SOLDIERS — deferred to a later plan.
+    if flags & AW.MAP_FULLSOLDIER_SAVED:
+        return blocked("soldiers")
 
     return out
