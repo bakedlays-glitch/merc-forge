@@ -98,4 +98,20 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
     if flags & AW.MAP_FULLSOLDIER_SAVED:
         return blocked("soldiers")
 
+    # 6. EXIT GRIDS — uint16 count + 12-byte records (<iiBBBx).
+    if flags & AW.MAP_EXITGRIDS_SAVED:
+        if pos + 2 > n:
+            return blocked("exitgrid_count_truncated")
+        eg_count = struct.unpack_from("<H", data, pos)[0]
+        pos += 2
+        for _ in range(eg_count):
+            if pos + 12 > n:
+                return blocked("exitgrid_records_overrun")
+            map_index, grid_no, sx, sy, sz = struct.unpack_from("<iiBBB", data, pos)
+            pos += 12
+            x, y = _xy(map_index, cols)
+            out["exit_grids"].append({"gridno": map_index, "x": x, "y": y,
+                                      "dest_gridno": grid_no, "sx": sx, "sy": sy, "sz": sz})
+        out["reached"].append("exitgrids")
+
     return out

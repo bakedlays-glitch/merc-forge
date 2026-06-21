@@ -64,3 +64,14 @@ def test_blocks_on_soldiers_after_tail():
     assert out["blocked_at"] == "soldiers"
     assert "mapinfo" in out["reached"]
     assert out["entry_points"][0]["kind"] == "north"
+
+def test_exit_grids_after_tail_when_no_soldiers():
+    # flags=EXITGRIDS only: tail (no entries) then 1 exit grid.
+    data = AW.pack_map_tail(map_version=31)
+    data += AW.pack_exit_grids([{"map_index": 12880, "grid_no": 13000,
+                                 "sx": 9, "sy": 1, "sz": 0}])
+    out = extract_appendix_entities(data, _parsed(AW.MAP_EXITGRIDS_SAVED, major=7.0, minor=31))
+    assert out["blocked_at"] is None
+    assert "exitgrids" in out["reached"]
+    assert out["exit_grids"] == [{"gridno": 12880, "x": 80, "y": 80,
+                                  "dest_gridno": 13000, "sx": 9, "sy": 1, "sz": 0}]
