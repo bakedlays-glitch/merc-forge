@@ -947,6 +947,37 @@ function MapForgeSectorInner() {
     })();
     return () => { cancelled = true; };
   }, [appendix, showSoldiers]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Item sprite cache for BIGITEMS graphics. Keyed by String(usItem).
+  // Value is {url, w, h} on success, null sentinel on failure (→ circle fallback).
+  const [itemCache, setItemCache] = useState<Map<string, { url: string; w: number; h: number } | null>>(new Map());
+  useEffect(() => {
+    if (!appendix || !showItems) return;
+    let cancelled = false;
+    const ids = new Set<number>();
+    for (const it of appendix.items) {
+      if (!itemCache.has(String(it.usItem))) ids.add(it.usItem);
+    }
+    (async () => {
+      await Promise.all(Array.from(ids, async (usItem) => {
+        const key = String(usItem);
+        try {
+          const url = await mediaUrl(`/mapforge/item-graphic?item=${usItem}`);
+          const img = new Image();
+          await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(); img.src = url; });
+          if (cancelled) return;
+          if (img.naturalWidth === 0 || img.naturalHeight === 0) {
+            setItemCache((m) => new Map(m).set(key, null));
+          } else {
+            setItemCache((m) => new Map(m).set(key, { url, w: img.naturalWidth, h: img.naturalHeight }));
+          }
+        } catch {
+          if (cancelled) return;
+          setItemCache((m) => new Map(m).set(key, null));
+        }
+      }));
+    })();
+    return () => { cancelled = true; };
+  }, [appendix, showItems]); // eslint-disable-line react-hooks/exhaustive-deps
   const [rendererLoading, setRendererLoading] = useState(false);
   // Phase + per-phase percent for the load progress bar. `null` when
   // not loading or when the bar has finished. The whole-load percent
@@ -1772,6 +1803,7 @@ function MapForgeSectorInner() {
   useEffect(() => {
     setAppendix(null);
     setSpriteCache(new Map());
+    setItemCache(new Map());
     if (!session) return;
     let cancelled = false;
     getSessionAppendix(session.session_id)
@@ -4583,6 +4615,7 @@ function MapForgeSectorInner() {
               showEdges={showEdges}
               showSchedules={showSchedules}
               spriteCache={spriteCache}
+              itemCache={itemCache}
             />
             {/* Building-placement sprite ghost — drawn + positioned
                 imperatively by the placement-ghost effect. Above the
@@ -5317,6 +5350,7 @@ function IsoOverlay({
   showEdges,
   showSchedules,
   spriteCache,
+  itemCache,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -5358,6 +5392,7 @@ function IsoOverlay({
   showEdges: boolean;
   showSchedules: boolean;
   spriteCache: Map<string, { url: string; w: number; h: number } | null>;
+  itemCache: Map<string, { url: string; w: number; h: number } | null>;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -5556,9 +5591,19 @@ function IsoOverlay({
             })}
             {showItems && appendix.items.map((it, i) => {
               const { cx, cy } = c(it.x, it.y);
+              const g = itemCache.get(String(it.usItem));
+              if (g) {
+                const maxW = meta.tileW * 1.5;
+                const scale = Math.min(1, maxW / g.w);
+                const w = g.w * scale, h = g.h * scale;
+                return <image key={`it-${i}`} href={g.url} width={w} height={h}
+                  x={cx - w / 2} y={cy - h / 2} style={{ imageRendering: "pixelated" }}>
+                  <title>{`item ${it.usItem}`}</title>
+                </image>;
+              }
               return <circle key={`it-${i}`} cx={cx} cy={cy} r={3}
-                fill="rgba(120,255,160,0.9)" stroke="rgba(40,160,80,0.9)"
-                strokeWidth={1} vectorEffect="non-scaling-stroke" />;
+                fill="rgba(120,255,160,0.9)" stroke="rgba(40,160,80,0.9)" strokeWidth={1}
+                vectorEffect="non-scaling-stroke"><title>{`item ${it.usItem}`}</title></circle>;
             })}
             {showSoldiers && appendix.soldiers.map((s, i) => {
               const { cx, cy } = c(s.x, s.y);

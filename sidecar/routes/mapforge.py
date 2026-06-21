@@ -5923,6 +5923,22 @@ def session_appendix(session_id: str):
     return AppendixEntities(session_id=sess.id, **ents)
 
 
+# Install-scoped (not session-scoped): usItem is a global asset lookup.
+@router.get("/item-graphic")
+def item_graphic(item: int = Query(...)):
+    """PNG of a world item's BIGITEMS graphic (read-only asset decode).
+    404 when the item is unmapped or its STI is missing."""
+    root = _active_install_root()
+    if root is None:
+        raise HTTPException(status_code=400, detail="no active install")
+    from mercwizard_core.mapforge_engine.item_graphic import render_item_graphic
+    png = render_item_graphic(str(root), item)
+    if png is None:
+        raise HTTPException(status_code=404, detail="item graphic unavailable")
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
 # Install-scoped (not session-scoped): bodytype is a global asset lookup.
 @router.get("/soldier-sprite")
 def soldier_sprite(bodytype: int = Query(...), dir: int = Query(0, ge=0, le=7)):
