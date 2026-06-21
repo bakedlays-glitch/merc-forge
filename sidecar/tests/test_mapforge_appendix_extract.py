@@ -85,3 +85,32 @@ def test_exit_grids_after_tail_when_no_soldiers():
     assert "exitgrids" in out["reached"]
     assert out["exit_grids"] == [{"gridno": 12880, "x": 80, "y": 80,
                                   "dest_gridno": 13000, "sx": 9, "sy": 1, "sz": 0}]
+
+
+import struct as _struct
+from routes.mapforge import MapForgeSession, _session_store, session_appendix
+from mercwizard_core.mapforge_engine import appendix_writer as _AW
+
+def _fake_session(data, parsed):
+    """Build a MapForgeSession without touching disk (bypass __init__)."""
+    s = object.__new__(MapForgeSession)
+    s.id = "testsess123456"
+    s.original_bytes = data
+    s.parsed = parsed
+    return s
+
+def test_appendix_endpoint_returns_entities():
+    data = _AW.pack_map_tail(north=1000, map_version=31)
+    data += _AW.pack_exit_grids([{"map_index": 320, "grid_no": 9, "sx": 1, "sy": 2, "sz": 0}])
+    parsed = {"flags": _AW.MAP_EXITGRIDS_SAVED, "major": 7.0, "minor": 31,
+              "cols": 160, "rows": 160, "appendix_offset": 0}
+    sess = _fake_session(data, parsed)
+    _session_store._sessions[sess.id] = sess
+    try:
+        res = session_appendix(sess.id)
+    finally:
+        del _session_store._sessions[sess.id]
+    assert res.session_id == sess.id
+    assert res.blocked_at is None
+    assert res.entry_points[0].kind == "north"
+    assert res.exit_grids[0].gridno == 320 and res.exit_grids[0].y == 2

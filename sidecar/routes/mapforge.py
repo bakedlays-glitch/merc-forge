@@ -101,6 +101,7 @@ except Exception as e:  # noqa: BLE001
 from mercwizard_core.mapforge_engine.validate import (  # noqa: E402
     validate_parsed, Finding,
 )
+from mercwizard_core.mapforge_engine.appendix_extract import extract_appendix_entities  # noqa: E402
 from mercwizard_core.vfs import parse_vfs_config, VfsConfigError  # noqa: E402
 # tile_families is pure (a static enum table) — import alongside validate.
 from mercwizard_core.mapforge.tile_families import slot_family, MAX_TILE_SLOT  # noqa: E402
@@ -5830,12 +5831,56 @@ class ParsedSector(BaseModel):
     dirty: bool
 
 
+class AppendixItem(BaseModel):
+    gridno: int
+    x: int
+    y: int
+    usItem: int
+    level: int
+
+class AppendixEntryPoint(BaseModel):
+    kind: str
+    gridno: int
+    x: int
+    y: int
+
+class AppendixExitGrid(BaseModel):
+    gridno: int
+    x: int
+    y: int
+    dest_gridno: int
+    sx: int
+    sy: int
+    sz: int
+
+class AppendixEntities(BaseModel):
+    session_id: str
+    rows: int
+    cols: int
+    items: list[AppendixItem]
+    entry_points: list[AppendixEntryPoint]
+    exit_grids: list[AppendixExitGrid]
+    reached: list[str]
+    blocked_at: str | None
+
+
 def _serialize_layer(layer: list[list[tuple[int, int]]]) -> list[list[list[int]]]:
     """Convert list-of-tuples to list-of-lists for JSON. Tuples are not
     JSON-serializable by default; pydantic does this conversion anyway
     but doing it explicitly is faster + lets us share the type. Slot+sub
     are small ints so we don't need any compression scheme."""
     return [[[s, u] for s, u in tile] for tile in layer]
+
+
+@router.get("/sessions/{session_id}/appendix", response_model=AppendixEntities)
+def session_appendix(session_id: str):
+    """Read-only positioned appendix entities (items / entry points / exit
+    grids) for the tactical overlay. Extracted from the on-disk bytes; never
+    written. Later sections (lights records, soldiers, doors, edgepoints)
+    report via `blocked_at` until their parsers land."""
+    sess = _session_store.get(session_id)
+    ents = extract_appendix_entities(sess.original_bytes, sess.parsed)
+    return AppendixEntities(session_id=sess.id, **ents)
 
 
 @router.get("/sessions/{session_id}/parsed", response_model=ParsedSector)
