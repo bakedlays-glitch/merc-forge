@@ -910,12 +910,13 @@ function MapForgeSectorInner() {
   const [renderer, setRenderer] = useState<IsoRenderer | null>(null);
   const [renderMeta, setRenderMeta] = useState<RenderMeta | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
-  // Tactical appendix overlay — items / entry points / exit grids.
+  // Tactical appendix overlay — items / entry points / exit grids / soldiers / lights.
   const [appendix, setAppendix] = useState<AppendixEntities | null>(null);
   const [showItems, setShowItems] = useState(false);
   const [showEntries, setShowEntries] = useState(true);
   const [showExits, setShowExits] = useState(true);
   const [showSoldiers, setShowSoldiers] = useState(true);
+  const [showLights, setShowLights] = useState(false);
   const [rendererLoading, setRendererLoading] = useState(false);
   // Phase + per-phase percent for the load progress bar. `null` when
   // not loading or when the bar has finished. The whole-load percent
@@ -1736,7 +1737,7 @@ function MapForgeSectorInner() {
     };
   }, [session?.session_id, session?.tileset, xmlPath]);
 
-  // Read-only tactical appendix (items / entry points / exit grids).
+  // Read-only tactical appendix (items / entry points / exit grids / soldiers / lights).
   // Fetched once per session; the overlay is purely visual.
   useEffect(() => {
     setAppendix(null);
@@ -4546,6 +4547,7 @@ function MapForgeSectorInner() {
               showEntries={showEntries}
               showExits={showExits}
               showSoldiers={showSoldiers}
+              showLights={showLights}
             />
             {/* Building-placement sprite ghost — drawn + positioned
                 imperatively by the placement-ghost effect. Above the
@@ -5126,6 +5128,10 @@ function MapForgeSectorInner() {
                 <input type="checkbox" checked={showSoldiers} onChange={(e) => setShowSoldiers(e.target.checked)} />
                 NPCs{appendix ? ` (${appendix.soldiers.length})` : ""}
               </label>
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showLights} onChange={(e) => setShowLights(e.target.checked)} />
+                Lights{appendix ? ` (${appendix.lights.length})` : ""}
+              </label>
               {appendix?.blocked_at && (
                 <span className="text-xs text-amber-400">layer &ldquo;{appendix.blocked_at}&rdquo; not yet shown</span>
               )}
@@ -5259,6 +5265,7 @@ function IsoOverlay({
   showEntries,
   showExits,
   showSoldiers,
+  showLights,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -5289,12 +5296,13 @@ function IsoOverlay({
   /** Non-zero-height tiles to overlay while the height brush is active —
    * tinted by height, numbered when zoomed in. Null for other tools. */
   heightOverlay: Array<{ x: number; y: number; h: number }> | null;
-  /** Read-only tactical appendix (items / entry points / exit grids / soldiers). */
+  /** Read-only tactical appendix (items / entry points / exit grids / soldiers / lights). */
   appendix: AppendixEntities | null;
   showItems: boolean;
   showEntries: boolean;
   showExits: boolean;
   showSoldiers: boolean;
+  showLights: boolean;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -5468,7 +5476,7 @@ function IsoOverlay({
           </g>
         );
       })()}
-      {/* Tactical appendix markers — items / entry points / exit grids.
+      {/* Tactical appendix markers — items / entry points / exit grids / soldiers / lights.
           Read-only overlay fetched once per session. tileToCanvasPixel
           returns the tile's top-left; half-tile offset centres the marker. */}
       {appendix && (() => {
@@ -5508,6 +5516,16 @@ function IsoOverlay({
                   fill={color} stroke="rgba(0,0,0,0.7)" strokeWidth={1}
                   vectorEffect="non-scaling-stroke">
                   <title>{`${s.team_label} (dir ${s.facing}, class ${s.soldier_class})`}</title>
+                </circle>
+              );
+            })}
+            {showLights && appendix.lights.map((l, i) => {
+              const { cx, cy } = c(l.x, l.y);
+              return (
+                <circle key={`lt-${i}`} cx={cx} cy={cy} r={3}
+                  fill="rgba(255,220,90,0.9)" stroke="rgba(140,110,0,0.8)"
+                  strokeWidth={1} vectorEffect="non-scaling-stroke">
+                  <title>{l.template}</title>
                 </circle>
               );
             })}

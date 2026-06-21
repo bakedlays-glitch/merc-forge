@@ -21,6 +21,11 @@ _SOLDIER_OLD = {"size": 52, "grid_fmt": "<h", "grid_off": 2, "team_off": 4,
 _SOLDIER_NEW = {"size": 64, "grid_fmt": "<i", "grid_off": 4, "team_off": 8,
                 "dir_off": 11, "class_off": 58}
 
+# LIGHT_SPRITE (lighting.h:90-97), MSVC x86-32 4-byte align: 5*INT16 (10B) +
+# 2B pad + INT32 iTemplate + 2*UINT32 = 24 bytes. Written verbatim per light by
+# SaveMapLights (worlddef.cpp:4168, sizeof(LIGHT_SPRITE)).
+_LIGHT_SPRITE_SIZE = 24
+
 
 def _xy(gridno: int, cols: int) -> tuple[int, int]:
     return gridno % cols, gridno // cols
@@ -37,7 +42,7 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
 
     out: Dict[str, Any] = {
         "items": [], "entry_points": [], "exit_grids": [], "soldiers": [],
-        "reached": [], "blocked_at": None, "rows": rows, "cols": cols,
+        "lights": [], "reached": [], "blocked_at": None, "rows": rows, "cols": cols,
     }
 
     def blocked(reason: str) -> Dict[str, Any]:
@@ -70,7 +75,14 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
         pos += 3
         out["reached"].append("ambient")
 
-    # 3. LIGHTS — header is parseable; records deferred to a later plan.
+    # 3. LIGHTS — header + per-light records. See lights-layout-research.md.
+    #   header: u8 ubNumColors + ubNumColors*SGPPaletteEntry(4B) + u16 usNumLights.
+    #   per-light (SaveMapLights, worlddef.cpp:4153-4176, repeated usNumLights):
+    #     LIGHT_SPRITE (24B, lighting.h:90-97) + u8 ubStrLen + ubStrLen string
+    #     bytes (template filename incl. trailing NUL; ubStrLen = strlen+1).
+    #   LIGHT_SPRITE fields (MSVC x86-32, 4B align): iX,iY,iOldX,iOldY,iAnimSpeed
+    #     (5*INT16 @0..9), 2B pad @10, iTemplate(INT32 @12), uiFlags(@16),
+    #     uiLightType(@20). Position = iX/iY (tile col/row), uiFlags @ +16.
     if flags & AW.MAP_WORLDLIGHTS_SAVED:
         if pos + 1 > n:
             return blocked("lights_header_truncated")
@@ -82,8 +94,22 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
         light_count = struct.unpack_from("<H", data, pos)[0]
         pos += 2
         out["reached"].append("lights_header")
-        if light_count > 0:
-            return blocked("lights_records")
+        for _ in range(light_count):
+            if pos + _LIGHT_SPRITE_SIZE + 1 > n:
+                return blocked("light_records_overrun")
+            iX, iY = struct.unpack_from("<hh", data, pos)
+            pos += _LIGHT_SPRITE_SIZE
+            str_len = data[pos]
+            pos += 1
+            if pos + str_len > n:
+                return blocked("light_string_overrun")
+            tmpl = data[pos:pos + str_len].split(b"\x00", 1)[0].decode("ascii", "replace")
+            pos += str_len
+            # iX/iY are tile col/row (not a gridno); plot if in-bounds.
+            if 0 <= iX < cols and 0 <= iY < rows:
+                out["lights"].append({"x": iX, "y": iY,
+                                      "gridno": iY * cols + iX, "template": tmpl})
+        out["reached"].append("lights")
 
     # 4. MAPINFO TAIL (unconditional) — entry points
     tail_size = 32 if major >= 7.0 else 100  # _OLD_MAPCREATE_STRUCT sizeof = 100 (99 raw, align-2)

@@ -55,12 +55,37 @@ def test_modern_tail_entry_points():
                    "west": (4000, 4000 % 160, 4000 // 160),
                    "center": (5000, 5000 % 160, 5000 // 160)}  # isolated=-1 dropped
 
-def test_blocks_on_light_records():
-    # flags=LIGHTS, header says 3 lights -> deferred.
-    data = bytes([1]) + bytes(4) + struct.pack("<H", 3)   # numColors=1, 1 palette, count=3
+def _light_record(iX, iY, template=b"L-R05.LHT", flags=0x9B, template_id=1):
+    """One per-light record: 24-byte LIGHT_SPRITE + u8 ubStrLen + string.
+    LIGHT_SPRITE: iX,iY,iOldX,iOldY,iAnimSpeed (5*int16) + 2B pad +
+    iTemplate(int32) + uiFlags(u32) + uiLightType(u32). ubStrLen counts the
+    trailing NUL (= strlen+1), per SaveMapLights (worlddef.cpp:4170)."""
+    sprite = struct.pack("<5hHiII", iX, iY, iX, iY, 0, 0, template_id, flags, 0)
+    assert len(sprite) == 24
+    s = template + b"\x00"
+    return sprite + bytes([len(s)]) + s
+
+def test_walks_light_records_and_continues_to_tail():
+    # flags=LIGHTS, two light records, then the v7 tail. Cursor must clear the
+    # variable-length light section and land on a valid tail.
+    data = bytes([1]) + bytes(4) + struct.pack("<H", 2)   # numColors=1, 1 palette, count=2
+    data += _light_record(100, 65, b"L-R05.LHT")
+    data += _light_record(10, 20, b"L-R12.LHT")
+    data += AW.pack_map_tail(north=500, map_version=31)
     out = extract_appendix_entities(data, _parsed(AW.MAP_WORLDLIGHTS_SAVED, major=7.0, minor=31))
-    assert out["blocked_at"] == "lights_records"
-    assert "lights_header" in out["reached"]
+    assert out["blocked_at"] is None
+    assert "lights" in out["reached"] and "mapinfo" in out["reached"]
+    assert [(l["x"], l["y"], l["template"]) for l in out["lights"]] == [
+        (100, 65, "L-R05.LHT"), (10, 20, "L-R12.LHT")]
+    assert out["entry_points"][0]["gridno"] == 500  # tail reached intact
+
+def test_light_string_overrun_degrades_gracefully():
+    # Header promises 1 light but the string runs off the buffer end.
+    data = bytes([1]) + bytes(4) + struct.pack("<H", 1)
+    data += struct.pack("<5hHiII", 5, 5, 5, 5, 0, 0, 1, 0, 0)  # 24-byte sprite
+    data += bytes([20])  # ubStrLen=20 but no string bytes follow
+    out = extract_appendix_entities(data, _parsed(AW.MAP_WORLDLIGHTS_SAVED, major=7.0, minor=31))
+    assert out["blocked_at"] == "light_string_overrun"
 
 def test_lights_zero_count_falls_through_to_tail():
     # flags=LIGHTS, count=0 — no deferral; continues to mapinfo tail.
@@ -220,3 +245,45 @@ def test_real_a6_soldiers():
     assert all(0 <= s["gridno"] < 25600 for s in out["soldiers"])
     assert all(s["team"] == 1 for s in out["soldiers"])   # all ENEMY in A6
     assert all(s["soldier_class"] == 3 for s in out["soldiers"])  # ARMY
+
+
+_MAPS_DIR = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+             r"\Data-1.13\Maps")
+
+@pytest.mark.skipif(not os.path.exists(_MAPS_DIR), reason="canonical install not present")
+@pytest.mark.parametrize("name,count,template", [
+    ("A1", 1, "L-R05.LHT"),
+    ("A2", 8, "L-R08.LHT"),
+])
+def test_real_town_lights_walk_to_tail(name, count, template):
+    """LIT town sectors: the per-light walk (24B LIGHT_SPRITE + u8 len + str)
+    must clear the variable-length lights section and reach the MapInfo tail.
+    These maps then bail at soldier_detailed (a separate, pre-existing limit),
+    so we assert on the lights + tail reach, not full chain closure."""
+    with open(os.path.join(_MAPS_DIR, f"{name}.DAT"), "rb") as f:
+        data = f.read()
+    out = extract_appendix_entities(data, parse_dat_full(data))
+    assert "lights" in out["reached"]
+    assert "mapinfo" in out["reached"]          # cursor landed on a valid tail
+    assert len(out["lights"]) == count
+    assert all(l["template"] == template for l in out["lights"])
+    assert all(0 <= l["x"] < 160 and 0 <= l["y"] < 160 for l in out["lights"])
+
+
+def test_appendix_endpoint_returns_lights():
+    # LIGHTS flag: header (1 color, 1 light) + one light record + 100B tail.
+    data = bytes([1]) + bytes(4) + struct.pack("<H", 1)      # numColors=1, palette, count=1
+    data += _light_record(10, 20, template=b"L-R05.LHT")     # reuse existing helper
+    data += _old_tail_100()
+    parsed = {"flags": AW.MAP_WORLDLIGHTS_SAVED, "major": 5.0, "minor": 25,
+              "cols": 160, "rows": 160, "appendix_offset": 0}
+    sess = _fake_session(data, parsed)
+    _session_store._sessions[sess.id] = sess
+    try:
+        res = session_appendix(sess.id)
+    finally:
+        del _session_store._sessions[sess.id]
+    assert len(res.lights) == 1
+    assert res.lights[0].x == 10 and res.lights[0].y == 20
+    assert res.lights[0].template == "L-R05.LHT"
+    assert res.lights[0].gridno == 3210

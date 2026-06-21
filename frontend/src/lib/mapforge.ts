@@ -1800,6 +1800,9 @@ export interface AppendixSoldier {
   gridno: number; x: number; y: number;
   team: number; team_label: string; facing: number; soldier_class: number;
 }
+export interface AppendixLight {
+  x: number; y: number; gridno: number; template: string;
+}
 export interface AppendixEntities {
   session_id: string;
   rows: number;
@@ -1808,6 +1811,7 @@ export interface AppendixEntities {
   entry_points: AppendixEntryPoint[];
   exit_grids: AppendixExitGrid[];
   soldiers: AppendixSoldier[];
+  lights: AppendixLight[];
   reached: string[];
   blocked_at: string | null;
 }

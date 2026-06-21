@@ -5862,6 +5862,12 @@ class AppendixSoldier(BaseModel):
     facing: int
     soldier_class: int
 
+class AppendixLight(BaseModel):
+    x: int
+    y: int
+    gridno: int
+    template: str
+
 class AppendixEntities(BaseModel):
     session_id: str
     rows: int
@@ -5870,6 +5876,7 @@ class AppendixEntities(BaseModel):
     entry_points: list[AppendixEntryPoint]
     exit_grids: list[AppendixExitGrid]
     soldiers: list[AppendixSoldier]
+    lights: list[AppendixLight]
     reached: list[str]
     blocked_at: str | None
 
@@ -5885,9 +5892,9 @@ def _serialize_layer(layer: list[list[tuple[int, int]]]) -> list[list[list[int]]
 @router.get("/sessions/{session_id}/appendix", response_model=AppendixEntities)
 def session_appendix(session_id: str):
     """Read-only positioned appendix entities (items / entry points / exit
-    grids) for the tactical overlay. Extracted from the on-disk bytes; never
-    written. Later sections (lights records, soldiers, doors, edgepoints)
-    report via `blocked_at` until their parsers land."""
+    grids / lights) for the tactical overlay. Extracted from the on-disk bytes;
+    never written. Later sections (soldiers, doors, edgepoints) report via
+    `blocked_at` until their parsers land."""
     sess = _session_store.get(session_id)
     ents = extract_appendix_entities(sess.original_bytes, sess.parsed)
     return AppendixEntities(session_id=sess.id, **ents)
