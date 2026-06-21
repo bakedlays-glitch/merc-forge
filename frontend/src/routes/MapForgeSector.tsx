@@ -42,6 +42,7 @@ import {
   getAtlasManifest,
   getSectorInfo,
   getSession,
+  getSessionAppendix,
   getSessionParsed,
   getStiJsd,
   newSector,
@@ -51,6 +52,7 @@ import {
   saveSession,
   streamAtlasBuild,
   validateSession,
+  type AppendixEntities,
   type LayerName,
   type RecentAddition,
   type RoomSummary,
@@ -908,6 +910,11 @@ function MapForgeSectorInner() {
   const [renderer, setRenderer] = useState<IsoRenderer | null>(null);
   const [renderMeta, setRenderMeta] = useState<RenderMeta | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
+  // Tactical appendix overlay — items / entry points / exit grids.
+  const [appendix, setAppendix] = useState<AppendixEntities | null>(null);
+  const [showItems, setShowItems] = useState(false);
+  const [showEntries, setShowEntries] = useState(true);
+  const [showExits, setShowExits] = useState(true);
   const [rendererLoading, setRendererLoading] = useState(false);
   // Phase + per-phase percent for the load progress bar. `null` when
   // not loading or when the bar has finished. The whole-load percent
@@ -1727,6 +1734,18 @@ function MapForgeSectorInner() {
       if (createdUrl) URL.revokeObjectURL(createdUrl);
     };
   }, [session?.session_id, session?.tileset, xmlPath]);
+
+  // Read-only tactical appendix (items / entry points / exit grids).
+  // Fetched once per session; the overlay is purely visual.
+  useEffect(() => {
+    setAppendix(null);
+    if (!session) return;
+    let cancelled = false;
+    getSessionAppendix(session.session_id)
+      .then((a) => { if (!cancelled) setAppendix(a); })
+      .catch(() => { if (!cancelled) setAppendix(null); });
+    return () => { cancelled = true; };
+  }, [session]);
 
   // Derived overall percent — floor (sum of completed phase weights)
   // plus the current phase's weight × phasePct.
@@ -4521,6 +4540,10 @@ function MapForgeSectorInner() {
                 return tiles;
               })()}
               heightOverlay={heightOverlay}
+              appendix={appendix}
+              showItems={showItems}
+              showEntries={showEntries}
+              showExits={showExits}
             />
             {/* Building-placement sprite ghost — drawn + positioned
                 imperatively by the placement-ghost effect. Above the
@@ -5084,6 +5107,22 @@ function MapForgeSectorInner() {
               >
                 R#
               </button>
+              {/* Tactical appendix overlay toggles */}
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showItems} onChange={(e) => setShowItems(e.target.checked)} />
+                Items{appendix ? ` (${appendix.items.length})` : ""}
+              </label>
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showEntries} onChange={(e) => setShowEntries(e.target.checked)} />
+                Entries{appendix ? ` (${appendix.entry_points.length})` : ""}
+              </label>
+              <label className="flex items-center gap-1 text-xs text-gray-300">
+                <input type="checkbox" checked={showExits} onChange={(e) => setShowExits(e.target.checked)} />
+                Exits{appendix ? ` (${appendix.exit_grids.length})` : ""}
+              </label>
+              {appendix?.blocked_at && (
+                <span className="text-xs text-amber-400">layer &ldquo;{appendix.blocked_at}&rdquo; not yet shown</span>
+              )}
               <button
                 type="button"
                 onClick={resetView}
@@ -5209,6 +5248,10 @@ function IsoOverlay({
   stampPreview,
   brushRadiusPreview,
   heightOverlay,
+  appendix,
+  showItems,
+  showEntries,
+  showExits,
 }: {
   meta: RenderMeta;
   info: SectorInfo | undefined;
@@ -5239,6 +5282,11 @@ function IsoOverlay({
   /** Non-zero-height tiles to overlay while the height brush is active —
    * tinted by height, numbered when zoomed in. Null for other tools. */
   heightOverlay: Array<{ x: number; y: number; h: number }> | null;
+  /** Read-only tactical appendix (items / entry points / exit grids). */
+  appendix: AppendixEntities | null;
+  showItems: boolean;
+  showEntries: boolean;
+  showExits: boolean;
 }) {
   // Compute the tile rect being rendered (mirrors IsoRenderer._resolve_region).
   const rect = useMemo(() => {
@@ -5408,6 +5456,37 @@ function IsoOverlay({
                   {t.h}
                 </text>
               );
+            })}
+          </g>
+        );
+      })()}
+      {/* Tactical appendix markers — items / entry points / exit grids.
+          Read-only overlay fetched once per session. tileToCanvasPixel
+          returns the tile's top-left; half-tile offset centres the marker. */}
+      {appendix && (() => {
+        const c = (x: number, y: number) => {
+          const p = tileToCanvasPixel(x, y, meta);
+          return { cx: p.x + meta.tileW / 2, cy: p.y + meta.tileH / 2 };
+        };
+        return (
+          <g>
+            {showExits && appendix.exit_grids.map((e, i) => {
+              const { cx, cy } = c(e.x, e.y);
+              return <rect key={`xg-${i}`} x={cx - 5} y={cy - 5} width={10} height={10}
+                fill="rgba(120,200,255,0.35)" stroke="rgba(150,220,255,0.95)"
+                strokeWidth={1} vectorEffect="non-scaling-stroke" />;
+            })}
+            {showEntries && appendix.entry_points.map((e, i) => {
+              const { cx, cy } = c(e.x, e.y);
+              return <circle key={`ep-${i}`} cx={cx} cy={cy} r={5}
+                fill="rgba(255,205,80,0.45)" stroke="rgba(255,225,120,0.95)"
+                strokeWidth={1.5} vectorEffect="non-scaling-stroke" />;
+            })}
+            {showItems && appendix.items.map((it, i) => {
+              const { cx, cy } = c(it.x, it.y);
+              return <circle key={`it-${i}`} cx={cx} cy={cy} r={3}
+                fill="rgba(120,255,160,0.9)" stroke="rgba(40,160,80,0.9)"
+                strokeWidth={1} vectorEffect="non-scaling-stroke" />;
             })}
           </g>
         );
