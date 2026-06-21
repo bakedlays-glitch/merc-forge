@@ -118,6 +118,21 @@ def test_appendix_endpoint_returns_entities():
     assert res.entry_points[0].kind == "north"
     assert res.exit_grids[0].gridno == 320 and res.exit_grids[0].y == 2
 
+def test_appendix_endpoint_returns_soldiers():
+    data = _old_tail_100(num_individuals=1)
+    data += _old_soldier(gridno=320, team=1, facing=3, sclass=3)
+    parsed = {"flags": AW.MAP_FULLSOLDIER_SAVED, "major": 5.0, "minor": 25,
+              "cols": 160, "rows": 160, "appendix_offset": 0}
+    sess = _fake_session(data, parsed)
+    _session_store._sessions[sess.id] = sess
+    try:
+        res = session_appendix(sess.id)
+    finally:
+        del _session_store._sessions[sess.id]
+    assert len(res.soldiers) == 1
+    assert res.soldiers[0].gridno == 320 and res.soldiers[0].team_label == "enemy"
+    assert res.soldiers[0].y == 2
+
 def test_exit_grid_truncation_degrades_gracefully():
     # flags=EXITGRIDS, valid tail, count says 2 but only partial bytes follow.
     data = AW.pack_map_tail(map_version=31)

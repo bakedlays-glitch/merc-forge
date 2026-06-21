@@ -5853,6 +5853,15 @@ class AppendixExitGrid(BaseModel):
     sy: int
     sz: int
 
+class AppendixSoldier(BaseModel):
+    gridno: int
+    x: int
+    y: int
+    team: int
+    team_label: str
+    facing: int
+    soldier_class: int
+
 class AppendixEntities(BaseModel):
     session_id: str
     rows: int
@@ -5860,6 +5869,7 @@ class AppendixEntities(BaseModel):
     items: list[AppendixItem]
     entry_points: list[AppendixEntryPoint]
     exit_grids: list[AppendixExitGrid]
+    soldiers: list[AppendixSoldier]
     reached: list[str]
     blocked_at: str | None
 
