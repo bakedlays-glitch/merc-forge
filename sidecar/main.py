@@ -185,6 +185,7 @@ from routes import (
     ini_editor,
     ini_presets,
     installs,
+    items,
     mapforge,
     mapforge_library,
     merc,
@@ -292,6 +293,7 @@ def create_app() -> FastAPI:
     app.include_router(slot_picker.router, prefix=api_prefix, tags=["slots"])
     app.include_router(traits.router, prefix=api_prefix, tags=["traits"])
     app.include_router(backgrounds.router, prefix=api_prefix, tags=["backgrounds"])
+    app.include_router(items.router, prefix=api_prefix, tags=["items"])
     app.include_router(voice.router, prefix=api_prefix, tags=["voice"])
     app.include_router(mapforge.router, prefix=api_prefix, tags=["mapforge"])
     app.include_router(mapforge_library.router, prefix=api_prefix, tags=["mapforge"])

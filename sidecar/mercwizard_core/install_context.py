@@ -243,6 +243,13 @@ class InstallContext:
             self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
         )
 
+    def items_table_path(self, filename: str, *, for_write: bool = False) -> Path:
+        """Resolve TableData/Items/<filename> (Items.xml + sister files)."""
+        rel = f"TableData/Items/{filename}"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
     def extra_table_path(self, key: str, *, for_write: bool = False) -> Optional[Path]:
         """Look up a mod-specific table path (e.g. MercOpinions.xml).
 

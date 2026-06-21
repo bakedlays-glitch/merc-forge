@@ -71,6 +71,13 @@ const secondary = [
     description: "Create, edit, and delete the stat/AP/perk background bundles mercs can carry — the catalog the merc Background dropdown picks from.",
   },
   {
+    id: "items",
+    label: "Items",
+    href: "/items",
+    icon: "🔫",
+    description: "Browse every item, see its inventory graphic, edit name/price/coolness and per-class stats, and re-point its graphic to existing art.",
+  },
+  {
     id: "tools",
     label: "Tools",
     href: "/tools",

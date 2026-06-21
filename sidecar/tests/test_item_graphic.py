@@ -3,6 +3,7 @@ import os, pytest
 from mercwizard_core.mapforge_engine.item_graphic import (
     render_item_graphic, _bigitems_stem,
 )
+import mercwizard_core.mapforge_engine.item_graphic as igph
 
 _INSTALL = r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
 
@@ -27,3 +28,24 @@ def test_renders_leather_jacket_png():
 @pytest.mark.skipif(not os.path.exists(_INSTALL), reason="canonical install not present")
 def test_unknown_item_returns_none():
     assert render_item_graphic(_INSTALL, 65000) is None   # not in Items.xml
+
+
+# ── Task 5 additions: render_bigitem_by_ref + list_bigitem_graphics ──────────
+
+@pytest.mark.skipif(not os.path.exists(_INSTALL), reason="canonical install not present")
+def test_render_by_ref_matches_item_render():
+    # FAMAS = item 24 -> graphic (type=0, num=24) = gun24.sti
+    by_item = igph.render_item_graphic(_INSTALL, 24)
+    by_ref = igph.render_bigitem_by_ref(_INSTALL, 0, 24)
+    assert by_item is not None and by_ref is not None
+    assert by_item == by_ref
+
+
+@pytest.mark.skipif(not os.path.exists(_INSTALL), reason="canonical install not present")
+def test_list_bigitem_graphics_nonempty():
+    cat = igph.list_bigitem_graphics(_INSTALL)
+    assert isinstance(cat, list) and len(cat) > 0
+    assert all({"type", "num", "stem"} <= set(e) for e in cat)
+    # Verify sorting by (type, num)
+    keys = [(e["type"], e["num"]) for e in cat]
+    assert keys == sorted(keys)

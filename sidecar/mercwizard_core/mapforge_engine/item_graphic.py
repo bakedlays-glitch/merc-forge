@@ -5,6 +5,8 @@ docs/superpowers/specs/2026-06-21-item-graphic-research.md.
 """
 from __future__ import annotations
 
+import os
+import re
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -94,13 +96,9 @@ def _resolve_bigitem_bytes(install_root: str, stem: str) -> Optional[bytes]:
     return None
 
 
-def render_item_graphic(install_root: str, us_item: int) -> Optional[bytes]:
-    """PNG of `us_item`'s BIGITEMS graphic, or None (unknown item / missing STI)."""
-    graphics = _load_item_graphics(install_root)
-    gfx = graphics.get(us_item)
-    if gfx is None:
-        return None
-    stem = _bigitems_stem(gfx[0], gfx[1])
+def render_bigitem_by_ref(install_root: str, gtype: int, gnum: int) -> Optional[bytes]:
+    """PNG of the BIGITEMS graphic at (gtype, gnum), or None if its STI is missing."""
+    stem = _bigitems_stem(gtype, gnum)
     data = _resolve_bigitem_bytes(install_root, stem)
     if data is None:
         return None
@@ -109,3 +107,71 @@ def render_item_graphic(install_root: str, us_item: int) -> Optional[bytes]:
         return decode_sti_frame_to_png(data, 0)
     except Exception:
         return None
+
+
+def render_item_graphic(install_root: str, us_item: int) -> Optional[bytes]:
+    """PNG of `us_item`'s BIGITEMS graphic, or None (unknown item / missing STI)."""
+    gfx = _load_item_graphics(install_root).get(us_item)
+    if gfx is None:
+        return None
+    return render_bigitem_by_ref(install_root, gfx[0], gfx[1])
+
+
+# Module-level compiled regex: gun<N+> or p<N+>item<N+>, case-insensitive.
+_STEM_RE = re.compile(r"^(?:gun(\d+)|p(\d+)item(\d+))\.sti$", re.I)
+
+
+def list_bigitem_graphics(install_root: str) -> list[dict]:
+    """Enumerate every BIGITEMS graphic (loose dirs + SLF) as {type, num, stem}.
+
+    Scans loose BigItems directories first (Data-1.13/BigItems, Data/BigItems),
+    then falls back to the Bigitems.slf archive if present. Results are sorted
+    by (type, num). Loose files take priority (setdefault keeps first-seen).
+    """
+    found: dict[tuple[int, int], str] = {}
+    root = Path(install_root)
+
+    # Loose-dir scan — two candidate locations (mod-content first, then vanilla).
+    for base in (root / "Data-1.13" / "BigItems", root / "Data" / "BigItems"):
+        if not base.is_dir():
+            continue
+        try:
+            for child in base.iterdir():
+                if not child.is_file():
+                    continue
+                m = _STEM_RE.match(child.name)
+                if m is None:
+                    continue
+                if m.group(1) is not None:
+                    # gun<N> -> type 0
+                    key = (0, int(m.group(1)))
+                else:
+                    # p<type>item<num>
+                    key = (int(m.group(2)), int(m.group(3)))
+                found.setdefault(key, child.stem)
+        except OSError:
+            pass
+
+    # SLF fallback — walk Bigitems.slf for any remaining entries.
+    slf_path = root / "Data" / "Bigitems.slf"
+    if slf_path.is_file():
+        try:
+            from mercwizard_core.install_context import _open_slf_cached
+            slf = _open_slf_cached(slf_path)
+            if slf is not None:
+                for entry in slf.walk.files():
+                    basename = os.path.basename(entry)
+                    m = _STEM_RE.match(basename)
+                    if m is None:
+                        continue
+                    if m.group(1) is not None:
+                        key = (0, int(m.group(1)))
+                    else:
+                        key = (int(m.group(2)), int(m.group(3)))
+                    stem = basename.rsplit(".", 1)[0]
+                    found.setdefault(key, stem)
+        except Exception:  # noqa: BLE001 — SLF lib raises misc errors
+            pass
+
+    return [{"type": t, "num": n, "stem": found[(t, n)]}
+            for (t, n) in sorted(found)]

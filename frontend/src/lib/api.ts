@@ -2087,3 +2087,88 @@ export async function setupApply(payload: {
 export async function markSetupOffered(): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>("/setup/offered", { method: "POST" });
 }
+
+// ────────────────────────────────────────────────────────────────
+//   Items
+// ────────────────────────────────────────────────────────────────
+export interface ItemSummary {
+  ui_index: number;
+  name: string;
+  item_class: number;
+  price: number;
+  coolness: number;
+  graphic_type: number;
+  graphic_num: number;
+  class_index: number;
+}
+
+export interface ItemFieldSpec {
+  key: string;
+  label: string;
+  group: string;
+  kind: "str" | "int";
+  min?: number;
+  max?: number;
+  cap?: number;
+  advanced?: boolean;
+  note?: string;
+}
+
+export interface ItemsResponse {
+  items: ItemSummary[];
+  common_schema: ItemFieldSpec[];
+  install_id: string;
+  file_present: boolean;
+  writable: boolean;
+}
+
+export interface ItemDetail {
+  ui_index: number;
+  strings: Record<string, string>;
+  ints: Record<string, number>;
+  class_index: number;
+  family: string | null;
+  class_fields: Record<string, number> | null;
+  class_schema: ItemFieldSpec[] | null;
+}
+
+export interface ItemUpdatePayload {
+  strings: Record<string, string>;
+  ints: Record<string, number>;
+  class_fields: Record<string, number>;
+}
+
+export interface ItemClamp { key: string; requested: number; stored: number; }
+export interface ItemWriteResult { ok: boolean; backup_id?: string; clamps?: ItemClamp[]; }
+export interface BigItemGraphic { type: number; num: number; stem: string; }
+
+export function listItems(install_id?: string) {
+  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+  return request<ItemsResponse>(`/items${qs}`);
+}
+
+export function getItem(id: number, install_id?: string) {
+  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+  return request<ItemDetail>(`/items/${id}${qs}`);
+}
+
+export function updateItem(id: number, payload: ItemUpdatePayload, install_id?: string) {
+  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+  return request<ItemWriteResult>(`/items/${id}${qs}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listBigItems(install_id?: string) {
+  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+  return request<{ graphics: BigItemGraphic[] }>(`/bigitems-catalog${qs}`);
+}
+
+export function itemGraphicUrl(id: number): Promise<string> {
+  return mediaUrl(`/mapforge/item-graphic?item=${id}`);
+}
+
+export function bigItemGraphicUrl(type: number, num: number): Promise<string> {
+  return mediaUrl(`/bigitem-graphic?type=${type}&num=${num}`);
+}

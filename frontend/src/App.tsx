@@ -30,6 +30,7 @@ const Backups = lazy(() => import("./routes/Backups"));
 const Create = lazy(() => import("./routes/Create"));
 const Edit = lazy(() => import("./routes/Edit"));
 const Backgrounds = lazy(() => import("./routes/Backgrounds"));
+const Items = lazy(() => import("./routes/Items"));
 const Move = lazy(() => import("./routes/Move"));
 const Delete = lazy(() => import("./routes/Delete"));
 const Duplicate = lazy(() => import("./routes/Duplicate"));
@@ -190,6 +191,7 @@ export default function App() {
           <Route path="/create" element={<Create />} />
           <Route path="/edit" element={<Edit />} />
           <Route path="/backgrounds" element={<Backgrounds />} />
+          <Route path="/items" element={<Items />} />
           <Route path="/move" element={<Move />} />
           <Route path="/duplicate" element={<Duplicate />} />
           <Route path="/delete" element={<Delete />} />
