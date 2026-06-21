@@ -1,4 +1,6 @@
+import os
 import struct
+import pytest
 from mercwizard_core.mapforge_engine.appendix_extract import extract_appendix_entities
 from mercwizard_core.mapforge_engine import appendix_writer as AW
 
@@ -189,13 +191,20 @@ def test_zero_soldiers_section_is_empty():
     assert out["soldiers"] == []
     assert "soldiers" in out["reached"]
 
+def test_soldier_records_overrun_degrades_gracefully():
+    # tail says 2 individuals, but only 1 full 52-byte record follows.
+    data = _old_tail_100(num_individuals=2)
+    data += _old_soldier(gridno=100, team=1)        # one full record
+    data += b"\x00" * 10                              # partial second record (< 52B)
+    out = extract_appendix_entities(data, _parsed(AW.MAP_FULLSOLDIER_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] == "soldier_records_overrun"
+    assert [s["gridno"] for s in out["soldiers"]] == [100]   # first soldier retained
+
 
 # ---------------------------------------------------------------------------
 # Real-map regression test (Step 6 — install-gated)
 # ---------------------------------------------------------------------------
 
-import os
-import pytest
 from mercwizard_core.mapforge_engine.parse_dat_ext import parse_dat_full
 
 _A6 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
@@ -203,7 +212,8 @@ _A6 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
 
 @pytest.mark.skipif(not os.path.exists(_A6), reason="canonical install not present")
 def test_real_a6_soldiers():
-    data = open(_A6, "rb").read()
+    with open(_A6, "rb") as f:
+        data = f.read()
     out = extract_appendix_entities(data, parse_dat_full(data))
     assert out["blocked_at"] is None
     assert len(out["soldiers"]) == 32                 # ubNumIndividuals
