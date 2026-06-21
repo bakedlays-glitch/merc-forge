@@ -5541,12 +5541,13 @@ function IsoOverlay({
         };
         return (
           <g>
-            {showExits && appendix.exit_grids.map((e, i) => {
-              const { cx, cy } = c(e.x, e.y);
-              return <rect key={`xg-${i}`} x={cx - 5} y={cy - 5} width={10} height={10}
-                fill="rgba(120,200,255,0.35)" stroke="rgba(150,220,255,0.95)"
-                strokeWidth={1} vectorEffect="non-scaling-stroke" />;
-            })}
+            {showExits && appendix.exit_grids.map((e, i) => (
+              <g key={`xg-${i}`}>
+                <TileMarker tile={{ x: e.x, y: e.y }} meta={meta}
+                  fill="rgba(120,200,255,0.28)" stroke="rgba(150,220,255,0.85)" strokeWidth={1} />
+                <title>{`exit → sector (dest ${e.dest_gridno})`}</title>
+              </g>
+            ))}
             {showEntries && appendix.entry_points.map((e, i) => {
               const { cx, cy } = c(e.x, e.y);
               return <circle key={`ep-${i}`} cx={cx} cy={cy} r={5}
@@ -5594,19 +5595,24 @@ function IsoOverlay({
             })}
             {showDoors && appendix.doors.map((d, i) => {
               const { cx, cy } = c(d.x, d.y);
-              return <rect key={`dr-${i}`} x={cx - 4} y={cy - 4} width={8} height={8}
-                fill={d.locked ? "rgba(200,120,255,0.85)" : "rgba(200,180,255,0.6)"}
-                stroke="rgba(120,40,200,0.9)" strokeWidth={1} vectorEffect="non-scaling-stroke">
-                <title>{d.locked ? "locked door" : "door"}</title>
-              </rect>;
+              const col = d.locked ? "rgba(255,205,80,0.95)" : "rgba(185,185,185,0.85)";
+              return (
+                <g key={`dr-${i}`} transform={`translate(${cx - 4} ${cy - 5})`}>
+                  <path d="M2 4 V2.6 a2 2 0 0 1 4 0 V4" fill="none" stroke={col} strokeWidth={1}
+                    vectorEffect="non-scaling-stroke" />
+                  <rect x={0} y={4} width={8} height={6} rx={1} fill={col} stroke="rgba(0,0,0,0.7)"
+                    strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
+                  <title>{d.locked ? "locked door" : "door"}</title>
+                </g>
+              );
             })}
-            {showEdges && appendix.edgepoints.map((e, i) => {
-              const { cx, cy } = c(e.x, e.y);
-              return <circle key={`eg-${i}`} cx={cx} cy={cy} r={2}
-                fill="rgba(160,160,160,0.7)" stroke="rgba(80,80,80,0.6)" strokeWidth={1} vectorEffect="non-scaling-stroke">
+            {showEdges && appendix.edgepoints.map((e, i) => (
+              <g key={`eg-${i}`}>
+                <TileMarker tile={{ x: e.x, y: e.y }} meta={meta}
+                  fill="rgba(160,160,160,0.20)" stroke="rgba(120,120,120,0.5)" strokeWidth={0.75} />
                 <title>{`edge: ${e.edge}`}</title>
-              </circle>;
-            })}
+              </g>
+            ))}
             {showSchedules && appendix.schedules.map((s, i) => {
               const { cx, cy } = c(s.x, s.y);
               return <rect key={`sc-${i}`} x={cx - 3} y={cy - 3} width={6} height={6}
