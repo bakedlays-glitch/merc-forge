@@ -397,7 +397,7 @@ class SidecarState:
         # config MercForge thought the install "should" use, hiding
         # the user's existing saves and reverting any manual VFS edits
         # the user had made. Bug #11 in MERC_FORGE_BUG_LIST.md
-        # documents the user-visible symptom (Jakub Vito's "saves
+        # documents the user-visible symptom (a user's "saves
         # disappeared after activating an install" report).
         #
         # New behavior: activation is purely a local-state change.

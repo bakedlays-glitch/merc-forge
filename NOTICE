@@ -42,17 +42,7 @@ inside JA2 1.13 INI files. That descriptive text originates with the JA2
 so the launcher can present human-readable setting descriptions.
 
 ------------------------------------------------------------------------
-3. Jagged Alliance 2 tile art and structure data
-   (Palette/default/structs/*.STI, *.sti, *.jsd)
-------------------------------------------------------------------------
-The JUNK1 / junkyard1 / junkyard1b STI tile graphics, their shadow (T/)
-variants, and the accompanying .jsd structure-definition files are art and
-data assets from Jagged Alliance 2 / its v1.13 community tilesets, included
-only as sample working content. Copyright belongs to the respective game
-and mod rights holders; these are not original works of Merc Forge.
-
-------------------------------------------------------------------------
-4. Derived map-statistics corpus
+3. Derived map-statistics corpus
    (sidecar/mercwizard_core/mapforge/corpus/*.json)
 ------------------------------------------------------------------------
 These files contain aggregate statistics (tile-index frequencies and

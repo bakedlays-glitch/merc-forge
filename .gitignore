@@ -112,6 +112,12 @@ scratch/
 # files dropped at repo root by debug helpers.
 scratch_*.png
 
+# ── MapForge copy-to-tileset authoring output ───────────────────────
+# `Palette/` is the default-project output dir of the copy-here tool:
+# JA2-derived sample tiles (STI/JSD) + session logs, not source. Kept
+# out of the public tree (the committed copy was removed 2026-06-22).
+/Palette/
+
 # ── Local environment overrides ─────────────────────────────────────
 .env
 .env.*
