@@ -1,4 +1,4 @@
-﻿import os
+import os
 import struct
 import pytest
 from mercwizard_core.mapforge_engine.appendix_extract import extract_appendix_entities

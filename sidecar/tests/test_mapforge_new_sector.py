@@ -30,6 +30,15 @@ from tests.test_mapforge_library import _build_minimal_dat
 from fastapi import HTTPException
 
 
+@pytest.fixture(autouse=True)
+def _active_install_is_tmp(tmp_path, monkeypatch):
+    """Point the active install at this test's tmp_path so the new
+    `_confine_install_path` guard (which requires every .dat write to live
+    inside the active install) passes — every dest these tests use is under
+    tmp_path. Confinement itself is covered by test_mapforge_path_confinement."""
+    monkeypatch.setattr(mf, "_active_install_root", lambda: tmp_path)
+
+
 # ── build_empty_dat_bytes: byte-faithful empty map ──────────────────────
 
 

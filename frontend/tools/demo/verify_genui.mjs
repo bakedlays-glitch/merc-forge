@@ -27,9 +27,14 @@ const argv = process.argv.slice(2);
 const flag = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
 const base = flag("--base") ?? "http://localhost:1420";
 
+// Install root for the read-only tileset art. Set JA2_INSTALL to your
+// 1.13 install (the folder holding Data-1.13); the placeholder default
+// just documents the shape — the rig won't run until it points at a real
+// install. The .dat is the in-repo scratch test copy (never a live map).
+const INSTALL = process.env.JA2_INSTALL || "C:/Jagged Alliance 2/<your-1.13-install>";
 const params = new URLSearchParams({
-  dat: "C:/AI Projects/The Wasteland/MercWizard2/scratch/clifftest/A2.DAT",
-  xml: "C:/Jagged Alliance 2/Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy/Data-1.13/Ja2Set.dat.xml",
+  dat: path.join(REPO, "scratch", "clifftest", "A2.DAT"),
+  xml: path.join(INSTALL, "Data-1.13", "Ja2Set.dat.xml"),
   tileset: "0",
   demo: "1",
 });

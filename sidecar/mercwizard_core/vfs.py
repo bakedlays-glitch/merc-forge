@@ -150,6 +150,24 @@ class VfsLayout:
                 return p
         return None
 
+    @staticmethod
+    def _reject_unsafe_rel(rel_path: str) -> None:
+        """Guard the VFS path-join boundary.
+
+        A resource path handed to `resolve_*` must stay *relative* and must
+        not climb out of the layer root — every legitimate caller passes a
+        hardcoded table/INI name (e.g. ``TableData/Items/Items.xml``). This
+        rejects an absolute path (POSIX ``/x`` or Windows ``C:\\x``) or any
+        ``..`` segment before it reaches ``loc.path / rel``, so a future
+        caller that forwards an attacker-controlled name can't escape the
+        install tree (defense-in-depth — see the mapforge confinement guard).
+        """
+        norm = rel_path.replace("\\", "/")
+        if norm[:1] == "/" or re.match(r"^[A-Za-z]:", norm):
+            raise ValueError(f"unsafe absolute resource path: {rel_path!r}")
+        if any(part == ".." for part in norm.split("/")):
+            raise ValueError(f"unsafe '..' in resource path: {rel_path!r}")
+
     def resolve_read(self, rel_path: str) -> Optional[Path]:
         """Find the highest-priority existing copy of `rel_path` in the chain.
 
@@ -159,6 +177,7 @@ class VfsLayout:
         `rel_path` is forward-slash separated and case-insensitive on Windows
         (which is how JA2 itself does lookups).
         """
+        self._reject_unsafe_rel(rel_path)
         rel = rel_path.replace("\\", "/")
         for profile in reversed(self.profiles):
             for loc in profile.locations:
@@ -190,6 +209,7 @@ class VfsLayout:
         the last line of defense — the install-scan layer already
         surfaces `layout.errors` in the install validation report.
         """
+        self._reject_unsafe_rel(rel_path)
         if self.errors and self.is_legacy and self.vfs_config_path is None:
             # Errors present AND we're in fallback mode (no VFS config
             # successfully parsed). The user's broken config was meant to
@@ -243,6 +263,7 @@ class VfsLayout:
         (legacy/pre-VFS installs) — callers should surface this as a
         read-only install rather than guess a location.
         """
+        self._reject_unsafe_rel(rel_path)
         profile = self.engine_write_profile()
         if profile is None:
             raise VfsConfigError(

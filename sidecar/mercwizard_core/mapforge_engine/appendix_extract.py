@@ -1,4 +1,4 @@
-﻿"""Read-only extraction of positioned appendix entities for the MapForge
+"""Read-only extraction of positioned appendix entities for the MapForge
 tactical overlay. Walks the appendix region (never writes), returns entity
 lists keyed by tile position. Scope: items, entry points, exit grids, world
 lights, soldiers (incl. legacy 1040-byte detailed-placement skip), doors, and

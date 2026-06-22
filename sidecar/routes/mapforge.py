@@ -2245,8 +2245,46 @@ def _require_renderer() -> None:
         )
 
 
+def _confine_install_path(raw: str) -> Path:
+    """Resolve `raw` and require it to live inside the ACTIVE install tree.
+
+    MapForge .dat/.xml paths arrive as free-form strings over the
+    (loopback, token-gated) HTTP API. Without containment, a crafted path
+    turns these read/write endpoints into an arbitrary file read/overwrite
+    primitive (e.g. dropping a .dat into the Startup folder, or clobbering
+    a map in a different install). To stop a confused-deputy / CORS-slip
+    from reaching outside the install, every path is resolved (collapsing
+    any ``..``) and checked to be under the active install root.
+
+    Requires an active install — the normal app state, since a sector
+    can't be opened without one. Raises 409 when none is active, 403 when
+    the resolved path escapes the install tree.
+    """
+    root = _active_install_root()
+    if root is None:
+        raise HTTPException(409, {
+            "error": "NO_ACTIVE_INSTALL",
+            "message": ("No active install is selected, so MercForge can't "
+                        "validate this path. Select an install first."),
+        })
+    try:
+        resolved = Path(raw).resolve()
+        root_resolved = root.resolve()
+    except (OSError, ValueError) as e:
+        raise HTTPException(400, {"error": "BAD_PATH",
+            "message": f"{type(e).__name__}: {e}"})
+    if not resolved.is_relative_to(root_resolved):
+        raise HTTPException(403, {
+            "error": "PATH_NOT_ALLOWED",
+            "message": ("Path is outside the active install directory. "
+                        "MercForge only edits maps inside the selected "
+                        "install."),
+        })
+    return resolved
+
+
 def _validate_path(raw: str, suffix: str | None = None) -> Path:
-    p = Path(raw)
+    p = _confine_install_path(raw)
     if not p.is_file():
         raise HTTPException(
             status_code=404,
@@ -3349,7 +3387,7 @@ def new_sector(body: NewSectorBody):
     correct freshly-created state — the in-game editor recomputes scroll
     bounds + entry points on its first save; the bytes load fine."""
     _require_renderer()
-    p = Path(body.dat_path)
+    p = _confine_install_path(body.dat_path)
     if p.suffix.lower() != ".dat":
         raise HTTPException(400, {"error": "BAD_SUFFIX",
             "message": f"Expected .dat, got {p.suffix or '(none)'}"})
@@ -3409,7 +3447,7 @@ def save_copy_as(session_id: str, body: SaveCopyAsBody):
     loose path the user chose, not back into the archive."""
     _require_renderer()
     sess = _session_store.get(session_id)
-    dest = Path(body.dat_path)
+    dest = _confine_install_path(body.dat_path)
     if dest.suffix.lower() != ".dat":
         raise HTTPException(400, {"error": "BAD_SUFFIX",
             "message": f"Expected .dat, got {dest.suffix or '(none)'}"})

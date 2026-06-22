@@ -119,7 +119,20 @@ def parse_tolerant(path: Path) -> etree._ElementTree:
 
     Assumes `path` exists — callers keep their own not-found handling.
     """
-    parser = etree.XMLParser(remove_blank_text=False, strip_cdata=False)
+    # Harden against XXE / entity-expansion (billion-laughs) DoS: these
+    # writers parse XML that lives in the user's install, but a hostile or
+    # corrupt table shouldn't be able to read arbitrary local files or blow
+    # up memory. resolve_entities=False neutralizes external+nested entities,
+    # no_network blocks external DTD/entity fetches, load_dtd=False skips DTD
+    # processing, huge_tree=False keeps lxml's built-in expansion caps on.
+    parser = etree.XMLParser(
+        remove_blank_text=False,
+        strip_cdata=False,
+        resolve_entities=False,
+        no_network=True,
+        load_dtd=False,
+        huge_tree=False,
+    )
     data = path.read_bytes()
     if data.startswith(b"\xef\xbb\xbf"):
         data = data[3:]

@@ -13,11 +13,22 @@
  * install is read-only input for the tileset art.
  *
  * Verb reference: README.md in this directory.
+ *
+ * Paths: the .dat is the in-repo scratch test copy of C6; the install
+ * (read-only tileset art) comes from JA2_INSTALL, defaulting to a generic
+ * placeholder so this rig carries no machine-specific path.
  */
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REPO = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const INSTALL = process.env.JA2_INSTALL || "C:/Jagged Alliance 2/<your-1.13-install>";
+
 export default {
   viewport: { width: 1920, height: 1080 },
-  dat: "C:/AI Projects/The Wasteland/MercWizard2/scratch/clifftest/C6_test.DAT",
-  xml: "C:/Jagged Alliance 2/Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy/Data-1.13/Ja2Set.dat.xml",
+  dat: path.join(REPO, "scratch", "clifftest", "C6_test.DAT"),
+  xml: path.join(INSTALL, "Data-1.13", "Ja2Set.dat.xml"),
   steps: [
     // ── OBS sync + title ────────────────────────────────────────────
     ["countdown", 3],

@@ -1,5 +1,5 @@
 {
- "provenance": "build_ini_schemas.py 2026-06-07 | data=C:\\Jagged Alliance 2\\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy\\Data-1.13 | engine=C:\\AI Projects\\The Wasteland\\Visual Studio Root",
+ "provenance": "build_ini_schemas.py 2026-06-07 | data=Data-1.13 | engine=Visual Studio Root",
  "schemas": [
   {
    "ini_file": "Ja2.ini",

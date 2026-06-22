@@ -451,9 +451,13 @@ def main() -> int:
         curated_all = json.loads(curated_path.read_text(encoding="utf-8"))
 
     from datetime import date
+    # Record only the directory NAMES, never the absolute paths — these
+    # schemas ship inside the public app, and the full paths would leak the
+    # developer's machine layout (drive, user dir, proprietary engine-source
+    # tree location).
     provenance = (
         f"build_ini_schemas.py {date.today().isoformat()} | "
-        f"data={args.data_dir} | engine={args.engine_src}"
+        f"data={args.data_dir.name} | engine={args.engine_src.name}"
     )
 
     print("Mining engine loader metadata...")
