@@ -32,3 +32,42 @@ def test_weapon_family_has_key_stats() -> None:
 def test_utf16_len_counts_code_units() -> None:
     assert s.utf16_len("abc") == 3
     assert s.utf16_len("\U0001F600") == 2  # emoji = 2 UTF-16 units
+
+def test_resolve_category_partition() -> None:
+    assert s.resolve_category(0x2) == "guns"        # GUN
+    assert s.resolve_category(0x10) == "guns"        # LAUNCHER groups with guns
+    assert s.resolve_category(0x400) == "ammo"
+    assert s.resolve_category(0x100) == "explosives" # GRENADE
+    assert s.resolve_category(0x4) == "melee"        # BLADE
+    assert s.resolve_category(0x80) == "melee"       # PUNCH
+    assert s.resolve_category(0x40) == "melee"       # THROWN
+    assert s.resolve_category(0x2000) == "kits"      # KIT
+    assert s.resolve_category(0x1000) == "kits"      # MEDKIT
+    assert s.resolve_category(0x20000) == "lbe"      # LBEGEAR
+    assert s.resolve_category(0x800) == "armor"      # ARMOUR
+    assert s.resolve_category(0x8000) == "armor"     # FACE
+    assert s.resolve_category(0x10000) == "misc"     # KEY
+    assert s.resolve_category(0x1) == "misc"         # NONE
+    assert {c.key for c in s.CATEGORIES} == {
+        "guns","ammo","explosives","melee","kits","lbe","armor","misc"}
+
+def test_weapon_family_includes_thrown_punch() -> None:
+    for cls in (0x40, 0x80, 0x4, 0x8, 0x10, 0x2):  # THROWN/PUNCH/BLADE/THROWKNIFE/LAUNCHER/GUN
+        assert s.resolve_family(cls).record_tag == "WEAPON"
+
+
+def test_schema_payload_includes_help_for_verified_fields() -> None:
+    payload = {e["key"]: e for e in s.common_schema_payload()}
+    assert payload["ubCoolness"].get("help")
+    # every field that declares a unit also declares help (no orphan units)
+    for e in s.common_schema_payload():
+        if e.get("unit"):
+            assert e.get("help")
+
+
+def test_class_schema_help_and_units() -> None:
+    fam = s.resolve_family(0x2)  # Weapon family
+    payload = {e["key"]: e for e in s.class_schema_payload(fam)}
+    assert payload["ubMagSize"].get("unit") == "rounds" and payload["ubMagSize"].get("help")
+    assert payload["ubReadyTime"].get("unit") == "AP"
+    assert "NCTH" in payload["nAccuracy"]["help"]  # verified-cited definition

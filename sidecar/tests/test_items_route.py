@@ -34,6 +34,19 @@ WEAPONS_SAMPLE = (
     "</WEAPONLIST>"
 )
 
+AMMO_STRINGS_SAMPLE = (
+    "<AMMOLIST>\r\n"
+    "\t<AMMO>\r\n\t\t<uiIndex>0</uiIndex>\r\n\t\t<AmmoCaliber>0</AmmoCaliber>\r\n\t</AMMO>\r\n"
+    "\t<AMMO>\r\n\t\t<uiIndex>2</uiIndex>\r\n\t\t<AmmoCaliber>9x19mm</AmmoCaliber>\r\n\t</AMMO>\r\n"
+    "</AMMOLIST>"
+)
+
+AMMO_TYPES_SAMPLE = (
+    "<AMMOTYPELIST>\r\n"
+    "\t<AMMOTYPE>\r\n\t\t<uiIndex>0</uiIndex>\r\n\t\t<name>Ball</name>\r\n\t</AMMOTYPE>\r\n"
+    "</AMMOTYPELIST>"
+)
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -65,6 +78,8 @@ def active_items_install(client: TestClient, tmp_path: Path) -> dict:
     (table / "AIMAvailability.xml").write_text("<AIM_AVAILABLES />")
     (items_dir / "Items.xml").write_bytes(ITEMS_SAMPLE.encode("utf-8"))
     (items_dir / "Weapons.xml").write_bytes(WEAPONS_SAMPLE.encode("utf-8"))
+    (items_dir / "AmmoStrings.xml").write_bytes(AMMO_STRINGS_SAMPLE.encode("utf-8"))
+    (items_dir / "AmmoTypes.xml").write_bytes(AMMO_TYPES_SAMPLE.encode("utf-8"))
     resp = client.post("/api/v1/installs", json={"path": str(root)})
     assert resp.status_code == 200, resp.text
     info = resp.json()
@@ -132,3 +147,24 @@ def test_bigitems_catalog_lists_graphics(client: TestClient, active_items_instal
     assert r.status_code == 200, r.text
     graphics = r.json()["graphics"]
     assert any(g["type"] == 0 and g["num"] == 24 for g in graphics)
+
+
+def test_items_payload_has_category_and_counts(client, active_items_install):
+    body = client.get("/api/v1/items").json()
+    assert any(c["key"] == "guns" and c["count"] >= 1 for c in body["categories"])
+    glock = next(i for i in body["items"] if i["ui_index"] == 1)
+    assert glock["category"] == "guns"
+
+
+def test_item_detail_has_enums_and_class_label(client, active_items_install):
+    body = client.get("/api/v1/items/1").json()
+    assert "WEAPON" not in body["class_label"]  # decoded human bits, e.g. "GUN"
+    assert "GUN" in body["class_label"]
+    assert "ubCalibre" in body["enum_options"]   # gun has calibre enum
+
+
+def test_put_rejects_class_change(client, active_items_install):
+    r = client.put("/api/v1/items/1", json={
+        "strings": {}, "ints": {"usItemClass": 2048}, "class_fields": {}})
+    assert r.status_code == 400
+    assert r.json()["detail"]["error"] == "CLASS_IMMUTABLE"

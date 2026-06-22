@@ -2100,6 +2100,7 @@ export interface ItemSummary {
   graphic_type: number;
   graphic_num: number;
   class_index: number;
+  category: string;
 }
 
 export interface ItemFieldSpec {
@@ -2112,6 +2113,8 @@ export interface ItemFieldSpec {
   cap?: number;
   advanced?: boolean;
   note?: string;
+  help?: string;
+  unit?: string;
 }
 
 export interface ItemsResponse {
@@ -2120,6 +2123,7 @@ export interface ItemsResponse {
   install_id: string;
   file_present: boolean;
   writable: boolean;
+  categories: { key: string; label: string; count: number }[];
 }
 
 export interface ItemDetail {
@@ -2130,6 +2134,8 @@ export interface ItemDetail {
   family: string | null;
   class_fields: Record<string, number> | null;
   class_schema: ItemFieldSpec[] | null;
+  enum_options: Record<string, { value: number; label: string }[]>;
+  class_label: string;
 }
 
 export interface ItemUpdatePayload {

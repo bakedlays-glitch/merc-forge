@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
+from mercwizard_core import item_enums
 from mercwizard_core import items_schema as schema
 from mercwizard_core.backup import snapshot
 from mercwizard_core.cross_lock import cross_process_install_lock
@@ -124,8 +125,25 @@ def list_items(install_id: Optional[str] = Query(default=None)) -> dict:
     write_path = _items_path(info, "Items.xml", for_write=True)
     writable = bool(write_path and write_path.exists())
     rows = ix.read_index(read_path) if file_present else []
+
+    # Attach category key to each item summary and tally counts.
+    counts: dict[str, int] = {cat.key: 0 for cat in schema.CATEGORIES}
+    items_out = []
+    for r in rows:
+        cat_key = schema.resolve_category(r.item_class)
+        counts[cat_key] = counts.get(cat_key, 0) + 1
+        d = r.__dict__.copy()
+        d["category"] = cat_key
+        items_out.append(d)
+
+    categories = [
+        {"key": cat.key, "label": cat.label, "count": counts.get(cat.key, 0)}
+        for cat in schema.CATEGORIES
+    ]
+
     return {
-        "items": [r.__dict__ for r in rows],
+        "items": items_out,
+        "categories": categories,
         "common_schema": schema.common_schema_payload(),
         "install_id": info.id,
         "file_present": file_present,
@@ -140,7 +158,10 @@ def get_item(
 ) -> dict:
     """Return common + per-class fields for one item, plus the class schema."""
     info = _resolve_install(install_id)
-    read_path = _items_path(info, "Items.xml")
+    # Build the install context ONCE — make_install_context is a ~50-100ms call
+    # (VFS/flavor probes); reuse it for the Items path, sister path, and enums.
+    ctx = make_install_context(info.path)
+    read_path = ctx.items_table_path("Items.xml")
     if not read_path or not read_path.exists():
         raise HTTPException(status_code=400, detail={
             "error": "ITEMS_NOT_PRESENT",
@@ -162,18 +183,34 @@ def get_item(
     if family is not None:
         family_name = family.name
         class_schema_out = schema.class_schema_payload(family)
-        sister_path = _items_path(info, family.filename)
+        sister_path = ctx.items_table_path(family.filename)
         row = cx.read_row(sister_path, family.record_tag, detail["class_index"]) \
             if sister_path else None
         if row is not None:
             wanted = {f.key for f in family.fields}
             class_fields = {k: v for k, v in row.items() if k in wanted}
 
+    # Decoded class label (human bit-names).
+    class_label = schema.decode_class(item_class)
+
+    # Per-field enum options for all coded fields in common + class schema
+    # (reuses the ctx built above).
+    enum_options: dict[str, list] = {}
+    all_field_keys = list(schema.COMMON_INT_KEYS)
+    if family is not None:
+        all_field_keys += [f.key for f in family.fields]
+    for fk in all_field_keys:
+        opts = item_enums.enum_options_for(fk, ctx)
+        if opts is not None:
+            enum_options[fk] = opts
+
     return {
         **detail,
         "family": family_name,
         "class_fields": class_fields,
         "class_schema": class_schema_out,
+        "class_label": class_label,
+        "enum_options": enum_options,
     }
 
 
@@ -208,7 +245,16 @@ def update_item(
         detail = ix.read_item(items_path, ui_index)
     except ix.ItemError as e:
         raise HTTPException(status_code=404, detail={"error": e.code, "message": e.message})
-    eff_class = clean_int.get("usItemClass", detail["ints"].get("usItemClass", 0))
+
+    # CLASS_IMMUTABLE guard — must run before acquiring the lock.
+    stored_class = detail["ints"].get("usItemClass", 0)
+    if "usItemClass" in clean_int and clean_int["usItemClass"] != stored_class:
+        raise HTTPException(status_code=400, detail={
+            "error": "CLASS_IMMUTABLE",
+            "message": "Item class can't be changed here.",
+        })
+
+    eff_class = clean_int.get("usItemClass", stored_class)
     family = schema.resolve_family(eff_class)
     clean_class, class_clamps = _validate_class(family, body.class_fields)
     clamps += class_clamps

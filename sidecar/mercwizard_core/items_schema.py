@@ -41,26 +41,31 @@ class FieldSpec:
     note: Optional[str] = None
 
 
-G_NAMES = "Names & description"
-G_CORE = "Core"
+# Form sections (the frontend renders each as a collapsible; "Advanced" is
+# collapsed by default).
+G_IDENTITY = "Identity"
+G_ECON = "Economy"
 G_GRAPHIC = "Graphic"
+G_ADV = "Advanced"
 
 COMMON_FIELDS: tuple[FieldSpec, ...] = (
-    FieldSpec("szItemName", "Name", G_NAMES, "str", cap=NAME_MAX),
-    FieldSpec("szLongItemName", "Long name", G_NAMES, "str", cap=LONG_NAME_MAX),
-    FieldSpec("szItemDesc", "Description", G_NAMES, "str", cap=DESC_MAX),
-    FieldSpec("szBRName", "BR name", G_NAMES, "str", cap=BR_NAME_MAX),
-    FieldSpec("szBRDesc", "BR description", G_NAMES, "str", cap=BR_DESC_MAX),
-    FieldSpec("usItemClass", "Item class (bitfield)", G_CORE, "int", US_MIN, US_MAX,
-              advanced=True, note="Bitfield (IC_*). Changing this changes which "
-              "sister-file stats apply; edit with care."),
-    FieldSpec("usPrice", "Price", G_CORE, "int", US_MIN, US_MAX),
-    FieldSpec("ubCoolness", "Coolness", G_CORE, "int", 0, 10),
-    FieldSpec("ubWeight", "Weight", G_CORE, "int", UB_MIN, UB_MAX),
-    FieldSpec("ItemSize", "Item size", G_CORE, "int", UB_MIN, UB_MAX),
-    FieldSpec("ubPerPocket", "Per pocket", G_CORE, "int", UB_MIN, UB_MAX),
-    FieldSpec("bReliability", "Reliability", G_CORE, "int", B_MIN, B_MAX),
-    FieldSpec("bRepairEase", "Repair ease", G_CORE, "int", B_MIN, B_MAX),
+    FieldSpec("szItemName", "Name", G_IDENTITY, "str", cap=NAME_MAX),
+    FieldSpec("szLongItemName", "Long name", G_IDENTITY, "str", cap=LONG_NAME_MAX),
+    FieldSpec("szItemDesc", "Description", G_IDENTITY, "str", cap=DESC_MAX),
+    FieldSpec("szBRName", "BR name", G_IDENTITY, "str", cap=BR_NAME_MAX),
+    FieldSpec("szBRDesc", "BR description", G_IDENTITY, "str", cap=BR_DESC_MAX),
+    # usItemClass is rendered as a read-only ClassBadge, never an input — its
+    # group is irrelevant (the form excludes it from the field loop).
+    FieldSpec("usItemClass", "Item class (bitfield)", G_ADV, "int", US_MIN, US_MAX,
+              advanced=True, note="Bitfield (IC_*). Read-only here; changing it "
+              "would re-point sister-file stats."),
+    FieldSpec("usPrice", "Price", G_ECON, "int", US_MIN, US_MAX),
+    FieldSpec("ubCoolness", "Coolness", G_ECON, "int", 0, 10),
+    FieldSpec("ubWeight", "Weight", G_ECON, "int", UB_MIN, UB_MAX),
+    FieldSpec("ItemSize", "Item size", G_ECON, "int", UB_MIN, UB_MAX),
+    FieldSpec("ubPerPocket", "Per pocket", G_ECON, "int", UB_MIN, UB_MAX),
+    FieldSpec("bReliability", "Reliability", G_ADV, "int", B_MIN, B_MAX),
+    FieldSpec("bRepairEase", "Repair ease", G_ADV, "int", B_MIN, B_MAX),
     FieldSpec("ubGraphicType", "Graphic type", G_GRAPHIC, "int", UB_MIN, UB_MAX,
               advanced=True),
     FieldSpec("ubGraphicNum", "Graphic number", G_GRAPHIC, "int", UB_MIN, UB_MAX,
@@ -119,7 +124,7 @@ _EXPLOSIVE_FIELDS = (
 
 # IC_* masks. Order matters: first match wins (weapon families share no bits
 # with the others, so simple priority is safe).
-_IC_WEAPON = 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x80  # GUN|BLADE|THROWKNIFE|LAUNCHER|TENTACLES|PUNCH
+_IC_WEAPON = 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80  # GUN|BLADE|THROWKNIFE|LAUNCHER|TENTACLES|THROWN|PUNCH
 _IC_AMMO = 0x400
 _IC_ARMOUR = 0x800 | 0x8000  # ARMOUR|FACE
 _IC_EXPLOSV = 0x100 | 0x200  # GRENADE|BOMB
@@ -139,6 +144,33 @@ def resolve_family(us_item_class: int) -> Optional[ClassFamily]:
     return None
 
 
+@dataclass(frozen=True)
+class Category:
+    key: str
+    label: str
+    mask: int
+
+
+# IC_MAPFILTER_* (Item Types.h:692-700), priority order. Misc is the catch-all.
+CATEGORIES: tuple[Category, ...] = (
+    Category("guns", "Guns", 0x2 | 0x10),                              # GUN|LAUNCHER
+    Category("ammo", "Ammo", 0x400),                                   # AMMO
+    Category("explosives", "Explosives", 0x100 | 0x200),               # GRENADE|BOMB
+    Category("melee", "Melee", 0x4 | 0x80 | 0x40 | 0x8),              # BLADE|PUNCH|THROWN|THROWING_KNIFE
+    Category("kits", "Kits", 0x2000 | 0x1000 | 0x4000),               # KIT|MEDKIT|APPLIABLE
+    Category("lbe", "LBE", 0x20000 | 0x40000),                        # LBEGEAR|BELTCLIP
+    Category("armor", "Armor", 0x800 | 0x8000),                       # ARMOUR|FACE
+    Category("misc", "Misc", 0x20 | 0x10000 | 0x10000000 | 0x20000000 | 0x1),  # TENTACLES|KEY|MISC|MONEY|NONE
+)
+
+
+def resolve_category(us_item_class: int) -> str:
+    for cat in CATEGORIES:
+        if us_item_class & cat.mask:
+            return cat.key
+    return "misc"
+
+
 def get_common_spec(key: str) -> Optional[FieldSpec]:
     return _COMMON_BY_KEY.get(key)
 
@@ -155,6 +187,58 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+# Verified field definitions (help) + units. Each entry is sourced; entries with
+# a "# src:" note cite the engine/XML evidence. Risky units we could NOT verify
+# (e.g. usRange in tiles, ubWeight unit) are intentionally LEFT OUT rather than
+# guessed — wrong definitions are worse than none. Weapon-stat citations come
+# from the inline comments in Data-1.13/TableData/Items/Weapons.xml.
+_FIELD_DOCS: dict[str, dict[str, str]] = {
+    # ── Common (Items.xml) ──
+    "szItemName": {"help": "Short item name shown in inventory."},
+    "szLongItemName": {"help": "Full item name shown in tooltips and shops."},
+    "szItemDesc": {"help": "Description shown in the item examine panel."},
+    "szBRName": {"help": "Item name as it appears in Bobby Ray's online store."},
+    "szBRDesc": {"help": "Item description in Bobby Ray's online store."},
+    "usPrice": {"help": "Base item value used for buy/sell/repair pricing."},
+    "ubCoolness": {"help": "Rarity/'coolness' tier; higher items appear later and "
+                           "are harder to find. Editor range 0–10."},
+    "ubWeight": {"help": "Item weight; adds to a merc's carried burden."},
+    "ItemSize": {"help": "Inventory size class of the item."},
+    "ubPerPocket": {"help": "How many of this item stack in a single inventory slot."},
+    "bReliability": {"help": "Reliability modifier; higher resists jamming and "
+                             "slows condition loss."},
+    "bRepairEase": {"help": "Repair-ease modifier; higher is faster/cheaper to repair."},
+    # ── Weapon (Weapons.xml) ──
+    "ubImpact": {"help": "Base damage the weapon deals per hit."},
+    "ubDeadliness": {"help": "Affects a merc's affinity toward the weapon (not raw "
+                             "damage)."},  # src: Weapons.xml ubDeadliness comment
+    "bAccuracy": {"help": "Accuracy bonus used by the Old chance-to-hit system "
+                          "(OCTH)."},      # src: Weapons.xml bAccuracy comment
+    "nAccuracy": {"help": "Accuracy value used by the New chance-to-hit system "
+                          "(NCTH)."},      # src: Weapons.xml nAccuracy comment
+    "usRange": {"help": "Effective range of the weapon (internal range units)."},
+    "ubMagSize": {"help": "Default magazine capacity.", "unit": "rounds"},
+    "ubReadyTime": {"help": "Action-point cost to ready the weapon.", "unit": "AP"},
+    "APsToReload": {"help": "Action-point cost to reload.", "unit": "AP"},
+    "ubShotsPer4Turns": {"help": "Rate of fire, expressed as shots per 4 turns."},
+    "ubShotsPerBurst": {"help": "Rounds fired in a single burst."},
+    "ubBulletSpeed": {"help": "Projectile travel speed."},
+    # ── Armour (Armours.xml) ──
+    "ubProtection": {"help": "Amount of incoming damage this armour absorbs."},
+    "ubCoverage": {"help": "Portion of the body this armour protects.", "unit": "%"},
+    "ubDegradePercent": {"help": "How quickly protection degrades as the armour "
+                                 "takes damage.", "unit": "%"},
+    # ── Magazine (Magazines.xml) ──
+    # ubMagSize handled above (shared key).
+    # ── Explosive (Explosives.xml) ──
+    "ubDamage": {"help": "Direct explosive damage."},
+    "ubStunDamage": {"help": "Stun/breath damage dealt by the blast."},
+    "ubRadius": {"help": "Blast radius of the explosion."},
+    "ubVolume": {"help": "Noise volume produced by the explosion."},
+    "ubVolatility": {"help": "Chance the item detonates when damaged or dropped."},
+}
+
+
 def _payload(specs) -> list[dict]:
     out = []
     for s in specs:
@@ -167,6 +251,11 @@ def _payload(specs) -> list[dict]:
             e["advanced"] = True
         if s.note:
             e["note"] = s.note
+        doc = _FIELD_DOCS.get(s.key)
+        if doc:
+            e["help"] = doc["help"]
+            if doc.get("unit"):
+                e["unit"] = doc["unit"]
         out.append(e)
     return out
 
@@ -177,3 +266,39 @@ def common_schema_payload() -> list[dict]:
 
 def class_schema_payload(family: ClassFamily) -> list[dict]:
     return _payload(family.fields)
+
+
+# IC_* bit → human name, sourced from Tactical/Item Types.h:655-682
+_IC_BIT_NAMES: tuple[tuple[int, str], ...] = (
+    (0x1,        "NONE"),
+    (0x2,        "GUN"),
+    (0x4,        "BLADE"),
+    (0x8,        "THROWKNIFE"),
+    (0x10,       "LAUNCHER"),
+    (0x20,       "TENTACLES"),
+    (0x40,       "THROWN"),
+    (0x80,       "PUNCH"),
+    (0x100,      "GRENADE"),
+    (0x200,      "BOMB"),
+    (0x400,      "AMMO"),
+    (0x800,      "ARMOUR"),
+    (0x1000,     "MEDKIT"),
+    (0x2000,     "KIT"),
+    (0x4000,     "APPLIABLE"),
+    (0x8000,     "FACE"),
+    (0x10000,    "KEY"),
+    (0x20000,    "LBEGEAR"),
+    (0x40000,    "BELTCLIP"),
+    (0x10000000, "MONEY"),
+    (0x20000000, "MISC"),
+)
+
+
+def decode_class(us_item_class: int) -> str:
+    """Return a human-readable bit-name string for a usItemClass value.
+
+    E.g. decode_class(2) → "GUN", decode_class(0x800|0x8000) → "ARMOUR | FACE".
+    Returns "NONE" when the value is 0 or no known bits are set.
+    """
+    names = [name for bit, name in _IC_BIT_NAMES if us_item_class & bit]
+    return " | ".join(names) if names else "NONE"
