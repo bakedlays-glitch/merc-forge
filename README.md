@@ -1,8 +1,8 @@
 # Merc Forge
 
-A standalone Windows toolkit for the Jagged Alliance 2 v1.13 community — vanilla, AIMNAS, Wildfire, The Wasteland, or anything else built on the 1.13 codebase. It edits your install's own data files directly: no Python, no Node, no hand-edited XML, no hex-patching EDT files, no memorizing the documented AIMBIOS off-by-one bug.
+A standalone Windows toolkit for the Jagged Alliance 2 community — tested on vanilla, AIMNAS, Wildfire etc.
 
-Six editors under one shell. The tag on each says how much real-world mileage it has, not how finished the code looks:
+There are currently 6 modules and they all work, but I built these tools to help me make my mod and some have been tested more than others.
 
 - **Map Forge** *(used regularly — the most proven part of the app)* — open any 1.13 sector `.dat`, paint tiles with an iso-faithful renderer, place multi-tile structures, run generators and validators, and save back to disk with crash-recovery autosave.
 - **Merc Wizard** *(partly exercised)* — create, edit, move, duplicate, delete, import, and export mercs (including recruitable RPCs) across installs. Creating and editing a merc has real mileage; cross-install move, RPC authoring, and FaceGear overlay authoring do not.
