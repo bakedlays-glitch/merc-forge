@@ -11,6 +11,51 @@ from mercwizard_core.install_detect import InstallInfo
 from routes.state import SidecarState, get_state
 
 
+def test_voice_lab_recovery_runs_during_app_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recovery is completed before the API begins taking Voice Lab writes."""
+    calls: list[object] = []
+    monkeypatch.setattr("main.recover_registered_installs", lambda state: calls.append(state))
+    from main import create_app
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app()):
+        assert calls == [get_state()]
+
+
+def test_voice_lab_startup_recovery_does_not_require_ffmpeg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional audio authoring setup must not prevent the sidecar from booting."""
+    from mercwizard_core.voice_lab.service import recover_registered_installs
+
+    root = _make_fake_install(tmp_path, "recovery_without_ffmpeg")
+    info = InstallInfo(
+        id="recovery-without-ffmpeg",
+        path=root,
+        exe_path=root / "JA2.exe",
+        data_root=root / "Data-1.13",
+        valid=True,
+    )
+
+    class StartupState:
+        write_lock = threading.RLock()
+
+        def list_installs(self):
+            return [info]
+
+        def get_install(self, install_id: str):
+            return info if install_id == info.id else None
+
+        def get_settings(self):
+            return {}
+
+    monkeypatch.setattr(
+        "mercwizard_core.voice_lab.service.game_running", lambda executable: False,
+    )
+
+    recover_registered_installs(StartupState())
+
+
 @pytest.fixture(autouse=True)
 def _reset_singleton():
     """Wipe the module-level singleton between tests so state doesn't bleed."""

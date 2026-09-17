@@ -150,7 +150,7 @@ def _format_value(field_name: str, value: object) -> str:
         "True" — wrong for JA2's XML which expects "1"/"0".
       - The day someone re-types a field as `bool` thinking it's
         cleaner, this branch keeps the write correct.
-    Bug-review #100 keeps it as documented-intent rather than deleting
+    It stays as documented intent rather than being deleted
     as dead code.
     """
     if isinstance(value, bool):
@@ -181,7 +181,7 @@ import threading
 
 _PARSE_CACHE: dict[tuple[str, int, int], dict[int, dict[str, str]]] = {}
 _PARSE_CACHE_MAX = 4
-# Lock added 2026-05-25: FastAPI runs handlers in a threadpool. The
+# Lock added: FastAPI runs handlers in a threadpool. The
 # 16-cell roster grid mounts 16 parallel reads — without the lock, two
 # threads racing on `len() >= MAX → next(iter) → del` can hit a KeyError
 # when one thread evicts the entry the other was about to delete.
@@ -478,7 +478,7 @@ def _save_tree(tree: etree._ElementTree, path: Path) -> None:
     coarsen it; same-second writes can collide), a follow-up reader
     would return stale data. Mirrors the explicit eviction that
     aim_availability._save, merc_availability._save, and
-    starting_gear._save already do. Bug-review finding A1/B6/E1.
+    starting_gear._save already do.
     """
     from ._atomic_xml import save_atomic_preserving
     save_atomic_preserving(tree, path)

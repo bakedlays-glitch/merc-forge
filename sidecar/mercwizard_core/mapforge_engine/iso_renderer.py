@@ -99,6 +99,21 @@ LAYER_Y_LIFT = {
 }
 
 
+def sprite_intersects_crop(raw_x: int, raw_y: int, offset_x: int,
+                          offset_y: int, width: int, height: int,
+                          y_lift: int, ix_min: int, iy_min: int,
+                          canvas_width: int, canvas_height: int) -> bool:
+    """Whether a sprite anchored outside a tile crop still paints into it.
+
+    The crop itself stays tile-derived; this tests the actual STI offset and
+    extent so an overhanging awning is retained without widening the room ring.
+    """
+    x = raw_x - ix_min + offset_x
+    y = raw_y - iy_min + offset_y - y_lift
+    return (x < canvas_width and x + width > 0
+            and y < canvas_height and y + height > 0)
+
+
 def load_tileset_xml(xml_path: Path, tileset_index: int) -> dict[int, str]:
     """Slot index -> STI filename for one tileset, with inheritance from
     tileset 0 (the 'GENERIC 1' base) overlaid by the requested tileset.
@@ -343,6 +358,9 @@ class IsoRenderer:
         rows_by_xy: dict[int, list[tuple[int, int]]] = {}
         for tx, ty in tiles_in_region:
             rows_by_xy.setdefault(tx + ty, []).append((tx, ty))
+        spill = self._crop_spill(rx0, ry0, rx1, ry1, cw, ch)
+        for tx, ty in spill["tiles"]:
+            rows_by_xy.setdefault(tx + ty, []).append((tx, ty))
         for k in rows_by_xy:
             rows_by_xy[k].sort(key=lambda c: c[0] - c[1])
         ordered_xy = sorted(rows_by_xy)
@@ -352,15 +370,24 @@ class IsoRenderer:
         if "land" not in skip:
             for xy in ordered_xy:
                 for tx, ty in rows_by_xy[xy]:
-                    self._draw_tile_layer(tx, ty, "land", shadow=False)
+                    in_region = rx0 <= tx <= rx1 and ry0 <= ty <= ry1
+                    self._draw_tile_layer(
+                        tx, ty, "land", shadow=False,
+                        entries=None if in_region else spill["entries"]["land"].get((tx, ty), []))
         if "objs" not in skip:
             for xy in ordered_xy:
                 for tx, ty in rows_by_xy[xy]:
-                    self._draw_tile_layer(tx, ty, "objs", shadow=False)
+                    in_region = rx0 <= tx <= rx1 and ry0 <= ty <= ry1
+                    self._draw_tile_layer(
+                        tx, ty, "objs", shadow=False,
+                        entries=None if in_region else spill["entries"]["objs"].get((tx, ty), []))
         if "shadows" not in skip:
             for xy in ordered_xy:
                 for tx, ty in rows_by_xy[xy]:
-                    self._draw_tile_layer(tx, ty, "shadows", shadow=True)
+                    in_region = rx0 <= tx <= rx1 and ry0 <= ty <= ry1
+                    self._draw_tile_layer(
+                        tx, ty, "shadows", shadow=True,
+                        entries=None if in_region else spill["entries"]["shadows"].get((tx, ty), []))
 
         # PASS 4: STRUCT + ROOF + ONROOF grouped (engine passes 4 levels
         # to one RenderTiles call). For each iso row, level-major within
@@ -373,7 +400,10 @@ class IsoRenderer:
                 row = rows_by_xy[xy]
                 for layer in layers_4:
                     for tx, ty in row:
-                        self._draw_tile_layer(tx, ty, layer, shadow=False)
+                        in_region = rx0 <= tx <= rx1 and ry0 <= ty <= ry1
+                        self._draw_tile_layer(
+                            tx, ty, layer, shadow=False,
+                            entries=None if in_region else spill["entries"][layer].get((tx, ty), []))
 
         return self._cv
 
@@ -394,8 +424,51 @@ class IsoRenderer:
             ry1 = min(self.rows - 1, max(ys) + self.ring)
             return rx0, ry0, rx1, ry1, set(tiles)
         if bbox is not None:
-            return bbox[0], bbox[1], bbox[2], bbox[3], set()
+            # Clamp to map bounds + normalize corner order. An unclamped
+            # bbox (e.g. 0,0,10000,10000 over HTTP) allocated a
+            # ~200k-px-wide canvas + 10^8 tile tuples — a MemoryError
+            # that kills the sidecar and every dirty session with it.
+            if len(bbox) != 4:
+                raise ValueError(
+                    f"bbox must be x0,y0,x1,y1 (got {len(bbox)} values)")
+            x0, x1 = sorted((int(bbox[0]), int(bbox[2])))
+            y0, y1 = sorted((int(bbox[1]), int(bbox[3])))
+            rx0 = max(0, min(x0, self.cols - 1))
+            ry0 = max(0, min(y0, self.rows - 1))
+            rx1 = max(0, min(x1, self.cols - 1))
+            ry1 = max(0, min(y1, self.rows - 1))
+            return rx0, ry0, rx1, ry1, set()
         return 0, 0, self.cols - 1, self.rows - 1, set()
+
+    def _crop_spill(self, rx0, ry0, rx1, ry1, canvas_width, canvas_height):
+        """Return projected entries outside the tile crop that overlap it."""
+        layers = ("land", "objs", "shadows", "structs", "roofs", "onroofs")
+        entries = {layer: {} for layer in layers}
+        tiles = set()
+        for ty in range(self.rows):
+            for tx in range(self.cols):
+                if rx0 <= tx <= rx1 and ry0 <= ty <= ry1:
+                    continue
+                gn = ty * self.cols + tx
+                raw_x, raw_y = self._tile_to_pix_raw(tx, ty)
+                for layer in layers:
+                    selected = []
+                    for slot, sub in self.parsed[layer][gn]:
+                        name = self.slot_map.get(slot)
+                        frames = self.sti.get(name) if name else []
+                        frame_idx = sub - 1
+                        if frame_idx < 0 or frame_idx >= len(frames):
+                            continue
+                        pil, ox, oy = frames[frame_idx]
+                        if sprite_intersects_crop(
+                                raw_x, raw_y, ox, oy, pil.width, pil.height,
+                                LAYER_Y_LIFT.get(layer, 0), self._ix_min,
+                                self._iy_min, canvas_width, canvas_height):
+                            selected.append((slot, sub))
+                    if selected:
+                        entries[layer][(tx, ty)] = selected
+                        tiles.add((tx, ty))
+        return {"tiles": tiles, "entries": entries}
 
     def _draw_room_highlight(self, room_tiles, rx0, ry0, rx1, ry1):
         d = ImageDraw.Draw(self._cv)
@@ -410,10 +483,11 @@ class IsoRenderer:
             d.polygon(diamond, fill=(60, 120, 60, 70),
                       outline=(100, 200, 100, 150))
 
-    def _draw_tile_layer(self, tx: int, ty: int, layer: str, shadow: bool):
+    def _draw_tile_layer(self, tx: int, ty: int, layer: str, shadow: bool,
+                         entries=None):
         gn = ty * self.cols + tx
         y_lift = LAYER_Y_LIFT.get(layer, 0)
-        for slot, sub in self.parsed[layer][gn]:
+        for slot, sub in (entries if entries is not None else self.parsed[layer][gn]):
             self._composite(slot, sub, tx, ty, shadow, y_lift=y_lift)
 
     def _composite(self, slot: int, sub: int, tx: int, ty: int,

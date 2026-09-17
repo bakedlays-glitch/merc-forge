@@ -30,8 +30,10 @@ String caps (CHAR16 arrays, so the limit is UTF-16 code units, not Python len):
 """
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 # ── Engine constants ────────────────────────────────────────────────────────
 NUM_BACKGROUND = 500          # zBackground[] size — Interface.h
@@ -59,6 +61,7 @@ class FieldSpec:
     cast: str = "INT16"     # "INT8" | "INT16" — documentation of the load cast
     options: Optional[tuple[tuple[int, str], ...]] = None  # for kind == "enum"
     note: Optional[str] = None  # special semantics surfaced in the UI
+    # `help` is not stored on the spec; see `_FIELD_DOCS` (same split as items_schema).
 
 
 # Group labels (display order follows first appearance below)
@@ -197,6 +200,83 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec("alt_impcreation", "Alternate IMP creation", G_FLAGS, "flag", 0, 1),
 )
 
+# Glossary ids the frontend FieldHelp can open. Keep in sync with
+# frontend/src/lib/glossary.ts. Shared nouns only — one-off field names
+# (Scrounging, Fortify, …) stay as their field tip, not a second card.
+HELP_TERMS: frozenset[str] = frozenset({
+    "AP", "CtH", "IMP", "percent", "flat", "clamp",
+    "Strength", "Agility", "Dexterity", "Wisdom", "Leadership",
+    "Marksmanship", "Mechanical", "Medical", "Explosives",
+    "Breath", "Stealth", "Camo", "Survivalist", "SAM", "NPC",
+    "Experience",
+})
+
+
+def _link_term(term_id: str) -> tuple[str, Callable[[re.Match[str]], str]]:
+    """Case-insensitive word → [[id]] or [[id|originalCase]]."""
+
+    def repl(m: re.Match[str]) -> str:
+        word = m.group(0)
+        return f"[[{term_id}]]" if word == term_id else f"[[{term_id}|{word}]]"
+
+    return (rf"(?i)\b{re.escape(term_id)}\b", repl)
+
+
+WikiRepl = Union[str, Callable[[re.Match[str]], str]]
+
+# Longer phrases first; re-split after each sub so [[AP|APs]] is not
+# then eaten by \\bAP\\b. Stat names before Percent/AP.
+_WIKI_PHRASES: tuple[tuple[str, WikiRepl], ...] = (
+    (r"not a flat add", "not a [[flat|flat add]]"),
+    (r"not a percent", "not a [[percent]]"),
+    (r"saves as", "[[clamp|saves as]]"),
+    (r"chance-to-hit", "[[CtH|chance-to-hit]]"),
+    (r"(?i)\bcamouflage\b", lambda m: f"[[Camo|{m.group(0)}]]"),
+    (r"(?i)\bexperience level\b", lambda m: f"[[Experience|{m.group(0)}]]"),
+    _link_term("Marksmanship"),
+    _link_term("Mechanical"),
+    _link_term("Explosives"),
+    _link_term("Leadership"),
+    _link_term("Survivalist"),
+    _link_term("Dexterity"),
+    _link_term("Agility"),
+    _link_term("Strength"),
+    _link_term("Wisdom"),
+    _link_term("Medical"),
+    _link_term("Stealth"),
+    _link_term("Breath"),
+    _link_term("Experience"),
+    _link_term("Camo"),
+    _link_term("NPC"),
+    _link_term("SAM"),
+    (r"(?i)\bpercent\b", lambda m: f"[[percent|{m.group(0)}]]"),
+    (r"\bFlat\b", "[[flat|Flat]]"),
+    (r"\bAPs\b", "[[AP|APs]]"),
+    (r"\bAP\b", "[[AP]]"),
+    (r"\bCtH\b", "[[CtH]]"),
+    (r"\bIMPs\b", "[[IMP|IMPs]]"),
+    (r"\bIMP\b", "[[IMP]]"),
+)
+
+
+def wikify_help(text: str) -> str:
+    """Wrap glossary terms as [[id]] / [[id|label]] for FieldHelp cross-links.
+
+    Re-splits after each substitution so a newly-inserted [[AP|APs]] is not
+    then matched by the later ``\\bAP\\b`` rule.
+    """
+    for pattern, repl in _WIKI_PHRASES:
+        chunks = re.split(r"(\[\[[^\]]+\]\])", text)
+        out: list[str] = []
+        for chunk in chunks:
+            if chunk.startswith("[["):
+                out.append(chunk)
+            else:
+                out.append(re.sub(pattern, repl, chunk))
+        text = "".join(out)
+    return text
+
+
 # Fast lookups
 _SPEC_BY_KEY: dict[str, FieldSpec] = {s.key: s for s in FIELD_SPECS}
 FLAG_FIELDS: frozenset[str] = frozenset(s.key for s in FIELD_SPECS if s.kind == "flag")
@@ -207,6 +287,113 @@ OWNED_FIELDS: frozenset[str] = frozenset(s.key for s in FIELD_SPECS)
 META_TAGS: frozenset[str] = frozenset({"uiIndex", "szName", "szShortName", "szDescription"})
 # Nested container tags the writer must never treat as flat ints.
 NESTED_TAGS: frozenset[str] = frozenset({"drugtypes", "drugitems"})
+
+# Editor tooltips. Sourced from GetAPBonus / GetBackgroundValue call sites.
+# Each numeric tip states: percent vs flat, the formula, a worked example,
+# and the clamp when a round number like 10 is out of range.
+_FIELD_DOCS: dict[str, str] = {
+    # ── AP: terrain — GetAPBonus() is APs * (100+N)/100, NOT a flat add ──
+    "ap_polar": "Would be % of this turn's APs in polar terrain, but BG_POLAR is not used in-game yet. Range −8..8.",
+    "ap_desert": "Percent of this turn's APs in desert/sand (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_swamp": "Percent of this turn's APs in swamp (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_urban": "Percent of this turn's APs in towns/airports/hospital sites (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_forest": "Percent of this turn's APs in dense/forest (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_plains": "Percent of this turn's APs in plains/farmland (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_river": "Percent of this turn's APs in river sectors (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_coastal": "Percent of this turn's APs in coastal sectors (also stacks with Tropical on tropics SAM sites). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_tropical": "Percent of this turn's APs in tropics (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_mountain": "Percent of this turn's APs in hills/mountains (not a flat add). APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    "ap_height": "Percent of this turn's APs while on a roof/upper level; stacks with the sector-terrain value. APs × (100+N)÷100. Range −8..8; a 10 saves as 8. Example: 100 AP at +8 → 108 AP.",
+    # ── AP: activities ──
+    "ap_swimming": "Percent of water-move AP *cost* (positive = more expensive). Cost × (100+N)÷100. Range −40..40. Example: a 20 AP swim at +10 costs 22 AP.",
+    "ap_fortify": "Percent of the AP *cost* to build fortifications (positive = more expensive). Cost × (100+N)÷100. Range −40..40. Example: a 20 AP fortify at +10 costs 22 AP.",
+    "ap_artillery": "Percent of mortar/artillery AP *cost* (positive = more expensive). Cost × (100+N)÷100. Range −40..40. Example: a 20 AP shot at +10 costs 22 AP.",
+    "ap_inventory": "Percent of inventory-move AP *cost* (positive = more expensive). Cost × (100+N)÷100. Range −40..40. Example: a 10 AP rearrange at +10 costs 11 AP.",
+    "ap_airdrop": "Percent of this turn's APs on the airdrop turn only (not a flat add). APs × (100+N)÷100. Range −40..40. Example: 100 AP at +10 → 110 AP that turn.",
+    "ap_assault": "Percent of this turn's APs while the assault-bonus flag is set (not a flat add). APs × (100+N)÷100. Range −10..10. Example: 100 AP at +10 → 110 AP.",
+    # ── Stats — Effective*() * (100+N)/100 in SkillCheck.cpp ──
+    "agility": "Speed and footwork: more APs each turn (biggest AP stat after experience level), cheaper knife-ready times, better melee. Overweight cuts Agility first. This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Agility 80 at +10 → 88.",
+    "strength": "Muscle: carry more before you slow down, hit harder in melee, throw farther, smash doors, climb, resist sleep darts. Wounds cut it. This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Strength 80 at +10 → 88.",
+    "dexterity": "Dexterity is hands — coordination. More APs, better throws/knives/launchers/melee, less to-hit loss when tired, faster first aid / doctor / repair / lockpick / bombs. Click Dexterity for the full list. This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Dexterity 80 at +10 → 88.",
+    "mechanical": "Tools: lockpicking, electronic locks, unjamming guns, attaching kits, faster repair and gun-cleaning. 0 Mechanical fails those checks. This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Mechanical 80 at +10 → 88.",
+    "medical": "Medicine: faster first aid in combat and faster doctoring on the map (also uses Dexterity, Wisdom, and level). This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Medical 80 at +10 → 88.",
+    "wisdom": "Judgment: better skill checks (lockpick etc.), faster doctoring, better interrogation/recruiting, steadier aim. Drunk cuts it. This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Wisdom 80 at +10 → 88.",
+    "explosives": "Bombs and traps: planting charges, attaching detonators, related explosive checks (Dexterity also helps those rolls). This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Explosives 80 at +10 → 88.",
+    "leadership": "Command: recruiting, interrogation, militia/admin work. Feeling-good drunk raises it 20%. This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Leadership 80 at +10 → 88.",
+    "marksmanship": "Shooting: gun chance-to-hit and cheaper aiming AP. Launchers and throws mix in Dexterity. This field is a percent of that stat: Stat × (100+N)÷100. Range −10..10. Example: Marksmanship 80 at +10 → 88.",
+    # ── Travel — traverseTime * (100-N)/100; positive = faster ──
+    "travel_foot": "Percent faster strategic travel on foot. Time × (100−N)÷100. Squad uses the SLOWEST merc. Range −20..20. Example: a 100-min hike at +10 → 90 min.",
+    "travel_car": "Percent faster strategic travel by car/truck. Time × (100−N)÷100. Squad uses the BEST merc. Range −20..20. Example: a 100-min drive at +10 → 90 min.",
+    "travel_air": "Percent faster helicopter travel. Time × (100−N)÷100. Squad uses the BEST merc. Range −20..20. Example: a 100-min flight at +10 → 90 min.",
+    "travel_boat": "Loaded into BG_TRAVEL_BOAT but not applied to travel time in-game. Range −20..20.",
+    # ── Resistances ──
+    "resistance_fear": "Flat points added to fear resistance (−100..100 clamp). Range −20..20. Example: +10 = 10 more points of panic resistance, not 10% of your current resist.",
+    "resistance_suppression": "Flat points added to suppression resistance (−100..100 clamp). Range −20..20. Example: +10 = 10 more points, not 10% of your current resist.",
+    "resistance_physical": "Flat percentage-points of physical damage resistance (added to other resists, then capped at 95%). Range −10..10. Example: +10 → take 10% less damage from that layer, not 10% of your current resist.",
+    "resistance_alcohol": "Percent less alcohol effect. Effect × (100−N)÷100. Range −20..20. Example: a drink that would apply 50 at +10 → 45.",
+    "resistance_disease": "Flat percentage-points of disease resistance (−100..100 clamp). Range −20..20. Example: +10 = 10 more points, not 10% of your current resist.",
+    # ── Combat & perception ──
+    "meleedamage": "Percent of melee impact. Damage × (100+N)÷100. Range −10..10. Example: 50 melee damage at +10 → 55.",
+    "cth_blades": "Percent of blade chance-to-hit. CtH × (100+N)÷100. Range −10..10. Example: 70 CtH at +10 → 77.",
+    "cth_vs_creatures": "Flat chance-to-hit points vs creatures (added to the roll, not a percent). Range −10..10. Example: 70 CtH at +10 → 80.",
+    "increased_maxcth": "Flat points added to the engine's maximum CtH cap. Range −5..5. Example: a 90 cap at +5 → 95. A 10 saves as 5.",
+    "camo": "Flat percentage-points added to camouflage effectiveness. Range −20..10. Example: +10 = 10 more camo points (harder to spot).",
+    "stealth": "Flat percentage-points added to stealth (then capped at 100). Range −20..10. Example: 40 stealth at +10 → 50.",
+    "hearing_night": "Flat hearing-range points at night (same units as hearing-aid bonuses). Range −5..2. Example: +2 = hear 2 steps farther after dark. A 10 saves as 2.",
+    "hearing_day": "Flat hearing-range points during the day. Range −5..2. Example: +2 = hear 2 steps farther in daylight. A 10 saves as 2.",
+    "spotter": "Flat points added to spotter effectiveness when calling shots. Range −30..30. Example: +10 = 10 more spotter points.",
+    "croucheddefense": "Flat points *added to the enemy's* chance-to-hit when this merc is crouched in cover facing the shot. Negative = harder to hit. Range −30..30. Stock backgrounds use about −4 to −9. Example: enemy 70 CtH vs −10 → 60 CtH.",
+    "snake_defense": "Flat points added to snake/creature defense. Range −100..100. Example: +10 = 10 more defense points.",
+    "breachingcharge": "Flat points added to the planting-bomb skill check. Range −100..100. Example: +10 = 10 more points on the roll.",
+    "SAM_cth": "Percent of SAM-site chance-to-hit. CtH × (100+N)÷100. Range −50..100. Example: 50 SAM CtH at +10 → 55.",
+    "disarm_trap": "Flat points added to the disarm-trap skill check. Range −50..50. Example: +10 = 10 more points on the roll.",
+    "ambush_radius": "Flat tiles added to ambush detection (on top of 10× experience). Range 0..50. Example: exp 4 with +10 → radius 50.",
+    "tracker_ability": "Flat points added to tracker skill, then ÷100 with Survivalist. Range 0..40. Example: +20 Survivalist + 20 here → 0.40 tracking. 0 = no bonus.",
+    # ── Approach — value * (100+N)/100 ──
+    "approach_friendly": "Percent of the Friendly NPC/recruit approach score. Score × (100+N)÷100. Range −50..20. Example: 100 at +10 → 110. A 10 is in range.",
+    "approach_direct": "Percent of the Direct NPC approach score. Score × (100+N)÷100. Range −50..20. Example: 100 at +10 → 110.",
+    "approach_threaten": "Percent of the Threaten approach score (also used in interrogation). Score × (100+N)÷100. Range −50..20. Example: 100 at +10 → 110.",
+    "approach_recruit": "Percent of recruiting effectiveness. Score × (100+N)÷100. Range −50..20. Example: 100 at +10 → 110.",
+    # ── Economy & survival ──
+    "betterprices_guns": "Percent better gun prices (buy cheaper / sell higher). Price% = 100±N. Range −10..10. Example: +10 → guns cost 90% to buy and sell for 110%.",
+    "betterprices": "Percent better prices on all items. Price% = 100±N. Range −10..10. Example: +10 → pay 90% / sell at 110%.",
+    "capitulation": "Percent of player-side team power when enemies consider surrender (not the Strength stat). Score × (100+N)÷100. Range −50..100. Example: 100 at +10 → 110 (harder for them to force a capitulation).",
+    "food": "Percent of food *consumption* (positive = hungrier). Drain × (100+N)÷100. Range −50..100. Example: a 10 food drain at +10 → 11. +10 means they eat 10% more, not +10 food.",
+    "water": "Percent of water *consumption* (positive = thirstier). Drain × (100+N)÷100. Range −50..100. Example: a 10 water drain at +10 → 11.",
+    "sleep": "Flat hours added to sleep needed per day. Range −1..1. −1 = one hour less, 0 = normal, +1 = one hour more. A 10 saves as 1.",
+    "drink_energyregen": "Percent of breath recovered when gaining energy (only on breath *gain*, not spend). Gain × (100+N)÷100. Range −80..300. Example: recover 20 breath at +10 → 22.",
+    "carrystrength": "Percent of carry capacity. Starts from effective Strength, then this extra percent. Capacity × (100+N)÷100. Range −20..20. Example: 80 carry-str at +10 → 88. Separate field from the Strength stat modifier.",
+    "speed_run": "Percent faster tactical running (reduces run delay). Delay × (100−N)÷100. Range −50..50. Example: a 100 delay at +10 → 90 (runs faster).",
+    "speed_bandaging": "Flat points added to bandaging speed. Range −50..50. Example: +10 = 10 more bandaging points (wraps faster).",
+    "insurance": "Percent of insurance risk/cost (positive = more expensive). Cost × (100+N)÷100. Range −50..200. Example: a $1000 policy at +10 → $1100.",
+    "interrogation": "Percent of interrogation assignment points. Points × (100+N)÷100. Range −50..300. Example: 100 at +10 → 110.",
+    "prisonguard": "Percent of prison-guard assignment (negatives are ignored). Points × (100+max(0,N))÷100. Range −50..300. Example: 100 at +10 → 110.",
+    # ── Medical ──
+    "disease_diagnose": "Percent of disease-diagnosis skill. Skill × (100+N)÷100. Range −50..50. Example: 40 diagnose at +10 → 44.",
+    "disease_treatment": "Percent of disease-treatment points. Points × (100+N)÷100. Range −50..50. Example: 40 treatment at +10 → 44.",
+    # ── Assignments ──
+    "fortify_assignment": "Percent of Fortification-assignment effect. Effect × (100+N)÷100. Range −50..200. Example: 100 at +10 → 110 (more cover per session).",
+    "hackerskill": "Flat hacking skill 0–100. 0 = cannot hack; any value above 0 enables hacking. Example: 10 = weak hacker; 100 = max.",
+    "burial_assignment": "Percent of Burial-assignment effect. Effect × (100+N)÷100. Range −50..1000. Example: 100 at +10 → 110.",
+    "administration_assignment": "Percent of Administration-assignment effect. Effect × (100+N)÷100. Range −50..1000. Example: 100 at +10 → 110.",
+    "exploration_assignment": "Percent of Exploration-assignment effect. Effect × (100+N)÷100. Range −100..1000. Example: 100 at +10 → 110.",
+    # ── Social ──
+    "dislikebackground": "Signed pairing token, not a magnitude and not a percent. A background dislikes another only if this value is the exact negative of the other's (e.g. +5 dislikes −5). 0 = no pairing.",
+    "smoker": "Enum, not a percent. 0 = doesn't care. 1 = smoker (will smoke; dislikes non-smokers). 2 = anti-smoker (refuses cigarettes; dislikes smokers).",
+    # ── Flags ──
+    "druguse": "On/off flag. On: this merc may take drugs on their own (the 'Larry' effect).",
+    "xenophobic": "On/off flag. On: arrogant toward mercs who do not share this background (morale hit).",
+    "corruptionspread": "On/off flag. On: intended to spread corruption to others. Not used in the current engine trunk.",
+    "level_underground": "On/off flag. On: counts as +1 experience level while underground (flat +1 level, not a percent).",
+    "scrounging": "On/off flag. On: may pick up valuable items on their own during exploration.",
+    "traplevel": "On/off flag. On: trap detection/handling level +1 (flat +1, not a percent).",
+    "no_male": "On/off flag. On: this background cannot be selected by male IMPs.",
+    "no_female": "On/off flag. On: this background cannot be selected by female IMPs.",
+    "loyalitylossondeath": "On/off flag. On: if this character dies, the whole country takes a huge loyalty loss.",
+    "animal_friend": "On/off flag. On: refuses to attack animals.",
+    "civgroup_loyal": "On/off flag. On: refuses to attack members of the same civilian group.",
+    "alt_impcreation": "On/off flag. On: only offered during IMP creation when ALT_IMP_CREATION is TRUE in ja2options.ini.",
+}
 
 # Stable group display order.
 GROUP_ORDER: tuple[str, ...] = (
@@ -260,5 +447,8 @@ def schema_payload() -> list[dict]:
             entry["options"] = [{"value": v, "label": l} for v, l in s.options]
         if s.note is not None:
             entry["note"] = s.note
+        help_text = _FIELD_DOCS.get(s.key)
+        if help_text:
+            entry["help"] = wikify_help(help_text)
         out.append(entry)
     return out

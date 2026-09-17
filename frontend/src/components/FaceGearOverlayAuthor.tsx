@@ -3,14 +3,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   autoPositionFaceGear,
+  getApiBaseUrl,
   getFaceGearCapacity,
   injectFaceGearOverlay,
   nudgeFaceGearOffset,
   previewFaceGearOverlay,
   setFaceGearOffset,
 } from "../lib/api";
+import { getServerToken } from "../lib/tauri";
 
 interface Props {
+  /** Slot number — used to fetch the merc's SmallFace so each gear row can
+   *  composite its overlay over the real portrait, like the engine does. */
+  slot: number;
   faceIndex: number;
   /** Merc's eye coordinates from MercProfiles.xml — drives the auto-position
    *  delta. The wizard reads source-merc eye coords from the install on the
@@ -32,18 +37,59 @@ interface Props {
  * radically new color universes look "close" to ideal, not exact. FaceGear
  * art is typically simple enough that this is fine.
  */
-export default function FaceGearOverlayAuthor({ faceIndex, eyeX, eyeY }: Props) {
+export default function FaceGearOverlayAuthor({ slot, faceIndex, eyeX, eyeY }: Props) {
   const capacity = useQuery({
     queryKey: ["facegear-capacity"],
     queryFn: () => getFaceGearCapacity(),
     staleTime: 5 * 60 * 1000,
   });
 
+  // The merc's SmallFace, fetched ONCE as a blob and shared by every gear
+  // row's in-game composite preview. Fetched (not <img src>) so the auth
+  // token rides a header and a 204 "no portrait" resolves to null instead
+  // of a broken image — rows fall back to the bare gear frame.
+  const [portraitUrl, setPortraitUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    Promise.all([getApiBaseUrl(), getServerToken()])
+      .then(([base, token]) =>
+        fetch(`${base}/merc/${slot}/portrait?size=smallface&v=${Date.now()}`, {
+          headers: token ? { "X-MercWizard-Token": token } : {},
+        }),
+      )
+      .then(async (res) => {
+        if (cancelled || res.status !== 200) return;
+        const blob = await res.blob();
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setPortraitUrl(objectUrl);
+      })
+      .catch(() => {
+        // No portrait / no sidecar — rows show the bare gear frame.
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [slot]);
+
   const items = useMemo(() => {
     if (!capacity.data) return [];
-    return capacity.data.items
-      .filter((i) => !i.is_imp_variant)
-      .sort((a, b) => a.name.localeCompare(b.name));
+    // A gear name can exist in several data layers (e.g. Data/ AND
+    // Data-UB/ both ship Face_GasMask.sti). Every sidecar endpoint
+    // resolves `sti_name` to the FIRST enumerated match, so duplicate
+    // rows would preview and write the exact same file — keep only the
+    // first occurrence and note how many shadowed copies exist.
+    const seen = new Map<string, { item: (typeof capacity.data.items)[number]; shadowed: number }>();
+    for (const i of capacity.data.items) {
+      if (i.is_imp_variant) continue;
+      const key = i.name.toLowerCase();
+      const entry = seen.get(key);
+      if (entry) entry.shadowed += 1;
+      else seen.set(key, { item: i, shadowed: 0 });
+    }
+    return [...seen.values()].sort((a, b) => a.item.name.localeCompare(b.item.name));
   }, [capacity.data]);
 
   if (capacity.isLoading) {
@@ -75,14 +121,17 @@ export default function FaceGearOverlayAuthor({ faceIndex, eyeX, eyeY }: Props) 
         <code className="font-mono">_IMP.sti</code> and back up first. Reversible from the Backups page.
       </p>
       <div className="space-y-2">
-        {items.map((item) => (
+        {items.map(({ item, shadowed }) => (
           <OverlayItemRow
             key={item.relative_path}
             stiName={item.name}
+            relativePath={item.relative_path}
+            shadowedCopies={shadowed}
             faceIndex={faceIndex}
             eyeX={eyeX}
             eyeY={eyeY}
             currentFrameCount={item.frame_count}
+            portraitUrl={portraitUrl}
           />
         ))}
       </div>
@@ -92,16 +141,22 @@ export default function FaceGearOverlayAuthor({ faceIndex, eyeX, eyeY }: Props) 
 
 function OverlayItemRow({
   stiName,
+  relativePath,
+  shadowedCopies,
   faceIndex,
   eyeX,
   eyeY,
   currentFrameCount,
+  portraitUrl,
 }: {
   stiName: string;
+  relativePath: string;
+  shadowedCopies: number;
   faceIndex: number;
   eyeX: number;
   eyeY: number;
   currentFrameCount: number;
+  portraitUrl: string | null;
 }) {
   const qc = useQueryClient();
   const [file, setFile] = useState<File | null>(null);
@@ -109,8 +164,8 @@ function OverlayItemRow({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const current = useQuery({
-    queryKey: ["facegear-overlay", stiName, faceIndex],
-    queryFn: () => previewFaceGearOverlay(stiName, faceIndex),
+    queryKey: ["facegear-overlay", relativePath, faceIndex],
+    queryFn: () => previewFaceGearOverlay(stiName, faceIndex, undefined, relativePath),
     // Refetch when the frame is overwritten
     staleTime: 30 * 1000,
   });
@@ -128,21 +183,21 @@ function OverlayItemRow({
   const upload = useMutation({
     mutationFn: () => {
       if (!file) throw new Error("Pick a PNG first");
-      return injectFaceGearOverlay(stiName, faceIndex, file);
+      return injectFaceGearOverlay(stiName, faceIndex, file, undefined, true, relativePath);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["facegear-capacity"] });
-      qc.invalidateQueries({ queryKey: ["facegear-overlay", stiName, faceIndex] });
+      qc.invalidateQueries({ queryKey: ["facegear-overlay", relativePath, faceIndex] });
       setFile(null);
       if (inputRef.current) inputRef.current.value = "";
     },
   });
 
   const autoPos = useMutation({
-    mutationFn: () => autoPositionFaceGear(stiName, faceIndex, eyeX, eyeY),
+    mutationFn: () => autoPositionFaceGear(stiName, faceIndex, eyeX, eyeY, { relative_path: relativePath }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["facegear-capacity"] });
-      qc.invalidateQueries({ queryKey: ["facegear-overlay", stiName, faceIndex] });
+      qc.invalidateQueries({ queryKey: ["facegear-overlay", relativePath, faceIndex] });
     },
   });
 
@@ -152,10 +207,10 @@ function OverlayItemRow({
   // nudge updates it to nudge.data.nudged[0].new_offset_xy.
   const nudge = useMutation({
     mutationFn: ({ dx, dy }: { dx: number; dy: number }) =>
-      nudgeFaceGearOffset(stiName, faceIndex, dx, dy),
+      nudgeFaceGearOffset(stiName, faceIndex, dx, dy, undefined, true, relativePath),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["facegear-capacity"] });
-      qc.invalidateQueries({ queryKey: ["facegear-overlay", stiName, faceIndex] });
+      qc.invalidateQueries({ queryKey: ["facegear-overlay", relativePath, faceIndex] });
     },
   });
 
@@ -165,10 +220,10 @@ function OverlayItemRow({
   // primitives in the sidecar, so the on-disk encoding is identical.
   const setOffset = useMutation({
     mutationFn: ({ x, y }: { x: number; y: number }) =>
-      setFaceGearOffset(stiName, faceIndex, x, y),
+      setFaceGearOffset(stiName, faceIndex, x, y, undefined, true, relativePath),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["facegear-capacity"] });
-      qc.invalidateQueries({ queryKey: ["facegear-overlay", stiName, faceIndex] });
+      qc.invalidateQueries({ queryKey: ["facegear-overlay", relativePath, faceIndex] });
     },
   });
 
@@ -190,9 +245,44 @@ function OverlayItemRow({
     : null;
 
   return (
-    <div className="rounded border border-wasteland-700 bg-wasteland-800/30 px-3 py-2 flex items-center gap-3">
+    <div className="rounded border border-wasteland-700 bg-wasteland-800/30 px-3 py-2 flex items-center gap-3 flex-wrap">
       <div className="flex-shrink-0">
-        {currentDataUrl ? (
+        {currentDataUrl && portraitUrl ? (
+          /* In-game composite: the gear frame pasted over the merc's
+             SmallFace at its stored (sOffsetX, sOffsetY) — the same
+             recipe the engine uses when rendering equipped FaceGear.
+             Shown at 2× so eye alignment is readable; re-renders live
+             as Auto / nudge / X-Y edits change the offset. */
+          <div
+            className="relative overflow-hidden rounded border border-wasteland-700 bg-wasteland-900"
+            style={{ width: 96, height: 86 }}
+            title="In-game preview: gear over this merc's SmallFace at its stored offset"
+          >
+            <div
+              className="relative"
+              style={{ width: 48, height: 43, transform: "scale(2)", transformOrigin: "top left" }}
+            >
+              <img
+                src={portraitUrl}
+                alt="merc SmallFace"
+                width={48}
+                height={43}
+                className="absolute left-0 top-0"
+                style={{ imageRendering: "pixelated" }}
+              />
+              <img
+                src={currentDataUrl}
+                alt={`current ${stiName} frame ${faceIndex}`}
+                className="absolute"
+                style={{
+                  left: liveOffset?.[0] ?? 0,
+                  top: liveOffset?.[1] ?? 0,
+                  imageRendering: "pixelated",
+                }}
+              />
+            </div>
+          </div>
+        ) : currentDataUrl ? (
           <img
             src={currentDataUrl}
             alt={`current ${stiName} frame ${faceIndex}`}
@@ -205,10 +295,21 @@ function OverlayItemRow({
           </div>
         )}
       </div>
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-[10rem]">
         <div className="font-mono text-xs text-wasteland-200 truncate">{stiName}</div>
         <div className="text-[10px] text-wasteland-500">
           {currentFrameCount} frames · slot {faceIndex} {inRange ? "in range" : "OUT OF RANGE (will extend)"}
+        </div>
+        <div className="text-[10px] text-wasteland-600 truncate" title={relativePath}>
+          {relativePath.replace(/\\/g, "/").split("/").slice(0, -1).join("/")}
+          {shadowedCopies > 0 && (
+            <span
+              className="text-amber-500/80"
+              title="Same filename exists in other data layers — edits here target this copy (the one every write resolves to); the shadowed copies are untouched."
+            >
+              {" "}· +{shadowedCopies} shadowed cop{shadowedCopies === 1 ? "y" : "ies"}
+            </span>
+          )}
         </div>
       </div>
       <div className="flex-shrink-0 flex items-center gap-2">

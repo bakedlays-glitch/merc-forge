@@ -18,11 +18,11 @@
 - **Item-class bits** (`Tactical/Item Types.h:655-682`): `IC_NONE=0x1, IC_GUN=0x2, IC_BLADE=0x4, IC_THROWING_KNIFE=0x8, IC_LAUNCHER=0x10, IC_TENTACLES=0x20, IC_THROWN=0x40, IC_PUNCH=0x80, IC_GRENADE=0x100, IC_BOMB=0x200, IC_AMMO=0x400, IC_ARMOUR=0x800, IC_MEDKIT=0x1000, IC_KIT=0x2000, IC_APPLIABLE=0x4000, IC_FACE=0x8000, IC_KEY=0x10000, IC_LBEGEAR=0x20000, IC_BELTCLIP=0x40000, IC_MISC=0x10000000, IC_MONEY=0x20000000`.
 - **8 nav categories** (`IC_MAPFILTER_*`, `Item Types.h:692-700`), priority order: Guns(`GUN|LAUNCHER`) → Ammo(`AMMO`) → Explosives(`GRENADE|BOMB`) → Melee(`BLADE|PUNCH|THROWN|THROWING_KNIFE`) → Kits(`KIT|MEDKIT|APPLIABLE`) → LBE(`LBEGEAR|BELTCLIP`) → Armor(`ARMOUR|FACE`) → Misc(catch-all).
 - **Family mask fix:** Weapon family = `GUN|BLADE|THROWING_KNIFE|LAUNCHER|TENTACLES|THROWN|PUNCH` (add `THROWN`=0x40 to the shipped mask). Empirically all such items have a Weapons.xml row at their `ubClassIndex`.
-- **Enum sources:** `ubCalibre`→AmmoStrings.xml `<AmmoCaliber>` (key `uiIndex`); `ubAmmoType`→AmmoTypes.xml `<name>` (key `uiIndex`); `ubWeaponType`/`ubArmourClass`/`ubType`(explosive)/`ubMagType`→engine `#define`/enum tables (locate via the source tree under `C:/AI Projects/The Wasteland/Source Files/1.13 Source/source-master/Tactical/` and/or the engine_graph DB at `C:/AI Projects/The Wasteland/Headless_Compiler/engine_graph/engine.db` `constants` table; cite file:line).
+- **Enum sources:** `ubCalibre`→AmmoStrings.xml `<AmmoCaliber>` (key `uiIndex`); `ubAmmoType`→AmmoTypes.xml `<name>` (key `uiIndex`); `ubWeaponType`/`ubArmourClass`/`ubType`(explosive)/`ubMagType`→engine `#define`/enum tables (locate via the source tree under `<the JA2 1.13 source tree>/Tactical/` and/or the engine_graph DB at `<Headless_Compiler>/engine_graph/engine.db` `constants` table; cite file:line).
 - **`usItemClass` is read-only** in the editor; the PUT endpoint rejects any change to it.
 - **No fetch storm:** the picker must not fire ~1649 independent image requests on open (virtualize or sheet).
 - **Byte-splice/encoding discipline + lock+snapshot on writes** carry over from the shipped editor (`reference_ja2_xml_encoding`; mirror `routes/items.py`).
-- **pytest** via `C:/AI Projects/The Wasteland/MercWizard2/sidecar/.venv/Scripts/python.exe` run from `sidecar/`. **Frontend** verify = `cd frontend && npm run typecheck` (baseline clean) + browser-dev recipe (`reference_mercforge_browserdev_verify`).
+- **pytest** via `<your checkout>/MercWizard2/sidecar/.venv/Scripts/python.exe` run from `sidecar/`. **Frontend** verify = `cd frontend && npm run typecheck` (baseline clean) + browser-dev recipe (`reference_mercforge_browserdev_verify`).
 - Branch off `main`; do NOT work on main directly.
 
 ---
@@ -75,7 +75,7 @@ def test_weapon_family_includes_thrown_punch() -> None:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd "C:/AI Projects/The Wasteland/MercWizard2/sidecar" && .venv/Scripts/python.exe -m pytest tests/test_items_schema.py -k "category or thrown" -v`
+Run: `cd "<your checkout>/MercWizard2/sidecar" && .venv/Scripts/python.exe -m pytest tests/test_items_schema.py -k "category or thrown" -v`
 Expected: FAIL — `resolve_category` undefined; `resolve_family(0x40)` is None.
 
 - [ ] **Step 3: Write minimal implementation**
@@ -139,7 +139,7 @@ git commit -m "feat(items): engine 8-category partition + Weapon family THROWN f
   - `WEAPON_TYPE_OPTIONS`, `ARMOUR_CLASS_OPTIONS`, `EXPLOSIVE_TYPE_OPTIONS`, `MAG_TYPE_OPTIONS: list[dict]` — engine-`#define`-derived static tables, each with a module-level comment citing the engine `file:line` it was copied from.
   - `enum_options_for(field_key: str, ctx) -> Optional[list[dict]]` — maps a coded field key (`ubCalibre`/`ubAmmoType`/`ubWeaponType`/`ubArmourClass`/`ubType`/`ubMagType`) to its option list, or None.
 
-**Engine-source research (do FIRST, before coding):** locate the enums for `ubWeaponType`, `ubArmourClass`, `ubType` (explosive), `ubMagType`. Query the engine_graph DB (`C:/AI Projects/The Wasteland/Headless_Compiler/engine_graph/engine.db`, `constants` table: `SELECT name,value FROM constants WHERE name LIKE 'ARMOURCLASS%'` etc.) and/or grep `C:/AI Projects/The Wasteland/Source Files/1.13 Source/source-master/Tactical/`. Record the exact `file:line` for each enum block as a comment above its table. If an enum cannot be located+verified, ship that field WITHOUT a dropdown (leave it a number input) and note it in the report — do NOT invent values.
+**Engine-source research (do FIRST, before coding):** locate the enums for `ubWeaponType`, `ubArmourClass`, `ubType` (explosive), `ubMagType`. Query the engine_graph DB (`<Headless_Compiler>/engine_graph/engine.db`, `constants` table: `SELECT name,value FROM constants WHERE name LIKE 'ARMOURCLASS%'` etc.) and/or grep `<the JA2 1.13 source tree>/Tactical/`. Record the exact `file:line` for each enum block as a comment above its table. If an enum cannot be located+verified, ship that field WITHOUT a dropdown (leave it a number input) and note it in the report — do NOT invent values.
 
 - [ ] **Step 1: Write the failing test**
 

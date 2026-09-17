@@ -1,5 +1,5 @@
 /**
- * MapForge shortcut cheatsheet — the `?` overlay (UX Phase 3).
+ * MapForge shortcut cheatsheet — the `?` overlay.
  *
  * One screen that answers "what can I even do here?": every rebindable
  * action with its LIVE binding (reads the settings, so a rebind shows

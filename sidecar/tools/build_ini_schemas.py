@@ -17,7 +17,7 @@ confidence order (highest wins for numeric metadata):
                  own `;` comment blocks. Weakest source: ranges here
                  are ADVISORY ONLY and must never gate writes.
 
-Scraper fixes vs the frozen ja2-launcher version (review 2026-06-07):
+Scraper fixes vs the frozen ja2-launcher version (review):
   - blank lines flush the pending comment block (kills description
     bleed: section banners no longer become the first key's docs)
   - explicit range phrases ("Values from X to Y", "range X-Y") beat

@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
 from mercwizard_core.mapforge import shadow_pairs
+from mercwizard_core.mapforge import socket_lut
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -139,8 +140,50 @@ class GeneratorContext:
     rows: int
     cols: int
     parsed: dict  # Read-only — mutate via yielded ops, not direct edit
+    tileset_id: Optional[int] = None
     slot_map: Optional[dict[int, str]] = None
     frame_count: Optional[Callable[[int], int]] = None
+    sti_sha256: Optional[Callable[[int], Optional[str]]] = None
+    structure_identity: Optional[Callable[[int, int], Any]] = None
+
+
+_STRUCTURE_LAYERS = frozenset(("structs", "roofs", "onroofs"))
+
+
+def _structure_scatter_candidates(
+    ctx: GeneratorContext,
+    layer: str,
+    slot: int,
+    candidates: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Keep only identities safe for generic one-anchor scatter.
+
+    A route-backed context always supplies ``structure_identity``. Bare legacy
+    test contexts do not, so they retain their historical behavior; a supplied
+    resolver returning None is an explicit unavailable/missing-JSD result.
+    """
+    if layer not in _STRUCTURE_LAYERS or ctx.structure_identity is None:
+        return candidates
+    safe: list[tuple[int, int]] = []
+    for sub, weight in candidates:
+        identity = ctx.structure_identity(int(slot), int(sub))
+        if identity is not None and len(identity.members) == 1:
+            safe.append((int(sub), int(weight)))
+    return safe
+
+
+def _validate_structure_stamp(ctx: GeneratorContext, x: int, y: int, identity):
+    """Return an identity only when its complete occupancy fits the sector.
+
+    Consumers then commit the anchor as one edit. The JA2 engine expands the
+    JSD collision members; emitting one map entry per member would duplicate
+    the graphic and is deliberately forbidden here.
+    """
+    for dx, dy, _sub in identity.members:
+        px, py = x + dx, y + dy
+        if px < 0 or py < 0 or px >= ctx.cols or py >= ctx.rows:
+            return None
+    return identity
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -196,6 +239,38 @@ class Generator(ABC):
         the stream and the user sees a generic "generator failed"
         message instead of the specific cause.
         """
+
+    def clamp_params(self, params: dict) -> dict:
+        """Return `params` with every declared numeric value forced into
+        its `Param.min`/`Param.max` range.
+
+        The UI's number inputs carry `min`/`max`, but a browser only
+        enforces those on the stepper arrows — a typed value goes
+        through as-is. Since several generators turn a count directly
+        into an attempt budget with a quadratic inner scan, an
+        out-of-range value is not a bad result, it is a wedged sidecar.
+        Clamping here covers every caller, including the console's
+        `:gen name k=v` parser and any hand-made request.
+
+        Values that are absent, non-numeric or declared without a bound
+        pass through untouched — coercion stays each generator's job.
+        """
+        out = dict(params)
+        for p in self.params:
+            if p.min is None and p.max is None:
+                continue
+            if p.name not in out:
+                continue
+            raw = out[p.name]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                continue
+            value = float(raw)
+            if p.min is not None:
+                value = max(value, p.min)
+            if p.max is not None:
+                value = min(value, p.max)
+            out[p.name] = int(value) if p.type == "int" else value
+        return out
 
     def to_dict(self) -> dict:
         """Serialize the generator's metadata for the `/generators`
@@ -382,7 +457,7 @@ class FillLayerGenerator(Generator):
         rng = random.Random(int(params.get("seed", 42)))
         pick_sub = _make_sub_picker(
             rng, sub,
-            _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
+            _resolve_corpus_subs(ctx, params, layer, slot, str(params.get("subs", "") or "")),
         )
         playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", False)))
 
@@ -480,7 +555,7 @@ class RectangleGenerator(Generator):
         rng = random.Random(int(params.get("seed", 42)))
         pick_sub = _make_sub_picker(
             rng, sub,
-            _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
+            _resolve_corpus_subs(ctx, params, layer, slot, str(params.get("subs", "") or "")),
         )
         playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", False)))
         if mode not in ("outline", "fill"):
@@ -640,7 +715,9 @@ def _make_sub_picker(rng: random.Random, default_sub: int, subs_spec: str):
     return lambda: rng.choices(subs, weights=weights, k=1)[0]
 
 
-def _resolve_corpus_subs(params: dict, layer: str, slot: int, explicit: str) -> str:
+def _resolve_corpus_subs(
+    ctx: GeneratorContext, params: dict, layer: str, slot: int, explicit: str
+) -> str:
     """Weighted `subs` spec for `_make_sub_picker`, sourced from the distilled
     corpus when `corpus_source` + `biome` are set and no explicit `subs` was
     given. Explicit `subs` always wins; missing corpus data → '' (so the
@@ -655,6 +732,14 @@ def _resolve_corpus_subs(params: dict, layer: str, slot: int, explicit: str) -> 
         return ""
     try:
         from mercwizard_core.mapforge import corpus
+        if ctx.sti_sha256 is not None:
+            active_hash = ctx.sti_sha256(int(slot))
+            if not active_hash:
+                return ""
+            pairs = corpus.compatible_subs(
+                source, int(ctx.tileset_id or 0), layer, int(slot), active_hash
+            )
+            return ",".join(f"{sub}:{weight}" for sub, weight in pairs)
         return corpus.resolve_subs(source, biome, layer, int(slot))
     except Exception:
         return ""
@@ -722,7 +807,7 @@ def _make_mask_predicate(ctx: GeneratorContext, avoid_layer: str, avoid_slots: s
 #   FIRSTOSTRUCT..EIGHTOSTRUCT = 12-19               → outdoor structs
 #   FIRSTFULLSTRUCT..FOURTHFULLSTRUCT = 20-23        → trees / full veg
 #   ROADPIECES = 50                                  → modern macro roads,
-#       placed on the OBJS layer (source_roads_and_road_smoothing.md §5)
+#       placed on the OBJS layer
 #   FIRSTROAD = 78                                   → legacy single-tile
 #       roads on the land layer (converted at load; kept for old maps)
 #   NINTHOSTRUCT = 97, TENTHOSTRUCT = 98             → extra O-structs
@@ -944,9 +1029,22 @@ class ScatterGenerator(Generator):
         min_dist = int(params.get("min_distance", 2))
         seed = int(params.get("seed", 42))
         rng = random.Random(seed)
+        sub_spec = _resolve_corpus_subs(
+            ctx, params, layer, slot, str(params.get("subs", "") or "")
+        )
+        candidates = _parse_weighted_subs(sub_spec) or [(sub, 1)]
+        candidates = _structure_scatter_candidates(ctx, layer, slot, candidates)
+        if not candidates:
+            yield {
+                "phase": "scatter", "status": "done",
+                "label": (
+                    f"No scatter-safe structure identity for slot {slot}; "
+                    "missing, corrupt, or multi-tile JSD candidates were excluded."
+                ),
+            }
+            return
         pick_sub = _make_sub_picker(
-            rng, sub,
-            _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
+            rng, sub, ",".join(f"{candidate}:{weight}" for candidate, weight in candidates)
         )
         mask = _combine_masks(
             _make_mask_predicate(
@@ -1116,9 +1214,22 @@ class ClusterScatterGenerator(Generator):
         radius = int(params.get("cluster_radius", 4))
         seed = int(params.get("seed", 42))
         rng = random.Random(seed)
+        sub_spec = _resolve_corpus_subs(
+            ctx, params, layer, slot, str(params.get("subs", "") or "")
+        )
+        candidates = _parse_weighted_subs(sub_spec) or [(sub, 1)]
+        candidates = _structure_scatter_candidates(ctx, layer, slot, candidates)
+        if not candidates:
+            yield {
+                "phase": "cluster", "status": "done",
+                "label": (
+                    f"No scatter-safe structure identity for slot {slot}; "
+                    "missing, corrupt, or multi-tile JSD candidates were excluded."
+                ),
+            }
+            return
         pick_sub = _make_sub_picker(
-            rng, sub,
-            _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
+            rng, sub, ",".join(f"{candidate}:{weight}" for candidate, weight in candidates)
         )
         mask = _combine_masks(
             _make_mask_predicate(
@@ -1305,9 +1416,24 @@ class DensityFalloffGenerator(Generator):
         peak = float(params.get("peak_density", 0.5))
         seed = int(params.get("seed", 42))
         rng = random.Random(seed)
+        sub_spec = _resolve_corpus_subs(
+            ctx, params, layer, slot, str(params.get("subs", "") or "")
+        )
+        candidates = _parse_weighted_subs(sub_spec) or [(sub, 1)]
+        candidates = _structure_scatter_candidates(ctx, layer, slot, candidates)
+        if not candidates:
+            yield {
+                "phase": "density", "status": "done",
+                "label": (
+                    f"No scatter-safe structure identity for slot {slot}; "
+                    "missing, corrupt, or multi-tile JSD candidates were excluded."
+                ),
+            }
+            return
         pick_sub = _make_sub_picker(
-            rng, sub,
-            _resolve_corpus_subs(params, layer, slot, str(params.get("subs", "") or "")),
+            rng, sub, ",".join(
+                f"{candidate}:{weight}" for candidate, weight in candidates
+            ),
         )
         mask = _combine_masks(
             _make_mask_predicate(
@@ -1779,8 +1905,8 @@ WORLD_CLIFF_HEIGHT = 80
 # the editor C++:
 #
 #   Scan: sidecar/.venv/Scripts/python.exe tools/scan_cliff_faces.py \
-#             --installs-dir "C:/Jagged Alliance 2" --top 12
-#   Run-walk: scratch/clifftest/analyze_runs.py A6 F5 G5 A8 (2026-06-10) —
+#             --installs-dir "<dir holding your JA2 installs>" --top 12
+#   Run-walk: scratch/clifftest/analyze_runs.py A6 F5 G5 A8 —
 #   walks every cliff RUN in those vanilla maps in gridno order and prints
 #   anchor→anchor deltas, per-sub chains, base companions, land textures.
 #
@@ -1911,7 +2037,7 @@ class BankGenerator(Generator):
     per-tile HEIGHTS (not sprites), in the engine's native 80-unit raise
     steps — i.e. exactly what vanilla maps do with terrain height.
 
-    Engine reality (verified against the 1.13 C++ source, 2026-06-10):
+    Engine reality (verified against the 1.13 C++ source):
     - ANY height difference between adjacent tiles is hard-impassable.
       Pathing blocks it at three sites (CompileTileMovementCosts
       worlddef.cpp:880, WantToTraverse PATHAI.cpp:2011, legacy
@@ -2032,7 +2158,7 @@ class BankGenerator(Generator):
         # ── E face (x2 column, the visually dominant right side) ──
         # Pieces cover rows y-4..y: corner anchor y2, flush cap y1+4.
         # (A sub-14 NE top cap per the vanilla 16→13→14 sequence was
-        # A/B-rendered on 2026-06-11 and looked WORSE — it notches the
+        # A/B-rendered and looked WORSE — it notches the
         # face top; that piece only blends on a diagonal step. The flush
         # 5/6 ending matches how vanilla straight runs terminate.)
         for y in _face_chain(y2, y1 + 4):
@@ -2125,7 +2251,7 @@ class BankGenerator(Generator):
         # Raised region + cliff line per mode. ESCARPMENT (default) is
         # vanilla's idiom: the line runs EDGE TO EDGE across the map and
         # everything on the high side rises — a floating island plateau
-        # reads odd in iso view (user feedback 2026-06-11; A6's main
+        # reads odd in iso view (user feedback; A6's main
         # escarpment is a 112-tile edge-to-edge run).
         if mode == "escarpment":
             x_rng = {
@@ -2215,6 +2341,290 @@ class BankGenerator(Generator):
                )}
 
 
+class SmoothTerrainGenerator(Generator):
+    """Auto-fix land texture boundaries the way the editor's SmoothTerrain does.
+
+    The LEGO-socket payoff: paint blocky texture regions (e.g. with `fill` or
+    `rect`), then run this — every boundary cell gets the CORRECT fringe sub for
+    its neighbour pattern, and interior cells become clean full tiles. Output is
+    correct-by-construction: it reproduces `gbSmoothStruct` (smooth.cpp), the same
+    table the engine used to place every authored fringe (validated 0.23% FP on
+    297 Urban Chaos maps). It does NOT invent textures — it only re-picks the sub
+    of land textures already present (slots 0-6), so painted regions keep their
+    material and just gain correct edges.
+
+    Skips water (slots 7-8 use a separate shoreline table) and per-cell only
+    re-picks the texture entry (one ground texture per cell, the JA2 norm).
+    """
+    name = "smooth_terrain"
+    label = "Smooth terrain boundaries (auto-fringe)"
+    description = (
+        "Fix land texture edges: every boundary cell gets the correct fringe "
+        "tile for its neighbours, interiors become full tiles. Run after painting "
+        "blocky texture regions. Reproduces the engine's own SmoothTerrain LUT."
+    )
+    params = [
+        Param(name="seed", type="int", default=42,
+              description="RNG seed for picking among a boundary's fringe variants."),
+        Param(name="textures", type="str", default="",
+              description=("Optional comma list of texture slots to smooth (0-6); "
+                           "blank = all land textures present.")),
+        _PLAYABLE_PARAM_OFF,
+    ]
+
+    def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
+        land = ctx.parsed.get("land") if isinstance(ctx.parsed, dict) else None
+        if not isinstance(land, list):
+            yield {"phase": "error", "status": "done",
+                   "label": "no land layer in this sector — nothing to smooth."}
+            return
+        rng = random.Random(int(params.get("seed", 42)))
+        only = set(_parse_int_csv(str(params.get("textures", "") or "")))
+        textures = (only & socket_lut.TEXTURE_TYPES) if only else socket_lut.TEXTURE_TYPES
+        playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", False)))
+        cols, rows = ctx.cols, ctx.rows
+
+        yield {"phase": "smooth_terrain", "status": "start",
+               "label": f"Smoothing terrain boundaries ({rows * cols} tiles)…",
+               "total": rows * cols}
+
+        n_fixed = 0
+        for y in range(rows):
+            for x in range(cols):
+                if playable is not None and not playable(x, y):
+                    continue
+                gn = y * cols + x
+                entries = land[gn] if 0 <= gn < len(land) else None
+                if not entries:
+                    continue
+                # the (single) ground-texture entry for this cell
+                tex = next((e for e in entries if int(e[0]) in textures), None)
+                if tex is None:
+                    continue
+                t, cur_sub = int(tex[0]), int(tex[1])
+                code = socket_lut.boundary_code(land, gn, cols, rows, t)
+                # leave tiles that already EXACTLY fit their boundary (no churn);
+                # force-smooth the rest (incl. un-smoothed boundary full tiles)
+                if socket_lut.terrain_sub_matches(cur_sub, code):
+                    continue
+                if code == 0:
+                    new_sub = rng.randrange(1, 11)      # interior -> a full tile
+                else:
+                    new_sub = socket_lut.pick_terrain_sub(code, rng)
+                    if new_sub is None:
+                        continue
+                n_fixed += 1
+                yield {"x": x, "y": y, "op": "place", "layer": "land",
+                       "slot": t, "sub": new_sub}
+
+        yield {"phase": "smooth_terrain", "status": "done",
+               "label": f"Terrain smoothed — {n_fixed} boundary tiles corrected."}
+
+
+class WallSmoothGenerator(Generator):
+    """Fix wrong-axis walls — the structural counterpart to terrain smoothing.
+
+    Reproduces the orientation logic of the engine's `BuildWallPiece`
+    (newsmooth.cpp): a wall's connector class encodes its run axis (L-family runs
+    EW, R-family runs NS). A straight wall whose same-family neighbours run the
+    OTHER axis is the classic 90-degrees-wrong-facing tile (the bug the wall
+    validator flags at 0.38% on authored maps). This re-tiles such walls to the
+    correct axis, PRESERVING the exterior/interior face.
+
+    Conservative by design: only straight walls (types 36-39); skips cave tilesets
+    (different system), corner/junction cells (both wall families present), endpoint
+    walls (no same-family neighbour), and multi-entry struct cells (avoids clobbering
+    a co-located structure). Corner/extended pieces are left to a later pass.
+    """
+    name = "smooth_walls"
+    label = "Fix wall orientation (auto-axis)"
+    description = (
+        "Re-tile walls that face the wrong way: a straight wall running against its "
+        "connector axis is swapped to the correct axis, keeping its exterior/interior "
+        "face. Reproduces the engine's BuildWallPiece orientation rule."
+    )
+    params = [
+        Param(name="seed", type="int", default=42,
+              description="RNG seed for picking among a wall class's variants."),
+    ]
+
+    def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
+        structs = ctx.parsed.get("structs") if isinstance(ctx.parsed, dict) else None
+        if not isinstance(structs, list):
+            yield {"phase": "error", "status": "done",
+                   "label": "no structs layer in this sector — nothing to smooth."}
+            return
+        if ctx.parsed.get("tileset") in socket_lut.CAVE_TILESETS:
+            yield {"phase": "error", "status": "done",
+                   "label": "cave tileset uses a different wall system — skipped."}
+            return
+        rng = random.Random(int(params.get("seed", 42)))
+        cols, rows = ctx.cols, ctx.rows
+
+        yield {"phase": "smooth_walls", "status": "start",
+               "label": "Fixing wall orientation…", "total": rows * cols}
+
+        n_fixed = 0
+        for gn, entries in enumerate(structs):
+            if not entries:
+                continue
+            # one wall entry only (avoid clobbering a stacked struct via 'place')
+            walls = [e for e in entries if int(e[0]) in socket_lut.WALL_TYPES
+                     and int(e[1]) in socket_lut.WALL_SUB2CLASS]
+            if len(entries) != 1 or len(walls) != 1:
+                continue
+            t, s = int(walls[0][0]), int(walls[0][1])
+            cls = socket_lut.wall_class(s)
+            if cls not in socket_lut.STRAIGHT_WALL_CLASSES:
+                continue
+            # corner cell? (both families present anywhere on this tile) -> skip
+            fams = {socket_lut.CLASS_FAMILY.get(socket_lut.WALL_SUB2CLASS.get(int(e[1])))
+                    for e in entries if int(e[0]) in socket_lut.WALL_TYPES}
+            if "L" in fams and "R" in fams:
+                continue
+            fam = socket_lut.CLASS_FAMILY[cls]
+            ew, ns = socket_lut.wall_family_continuation(structs, gn, cols, rows, t, fam)
+            run = socket_lut.wall_run_axis_mismatch(cls, ew, ns)
+            if run is None:
+                continue                          # correct, or an endpoint -> leave
+            new_sub = socket_lut.wall_target_sub(cls, run, rng)
+            n_fixed += 1
+            yield {"x": gn % cols, "y": gn // cols, "op": "place", "layer": "structs",
+                   "slot": t, "sub": new_sub}
+
+        yield {"phase": "smooth_walls", "status": "done",
+               "label": f"Wall orientation fixed — {n_fixed} walls re-tiled."}
+
+
+class WaterSmoothGenerator(Generator):
+    """Auto-fix water shorelines — the engine's SmoothWaterTerrain as a generator.
+
+    Paint a blocky water body (slot 7), run this, and every shore cell gets the
+    correct shoreline fringe for its 8-neighbour water pattern; open-water interiors
+    become full tiles. Reproduces `gbSmoothWaterStruct` (smooth.cpp). NOTE: authored
+    shorelines are often hand-tuned (~5% deviate from the LUT), so this PLACES
+    correct-by-construction shores but won't perfectly match a hand-painted lake —
+    hand touch-ups are expected after.
+    """
+    name = "smooth_water"
+    label = "Smooth water shorelines (auto-shore)"
+    description = (
+        "Fix water edges: every shore cell gets the correct shoreline tile for its "
+        "neighbours, open water becomes full tiles. Run after painting a water body. "
+        "Reproduces the engine's SmoothWaterTerrain LUT (hand touch-ups still expected)."
+    )
+    params = [
+        Param(name="seed", type="int", default=42,
+              description="RNG seed for picking among a shore's fringe variants."),
+        _PLAYABLE_PARAM_OFF,
+    ]
+
+    def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
+        land = ctx.parsed.get("land") if isinstance(ctx.parsed, dict) else None
+        if not isinstance(land, list):
+            yield {"phase": "error", "status": "done",
+                   "label": "no land layer in this sector — nothing to smooth."}
+            return
+        rng = random.Random(int(params.get("seed", 42)))
+        playable = _make_playable_predicate(ctx, bool(params.get("clip_to_playable", False)))
+        cols, rows = ctx.cols, ctx.rows
+        W = socket_lut.WATER_TYPE
+
+        yield {"phase": "smooth_water", "status": "start",
+               "label": "Smoothing water shorelines…", "total": rows * cols}
+
+        n_fixed = 0
+        for y in range(rows):
+            for x in range(cols):
+                if playable is not None and not playable(x, y):
+                    continue
+                gn = y * cols + x
+                entries = land[gn] if 0 <= gn < len(land) else None
+                if not entries:
+                    continue
+                tex = next((e for e in entries if int(e[0]) == W), None)
+                if tex is None:
+                    continue
+                cur_sub = int(tex[1])
+                bitval = socket_lut.water_bitvalue(land, gn, cols, rows)
+                if socket_lut.water_sub_matches(cur_sub, bitval):
+                    continue
+                new_sub = socket_lut.pick_water_sub(bitval, rng)
+                if new_sub is None:
+                    new_sub = rng.randrange(1, 11)      # open water -> full tile
+                n_fixed += 1
+                yield {"x": x, "y": y, "op": "place", "layer": "land",
+                       "slot": W, "sub": new_sub}
+
+        yield {"phase": "smooth_water", "status": "done",
+               "label": f"Water smoothed — {n_fixed} shore tiles corrected."}
+
+
+class CaveSmoothGenerator(Generator):
+    """Auto-fix cave walls — the engine's cave autotiler as a generator.
+
+    Cave tilesets (ts1) place every wall from an 8-neighbour cave-presence bitmask
+    (CalcNewCavePerimeterValue -> GetCaveTileIndexFromPerimeterValue, newsmooth.cpp).
+    Paint a blocky cave wall outline (type 36), run this, and every cave wall gets
+    the correct perimeter piece for its neighbours — concave/convex corners, dead-ends
+    (type 37), and interior fill all resolve by construction. ONLY runs on cave
+    tilesets. NOTE: authored caves fill interiors with full-floor variants regardless
+    of exact perimeter (~2.8% deviate from the LUT), so this PLACES correct-by-
+    construction walls but won't perfectly match a hand-filled cavern — like water,
+    hand touch-ups are expected. Conservative: re-tiles cells that are purely cave
+    walls; leaves stalagmite-perimeter cells (no cardinal cave neighbour) untouched.
+    """
+    name = "smooth_caves"
+    label = "Smooth cave walls (auto-perimeter)"
+    description = (
+        "Fix cave walls: every cave-wall cell gets the correct piece for its 8-neighbour "
+        "cave pattern (corners, dead-ends, interior fill). Cave tilesets only. Reproduces "
+        "the engine's cave autotiler LUT (hand touch-ups still expected)."
+    )
+    params = [
+        Param(name="seed", type="int", default=42,
+              description="RNG seed for picking among a perimeter's piece variants."),
+    ]
+
+    def iter_ops(self, ctx: GeneratorContext, params: dict) -> Iterator[dict]:
+        structs = ctx.parsed.get("structs") if isinstance(ctx.parsed, dict) else None
+        if not isinstance(structs, list):
+            yield {"phase": "error", "status": "done",
+                   "label": "no structs layer in this sector — nothing to smooth."}
+            return
+        if ctx.parsed.get("tileset") not in socket_lut.CAVE_TILESETS:
+            yield {"phase": "error", "status": "done",
+                   "label": "cave smoothing only runs on cave tilesets (ts1) — skipped."}
+            return
+        rng = random.Random(int(params.get("seed", 42)))
+        cols, rows = ctx.cols, ctx.rows
+
+        yield {"phase": "smooth_caves", "status": "start",
+               "label": "Smoothing cave walls…", "total": rows * cols}
+
+        n_fixed = 0
+        for gn, entries in enumerate(structs):
+            if not entries:
+                continue
+            # only re-tile cells that are PURELY cave walls (avoid clobbering a
+            # co-located struct via 'place', which replaces the whole layer cell).
+            if any(int(e[0]) not in socket_lut.CAVE_WALL_TYPES for e in entries):
+                continue
+            cur_t, cur_s = int(entries[0][0]), int(entries[0][1])
+            perim = socket_lut.cave_perimeter(structs, gn, cols, rows)
+            if socket_lut.cave_sub_is_legal(cur_s, perim):
+                continue
+            new_t, new_sub = socket_lut.pick_cave_sub(perim, rng)
+            if new_t is None:
+                continue                              # stalagmite cell -> leave it
+            n_fixed += 1
+            yield {"x": gn % cols, "y": gn // cols, "op": "place", "layer": "structs",
+                   "slot": new_t, "sub": new_sub}
+
+        yield {"phase": "smooth_caves", "status": "done",
+               "label": f"Cave walls smoothed — {n_fixed} cells corrected."}
+
+
 REGISTRY: dict[str, Generator] = {
     g.name: g for g in [
         WipeGenerator(),
@@ -2223,7 +2633,11 @@ REGISTRY: dict[str, Generator] = {
         ScatterGenerator(),
         ClusterScatterGenerator(),
         DensityFalloffGenerator(),
-        # AutoShadowGenerator retired 2026-05-31: the renderer now overlays
+        SmoothTerrainGenerator(),
+        WallSmoothGenerator(),
+        WaterSmoothGenerator(),
+        CaveSmoothGenerator(),
+        # AutoShadowGenerator retired: the renderer now overlays
         # these buddy shadows (effectiveShadowEntries) and the engine re-adds
         # them at load (HAS_SHADOW_BUDDY), so baking them only doubled in-game.
         # Class kept for reference; no longer offered to users.

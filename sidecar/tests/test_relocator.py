@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from mercwizard_core import relocator
+from mercwizard_core import body_types, relocator
 from mercwizard_core.inject import (
     aim_availability,
     edt as edt_mod,
@@ -15,7 +15,9 @@ from mercwizard_core.inject import (
 from mercwizard_core.models import AimBinding, Gear, GearKit, Merc
 
 
-def _set_up_filled_slot(install_root: Path, slot: int, aim_bio_id: int = 5) -> Merc:
+def _set_up_filled_slot(
+    install_root: Path, slot: int, aim_bio_id: int = 5, body_type: int = 0,
+) -> Merc:
     """Place a complete merc into `slot`: profile + AIM binding + gear + bio.
 
     Returns the Merc object that was written.
@@ -28,6 +30,7 @@ def _set_up_filled_slot(install_root: Path, slot: int, aim_bio_id: int = 5) -> M
         uiIndex=slot,
         ubFaceIndex=160 + slot,
         Type=1,
+        ubBodyType=body_type,
         zName="Source",
         zNickname="Src",
         biographyText="The source merc's bio.",
@@ -107,3 +110,26 @@ def test_move_gear_block_relocates(tmp_path: Path) -> None:
     assert g is not None
     assert g.kits[0].mWeapon == 2
     assert g.kits[0].mAbsolutePrice == -1
+
+
+def test_move_and_duplicate_reject_observed_body_type_at_a_different_slot(tmp_path: Path) -> None:
+    _set_up_filled_slot(tmp_path, slot=5, aim_bio_id=5, body_type=91)
+
+    with pytest.raises(relocator.MoveError, match="preserved"):
+        relocator.move(tmp_path, source_slot=5, dest_slot=10)
+    with pytest.raises(relocator.MoveError, match="preserved"):
+        relocator.duplicate(tmp_path, source_slot=5, dest_slot=10)
+
+
+def test_move_and_duplicate_reject_unknown_body_type_in_known_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_up_filled_slot(tmp_path, slot=5, aim_bio_id=5, body_type=44)
+    monkeypatch.setattr(body_types, "_has_wasteland_body_type_fingerprint", lambda _root: True)
+    monkeypatch.setattr(body_types, "_has_canonical_wasteland_engine", lambda _root: True)
+
+    for operation in (relocator.move, relocator.duplicate):
+        with pytest.raises(relocator.PreserveOnlyMoveError) as exc:
+            operation(tmp_path, source_slot=5, dest_slot=10)
+        assert exc.value.code == "BODY_TYPE_UNKNOWN"
+        assert exc.value.body_type == 44

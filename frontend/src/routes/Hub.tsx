@@ -8,10 +8,8 @@ import {
   getGameStatus,
   getHealth,
   getIniDiagnostic,
-  getSetupState,
   launchGame,
   listInstalls,
-  markSetupOffered,
   setActiveInstall,
 } from "../lib/api";
 import type { InstallInfo } from "../lib/schema";
@@ -57,6 +55,13 @@ const primary = [
 
 const secondary = [
   {
+    id: "voice-lab",
+    label: "Voice Lab",
+    href: "/voice-lab",
+    icon: "🔊",
+    description: "Review duplicate, mismatched, and missing voice lines. Start with the highest-risk evidence and open it in the workbench.",
+  },
+  {
     id: "ini-editor",
     label: "INI Editor",
     href: "/ini-editor",
@@ -68,7 +73,7 @@ const secondary = [
     label: "Backgrounds",
     href: "/backgrounds",
     icon: "📋",
-    description: "Create, edit, and delete the stat/AP/perk background bundles mercs can carry — the catalog the merc Background dropdown picks from.",
+    description: "Manage this install's stat/AP/perk background bundles — see slots used / 499, edit, create, or add from the cross-mod library (every unique background across every JA2 mod on disk).",
   },
   {
     id: "items",
@@ -84,16 +89,18 @@ const secondary = [
     icon: "🧰",
     description: "Standalone utilities — open any .sti to inspect frames, or crack open a .slf archive to extract its files. Works on assets outside the active install.",
   },
+  // The "Game Setup" tile lived here. Hidden for beta.4 — the flow is not
+  // ready to ship. See the note on the hidden /setup route in App.tsx.
   {
     id: "settings",
     label: "Settings",
     href: "/settings",
     icon: "⚙️",
-    description: "Backup mode, mod-detection rules, debug tools.",
+    description: "Game installs, the INI reference install, the graphics stack, Voice Lab tool paths, and build info.",
   },
 ];
 
-// Secondary nav removed 2026-05-24 — "Browse Roster (raw)" was a
+// Secondary nav removed — "Browse Roster (raw)" was a
 // duplicate of the Merc Wizard's roster grid; "Backups" now lives
 // inside Settings. The four primary tiles cover everything.
 
@@ -152,7 +159,7 @@ export default function Hub() {
       qc.invalidateQueries({ queryKey: ["health"] });
       // Apply-VFS changes the engine's active campaign → the INI editor's
       // profile root / override file / effective values are all stale now.
-      // (2026-06-07 review finding: this path doesn't go through the
+      // (this path doesn't go through the
       // install-switch resetQueries(), so invalidate explicitly.)
       qc.invalidateQueries({ queryKey: ["ini-effective"] });
       qc.invalidateQueries({ queryKey: ["ini-overrides"] });
@@ -212,6 +219,11 @@ export default function Hub() {
                         Add a different folder…
                       </Link>
                     </div>
+                    {switchInstall.isError && (
+                      <p className="mb-2 text-xs text-rust-400">
+                        Switch failed: {formatApiError(switchInstall.error)}
+                      </p>
+                    )}
                     {others.length === 0 ? (
                       <p className="text-sm text-wasteland-400">
                         No other installs registered. Use the link above to add one.
@@ -338,7 +350,7 @@ export default function Hub() {
           )}
           {/* Switcher popover lives anchored to its trigger button
               above (inside the active-install row). The old expanding
-              card here was deleted 2026-05-25. */}
+              card here was deleted. */}
         </div>
         {active && (
           <div className="ml-4 flex flex-col items-end gap-1">
@@ -381,13 +393,10 @@ export default function Hub() {
 
       {/* Install-level diagnostics. Each banner renders nothing when
           its check passes; they only surface real install-level
-          issues. Pulled out of per-merc displays per bug #1 / bug #9.
-          SetupOfferBanner is LAST — it's the lowest-severity item
-          (optional convenience vs. real misconfigurations above). */}
+          issues. Pulled out of per-merc displays per bug #1 / bug #9. */}
       <div className="mb-6 space-y-3">
         <VfsMismatchBanner />
         <FaceGearOrphanBanner />
-        {active && <SetupOfferBanner />}
       </div>
 
       <h2 className="text-xl text-wasteland-100 mb-4">What would you like to do?</h2>
@@ -445,37 +454,5 @@ export default function Hub() {
   );
 }
 
-// First-run setup offer — shown once per install (persisted server-side),
-// last in the banner block (lowest severity). Dismiss and Run both mark
-// the install offered; the flow itself also marks on open.
-function SetupOfferBanner() {
-  const qc = useQueryClient();
-  const setupState = useQuery({ queryKey: ["setup-state"], queryFn: getSetupState });
-  const dismiss = useMutation({
-    mutationFn: markSetupOffered,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["setup-state"] }),
-  });
-
-  if (!setupState.data || setupState.data.offered) return null;
-
-  return (
-    <div className="flex items-center justify-between gap-4 rounded border border-wasteland-700 bg-wasteland-900 px-4 py-3">
-      <div className="text-sm text-wasteland-300">
-        <span className="font-medium text-wasteland-100">New install registered.</span>{" "}
-        Optional setup can set display, difficulty, and graphics in one pass.
-      </div>
-      <div className="flex items-center gap-2 shrink-0">
-        <Link to="/setup" className="btn-primary text-xs">
-          Run setup
-        </Link>
-        <button
-          className="btn-ghost text-xs"
-          onClick={() => dismiss.mutate()}
-          disabled={dismiss.isPending}
-        >
-          Dismiss
-        </button>
-      </div>
-    </div>
-  );
-}
+// SetupOfferBanner — the once-per-install offer to run the Game Setup flow —
+// lived here. Removed along with the tile and the /setup route for beta.4.

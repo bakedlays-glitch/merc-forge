@@ -96,6 +96,21 @@ def test_face_sti_bytes_resolves_b_prefixed_big_face(tmp_path: Path) -> None:
     assert ctx.face_sti_bytes(75, "smallface") is None
 
 
+def test_rpc_talkface_bytes_resolves_zero_padded_slf_entry(tmp_path: Path) -> None:
+    """RPC readiness must see a valid engine B-face even when it exists only in Faces.slf."""
+    install = tmp_path / "inst"
+    (install / "Data").mkdir(parents=True)
+    _faces_slf(install / "Data" / "Faces.slf", [
+        ("B07.STI", b"RPC_TALK_FACE_7"),
+    ])
+
+    resolved = make_install_context(install).rpc_talkface_bytes(7)
+
+    assert resolved is not None
+    assert resolved[0] == b"RPC_TALK_FACE_7"
+    assert resolved[1].startswith("slf:")
+
+
 def test_face_sti_bytes_returns_none_when_absent(tmp_path: Path) -> None:
     """A face index the archive doesn't carry resolves to None (the caller then
     falls back / serves a blank), not an exception."""

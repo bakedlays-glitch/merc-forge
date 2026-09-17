@@ -38,7 +38,7 @@ class DatParseError(Exception):
     pass
 
 
-# Phase E1.5 Phase 2C: appendix flag bit values per worlddef.cpp:60-68.
+# Appendix flag bit values per worlddef.cpp:60-68.
 MAP_FULLSOLDIER_SAVED       = 0x00000001
 MAP_WORLDONLY_SAVED         = 0x00000002  # legacy / no-op in 1.13
 MAP_WORLDLIGHTS_SAVED       = 0x00000004  # gates point-light array (deprecated bit name but still active)
@@ -48,6 +48,22 @@ MAP_DOORTABLE_SAVED         = 0x00000020
 MAP_EDGEPOINTS_SAVED        = 0x00000040
 MAP_AMBIENTLIGHTLEVEL_SAVED = 0x00000080
 MAP_NPCSCHEDULES_SAVED      = 0x00000100
+
+
+def exit_grid_record_size(major: float) -> int:
+    """EXITGRID appendix record size for a map's version.
+
+    major>=7.0: 12 bytes — sMapIndex(i32) + usGridNo(i32) +
+    ubGotoSectorX/Y/Z(3xu8) + 1 pad (Exit Grids.h:16-31, source-verified
+    major<7.0: the _OLD_EXITGRID layout read as EXACTLY
+    7 bytes — EXITGRID::Load uses "2+5" with an explicit "never use
+    sizeof(_OLD_EXITGRID) because return 6" comment (Exit
+    Grids.cpp:149-153, source-verified). A fixed 12
+    over-advanced the cursor on legacy (Arulco-Revisited-era) maps,
+    cascading misparse into doortable/edgepoints. Single owner of this
+    constant — appendix_extract.py imports it too.
+    """
+    return 12 if major >= 7.0 else 7
 
 
 def parse_appendix_minimal(
@@ -113,7 +129,7 @@ def parse_appendix_minimal(
     safe_uint32 = lambda p: struct.unpack_from("<I", data, p)[0]
 
     def bail(reason: str) -> Dict[str, Any]:
-        # Phase 2C originally nullified every appendix field on any bail because
+        # This originally nullified every appendix field on any bail because
         # we couldn't trust intermediate values. Phase WA validated the items
         # (52-byte Path B), lights-header (uint8 colors + 4*N palette + uint16
         # count), and MapInfo (32B major>=7.0 / 100B legacy) byte layouts via
@@ -193,16 +209,18 @@ def parse_appendix_minimal(
         if flags & MAP_FULLSOLDIER_SAVED:
             return bail("soldiers_records")
 
-        # 6. EXITGRIDS — uint16 count + count * 12 bytes. Modern (major>=7.0)
-        # EXITGRID is a class: iMapIndex(i32) usGridNo(i32) ubGotoSectorX/Y/Z(3xu8)
-        # +1 pad = sizeof 12 (Exit Grids.h:16-31, source-verified 2026-06-14).
-        # (The old "8" was the classic INT16-gridno layout — wrong for v7.0.)
+        # 6. EXITGRIDS — uint16 count + count * per-record size. Modern
+        # (major>=7.0) EXITGRID is a class: iMapIndex(i32) usGridNo(i32)
+        # ubGotoSectorX/Y/Z(3xu8) +1 pad = sizeof 12; legacy (major<7.0)
+        # records are 7 bytes — full byte spec + source citations live on
+        # exit_grid_record_size().
         if flags & MAP_EXITGRIDS_SAVED:
             if pos + 2 > end:
                 return bail("exitgrid_count_truncated")
             eg_count = safe_uint16(pos)
             out["appendix_exitgrid_count"] = eg_count
-            pos += 2 + 12 * eg_count
+            eg_size = exit_grid_record_size(major)
+            pos += 2 + eg_size * eg_count
             if pos > end:
                 return bail("exitgrid_records_overrun")
 
@@ -298,7 +316,7 @@ def parse_dat_full(
             f"{lc_off + 4 * world_max} but file is {n}")
 
     # --- Per-tile heights (1 byte each, stored in a 2-byte slot) --------
-    # Phase E1.5 Phase 2B: previously skipped via the `lc_off` jump; now
+    # Previously skipped via the `lc_off` jump; now
     # parsed and exposed for height-statistics analysis in scan_map.
     #
     # Engine source has a known bug: worlddef.h:272 declares MAPELEMENT.sHeight
@@ -463,7 +481,7 @@ def parse_dat_full(
                 }
         # If the tail doesn't fit, leave it None.
 
-    # Phase E1.5 Phase 2C: best-effort appendix parse.
+    # Best-effort appendix parse.
     appendix_offset = pos
     appendix_info = parse_appendix_minimal(
         data, appendix_offset, flags, major, minor, items_table=items_table

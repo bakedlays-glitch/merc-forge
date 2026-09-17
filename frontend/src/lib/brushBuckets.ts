@@ -16,6 +16,7 @@ import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import type { ActiveBrush } from "../routes/MapForgePalette";
 import type { ClipboardRegion } from "./mapClipboard";
+import type { SpriteGroup } from "./mapPlacement";
 
 export const RECENT_BRUSHES_KEY = "mapforge.recentBrushes.v1";
 export const FAVORITE_BRUSHES_KEY = "mapforge.favoriteBrushes.v1";
@@ -32,7 +33,10 @@ export function sameBrush(a: ActiveBrush, b: ActiveBrush): boolean {
   return a.slot === b.slot && a.sub === b.sub;
 }
 
-function bucketKey(xmlPath: string | undefined, tileset: number): string {
+/** `${xmlPath}::${tileset}` — the per-install-per-tileset storage key
+ * shared by every persisted bucket in this module (and, via export, by
+ * controlGroups.ts). */
+export function bucketKey(xmlPath: string | undefined, tileset: number): string {
   return `${xmlPath || "_"}::${tileset}`;
 }
 
@@ -219,6 +223,55 @@ export function usePersistentClipboard(
   }, [key]);
   useEffect(() => {
     writeClipboard(key, clip);
+  }, [key, clip]);
+  return [clip, setClip];
+}
+
+// ─── Per-(xmlPath, tileset) SPRITE clipboard (mode-less placement, D3) ──
+// Twin of the region clipboard above, one storage key of its own so a
+// copied sprite layout and a copied terrain region never collide. Same
+// persistence contract: rehydrates on install/tileset switch, survives
+// reloads, non-fatal on quota/parse failure.
+export const SPRITE_CLIPBOARD_KEY = "mapforge.spriteClipboard.v1";
+
+function readSpriteClipboard(key: string): SpriteGroup | null {
+  try {
+    const raw = localStorage.getItem(SPRITE_CLIPBOARD_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, SpriteGroup>;
+    return parsed[key] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSpriteClipboard(key: string, clip: SpriteGroup | null): void {
+  try {
+    const raw = localStorage.getItem(SPRITE_CLIPBOARD_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, SpriteGroup>) : {};
+    if (clip === null) delete parsed[key];
+    else parsed[key] = clip;
+    localStorage.setItem(SPRITE_CLIPBOARD_KEY, JSON.stringify(parsed));
+  } catch {
+    // Quota or parse — non-fatal; clipboard stays in-session.
+  }
+}
+
+/**
+ * `[spriteClipboard, setSpriteClipboard]` persisted per (xmlPath,
+ * tileset) — the sprite-only twin of `usePersistentClipboard`.
+ */
+export function usePersistentSpriteClipboard(
+  xmlPath: string | undefined,
+  tileset: number,
+): [SpriteGroup | null, Dispatch<SetStateAction<SpriteGroup | null>>] {
+  const key = bucketKey(xmlPath, tileset);
+  const [clip, setClip] = useState<SpriteGroup | null>(() => readSpriteClipboard(key));
+  useEffect(() => {
+    setClip(readSpriteClipboard(key));
+  }, [key]);
+  useEffect(() => {
+    writeSpriteClipboard(key, clip);
   }, [key, clip]);
   return [clip, setClip];
 }

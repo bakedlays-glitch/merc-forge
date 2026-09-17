@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from mercwizard_core.backup import snapshot
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.facegear import (
     auto_position_overlay,
     crash_risk,
@@ -55,7 +55,7 @@ class FaceGearOrphan(BaseModel):
 class FaceGearLoadError(BaseModel):
     """An STI that failed to load during capacity detection.
 
-    Phase 2.4 surface: pre-fix these were silently dropped by a bare
+    Pre-fix, these were silently dropped by a bare
     `except Exception: continue` in `detect_facegear_capacities`. Now the
     UI can show "1 STI failed to load: Face_X.sti — corrupt ETRLE strip"
     instead of an empty list.
@@ -92,6 +92,37 @@ class FaceGearExtendResponse(BaseModel):
     extended: list[FaceGearExtendResult]
     backup_id: Optional[str] = None
     install_id: str
+
+
+def _resolve_facegear_target(infos, sti_name: str, relative_path: Optional[str] = None):
+    """Resolve one FaceGearInfo from the detected inventory, or None.
+
+    The same filename can exist in several data layers (e.g. `Data/` AND
+    `Data-UB/` both ship Face_GasMask.sti), and the bare-name lookup takes
+    the FIRST enumerated match — fine for the UI (which shows exactly that
+    copy) but ambiguous for scripts. Passing `relative_path` (as reported
+    by /facegear/capacity; slash- and case-insensitive) pins the exact
+    copy. A relative_path that no longer resolves returns None (→ 404)
+    rather than silently retargeting another layer's file.
+    """
+    if relative_path:
+        want = relative_path.replace("\\", "/").lower()
+        return next(
+            (i for i in infos if i.relative_path.replace("\\", "/").lower() == want),
+            None,
+        )
+    return next((i for i in infos if i.name.lower() == sti_name.lower()), None)
+
+
+def _facegear_not_found(sti_name: str, relative_path: Optional[str] = None) -> HTTPException:
+    which = relative_path or sti_name
+    return HTTPException(
+        status_code=404,
+        detail={
+            "error": "FACEGEAR_STI_NOT_FOUND",
+            "message": f"No '{which}' under faces/FACESGEAR/ in this install",
+        },
+    )
 
 
 @router.get("/facegear/capacity")
@@ -161,7 +192,7 @@ def facegear_extend(
         return FaceGearExtendResponse(extended=[], backup_id=None, install_id=info.id)
 
     results: list[FaceGearExtendResult] = []
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Snapshot INSIDE the lock so a concurrent route can't mutate
         # the file between snapshot and our write — without the lock,
         # backup captures stale bytes and any rollback would restore
@@ -207,6 +238,10 @@ class FaceGearOverlayBody(BaseModel):
     face_index: int = Field(..., ge=0, le=255)
     png_b64: str
     apply_to_imp: bool = True
+    # Optional exact-copy pin (see _resolve_facegear_target): the same
+    # filename can exist in several data layers; bare sti_name targets the
+    # first enumerated match.
+    relative_path: Optional[str] = None
 
 
 class FaceGearOverlayResult(BaseModel):
@@ -242,15 +277,9 @@ def facegear_overlay(
     state = get_state()
     ctx = make_install_context(info.path)
     infos = detect_facegear_capacities(ctx)
-    target = next((i for i in infos if i.name.lower() == body.sti_name.lower()), None)
+    target = _resolve_facegear_target(infos, body.sti_name, body.relative_path)
     if target is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "FACEGEAR_STI_NOT_FOUND",
-                "message": f"No '{body.sti_name}' under faces/FACESGEAR/ in this install",
-            },
-        )
+        raise _facegear_not_found(body.sti_name, body.relative_path)
 
     paths_to_write = [target.path]
     if body.apply_to_imp and not target.is_imp_variant:
@@ -270,13 +299,13 @@ def facegear_overlay(
 
     results: list[FaceGearOverlayResult] = []
     install_root_resolved = info.path.resolve()
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Snapshot INSIDE the lock to mirror /facegear/extend — a
         # parallel /facegear/{nudge,set-offset,auto-position} hitting
         # the same STI could otherwise land its write between our
         # snapshot and our lock acquisition. Backup would then capture
         # the concurrent writer's bytes, and a rollback would restore
-        # the wrong "pre-write" state. Bug-review finding A8/E2.
+        # the wrong "pre-write" state.
         backup_entry = snapshot(
             install_root=info.path,
             install_id=info.id,
@@ -336,6 +365,8 @@ class FaceGearAutoPositionBody(BaseModel):
     target_eye_x: int
     target_eye_y: int
     apply_to_imp: bool = True
+    # Optional exact-copy pin — see _resolve_facegear_target.
+    relative_path: Optional[str] = None
 
 
 class FaceGearAutoPositionResult(BaseModel):
@@ -396,15 +427,9 @@ def facegear_auto_position(
     state = get_state()
     ctx = make_install_context(info.path)
     infos = detect_facegear_capacities(ctx)
-    target = next((i for i in infos if i.name.lower() == body.sti_name.lower()), None)
+    target = _resolve_facegear_target(infos, body.sti_name, body.relative_path)
     if target is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "FACEGEAR_STI_NOT_FOUND",
-                "message": f"No '{body.sti_name}' under faces/FACESGEAR/ in this install",
-            },
-        )
+        raise _facegear_not_found(body.sti_name, body.relative_path)
 
     # Auto-detect source: first non-empty frame in the STI.
     from ja2py.fileformats.Sti import load_8bit_sti
@@ -434,9 +459,9 @@ def facegear_auto_position(
 
     results: list[FaceGearAutoPositionResult] = []
     install_root_resolved = info.path.resolve()
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Snapshot inside the lock — see /facegear/overlay for the
-        # rationale. Bug-review finding A8/E2.
+        # rationale.
         backup_entry = snapshot(
             install_root=info.path,
             install_id=info.id,
@@ -568,7 +593,7 @@ def facegear_orphans_repair(
 
     install_root_resolved = info.path.resolve()
     repaired: list[FaceGearOrphanRepairResult] = []
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Snapshot the targets INSIDE the lock. Source paths must not
         # change between snapshot and copy — a concurrent
         # /facegear/overlay touching `Face_X.sti` mid-repair would let
@@ -579,7 +604,6 @@ def facegear_orphans_repair(
         # state they were trying to repair. Targets don't exist yet
         # (orphan = missing partner), so snapshot captures "doesn't
         # exist" → restore deletes the copies we're about to make.
-        # Bug-review finding A8/E2.
         backup_entry = snapshot(
             install_root=info.path,
             install_id=info.id,
@@ -635,6 +659,8 @@ class FaceGearNudgeBody(BaseModel):
     dx: int
     dy: int
     apply_to_imp: bool = True
+    # Optional exact-copy pin — see _resolve_facegear_target.
+    relative_path: Optional[str] = None
 
 
 class FaceGearNudgeResult(BaseModel):
@@ -666,15 +692,9 @@ def facegear_nudge(
     state = get_state()
     ctx = make_install_context(info.path)
     infos = detect_facegear_capacities(ctx)
-    target = next((i for i in infos if i.name.lower() == body.sti_name.lower()), None)
+    target = _resolve_facegear_target(infos, body.sti_name, body.relative_path)
     if target is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "FACEGEAR_STI_NOT_FOUND",
-                "message": f"No '{body.sti_name}' under faces/FACESGEAR/ in this install",
-            },
-        )
+        raise _facegear_not_found(body.sti_name, body.relative_path)
 
     paths_to_write = [target.path]
     if body.apply_to_imp and not target.is_imp_variant:
@@ -685,9 +705,9 @@ def facegear_nudge(
 
     install_root_resolved = info.path.resolve()
     nudged: list[FaceGearNudgeResult] = []
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Snapshot inside the lock — see /facegear/overlay for the
-        # rationale. Bug-review finding A8/E2.
+        # rationale.
         backup_entry = snapshot(
             install_root=info.path,
             install_id=info.id,
@@ -735,6 +755,8 @@ class FaceGearSetOffsetBody(BaseModel):
     offset_x: int
     offset_y: int
     apply_to_imp: bool = True
+    # Optional exact-copy pin — see _resolve_facegear_target.
+    relative_path: Optional[str] = None
 
 
 class FaceGearSetOffsetResult(BaseModel):
@@ -763,15 +785,9 @@ def facegear_set_offset(
     state = get_state()
     ctx = make_install_context(info.path)
     infos = detect_facegear_capacities(ctx)
-    target = next((i for i in infos if i.name.lower() == body.sti_name.lower()), None)
+    target = _resolve_facegear_target(infos, body.sti_name, body.relative_path)
     if target is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "FACEGEAR_STI_NOT_FOUND",
-                "message": f"No '{body.sti_name}' under faces/FACESGEAR/ in this install",
-            },
-        )
+        raise _facegear_not_found(body.sti_name, body.relative_path)
 
     paths_to_write = [target.path]
     if body.apply_to_imp and not target.is_imp_variant:
@@ -782,9 +798,9 @@ def facegear_set_offset(
 
     install_root_resolved = info.path.resolve()
     written: list[FaceGearSetOffsetResult] = []
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Snapshot inside the lock — see /facegear/overlay for the
-        # rationale. Bug-review finding A8/E2.
+        # rationale.
         backup_entry = snapshot(
             install_root=info.path,
             install_id=info.id,
@@ -823,6 +839,10 @@ def facegear_overlay_preview(
     sti_name: str = Query(...),
     face_index: int = Query(..., ge=0, le=255),
     install_id: Optional[str] = Query(default=None),
+    relative_path: Optional[str] = Query(
+        default=None,
+        description="Pin the exact data-layer copy (as reported by /facegear/capacity) when the same filename exists in several layers.",
+    ),
 ) -> dict:
     """Read frame[face_index] from one FaceGear STI as a base64 PNG.
 
@@ -834,15 +854,9 @@ def facegear_overlay_preview(
     info = _resolve_install(install_id)
     ctx = make_install_context(info.path)
     infos = detect_facegear_capacities(ctx)
-    target = next((i for i in infos if i.name.lower() == sti_name.lower()), None)
+    target = _resolve_facegear_target(infos, sti_name, relative_path)
     if target is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": "FACEGEAR_STI_NOT_FOUND",
-                "message": f"No '{sti_name}' under faces/FACESGEAR/ in this install",
-            },
-        )
+        raise _facegear_not_found(sti_name, relative_path)
     png_bytes = extract_overlay(target.path, face_index)
     # Also surface the frame's signed sOffsetX/sOffsetY so the UI can show
     # the nudge widget for frames authored in a prior session — without

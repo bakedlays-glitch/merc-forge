@@ -158,7 +158,7 @@ export async function readEffectiveSetting(
   });
 }
 
-// ---- v1.8: Presets (Phase B) ----
+// ---- v1.8: Presets ----
 
 export async function applyPresetChanges(
   folder: string,

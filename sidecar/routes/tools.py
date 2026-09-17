@@ -564,7 +564,7 @@ def slf_extract_stream(body: SlfExtractBody):
         # aborted mid-stream (closed tab, navigated away mid-extract),
         # the generator was GC'd but the outer-scope SlfFS handle never
         # closed. On Windows that kept the SLF exclusively open until
-        # the sidecar restarted. Sweep bug-review finding.
+        # the sidecar restarted.
         try:
             fs = _open_slf(slf_path)
         except HTTPException as e:

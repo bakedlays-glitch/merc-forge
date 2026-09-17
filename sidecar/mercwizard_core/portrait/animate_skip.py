@@ -19,7 +19,7 @@ the STI is valid and won't crash.
 
 This module's `make_skip_frames()` always returns exactly 7 PIL Images.
 Sub-frame sizes default to vanilla 17×6 / 14×6 but the caller can override
-via the bounding-box `w` / `h` fields (Slice B drag-rect UX).
+via the bounding-box `w` / `h` fields (the drag-rect UX).
 """
 from __future__ import annotations
 
@@ -28,8 +28,7 @@ from dataclasses import dataclass
 from PIL import Image
 
 
-# Vanilla 1.13 conventions. The engine reads sizes from the STI per-frame
-# header, so non-vanilla mods (Vengeance: 31×13 / 32×21) work too.
+# Vanilla 1.13 defaults; non-vanilla sizes work too (see module docstring).
 EYE_SUBFRAME_SIZE = (17, 6)
 MOUTH_SUBFRAME_SIZE = (14, 6)
 

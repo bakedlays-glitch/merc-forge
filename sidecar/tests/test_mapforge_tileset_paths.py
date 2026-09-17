@@ -2,7 +2,7 @@
 (`_install_tileset_paths` / `_tileset_paths_for` in routes/mapforge.py).
 
 This is the load-bearing de-coupling that lets Map Forge render against
-ANY user's JA2 1.13 install instead of two hardcoded dev-machine installs.
+ANY user's JA2 1.13 install instead of two hardcoded local installs.
 The renderer module (mercwizard_core.mapforge_engine.iso_renderer) ships
 NO install paths; the route derives tileset loose-dirs + Tilesets.slf
 archives from the active install and passes them to IsoRenderer/StiCache.

@@ -154,7 +154,7 @@ def validate_install(install_root: Path) -> InstallInfo:
     # Reject anything under the user's temp directory in production.
     # Real installs never live there; a path under TEMP is a
     # test-fixture leak (an orphaned `tempfile.mkdtemp()` directory).
-    # 2026-05-25: a user hit this when a stray `tmpl4eaz18_` dir with a
+    # A user hit this when a stray `tmpl4eaz18_` dir with a
     # placeholder JA2.exe survived a test run and kept re-appearing on
     # the FirstRun install picker. See feedback_tests_must_not_persist_to_user_appdata.md.
     #

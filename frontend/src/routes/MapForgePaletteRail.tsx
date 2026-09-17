@@ -20,6 +20,7 @@ import { useEffect, useRef, useState } from "react";
 import type { IsoRenderer } from "../lib/IsoRenderer";
 import { getLibraryStiThumbBlobUrl, type RecentAddition } from "../lib/mapforge";
 import { sameBrush } from "../lib/brushBuckets";
+import type { ControlGroup } from "../lib/controlGroups";
 import type { ActiveBrush } from "./MapForgePalette";
 
 export interface MapForgePaletteRailProps {
@@ -35,10 +36,15 @@ export interface MapForgePaletteRailProps {
    * (install, tileset) cycle. Index 0 = most recent. Persisted in
    * localStorage by the parent — survives page reloads. */
   recentAdditions: RecentAddition[];
-  /** Pinned favorite brushes for this (xmlPath, tileset). Shown in a
-   * dedicated row with number badges (1-9 = the keyboard accelerators). */
-  favorites: ActiveBrush[];
-  /** Pin/unpin a brush as a favorite (star toggle on any brush tile). */
+  /** StarCraft-style control groups (1-9) for this (xmlPath, tileset) —
+   * a brush or a copied sprite group per slot. Replaces the old
+   * Favorites row; shown with number badges (1-9 = the
+   * keyboard accelerators). */
+  controlGroups: ControlGroup[];
+  /** Recall (arm) the group at this 0-based index. */
+  onRecallGroup: (i: number) => void;
+  /** Star toggle on any brush tile — saves that brush into the first
+   * empty control-group slot. Prop name kept from the Favorites era. */
   onToggleFavorite: (b: ActiveBrush) => void;
   /** Re-select a recent brush. Fires the same onPick path as the
    * full palette so the parent's setActiveBrush + log emission run
@@ -77,11 +83,15 @@ export interface MapForgePaletteRailProps {
 
 export function MapForgePaletteRail({
   renderer, activeBrush, recentBrushes, recentAdditions,
-  favorites, onToggleFavorite,
+  controlGroups, onRecallGroup, onToggleFavorite,
   onPick, onPickAddition, onOpenInTilesetEditor,
   onOpenViewer, recentPoppedOut = false, onTogglePopOutRecent,
   hideBrowseButton = false, embedded = false,
 }: MapForgePaletteRailProps) {
+  // Brushes already saved to a group — drives the star's filled state in
+  // the Recent grid below (sameBrush match), so it stays meaningful now
+  // that the star writes into a group instead of a separate list.
+  const groupedBrushes = controlGroups.flatMap((g) => (g?.kind === "brush" ? [g.brush] : []));
   return (
     <div className={`flex flex-col gap-2 p-2 ${
       embedded ? "" : "h-full rounded border border-gray-700 bg-gray-950"
@@ -97,24 +107,43 @@ export function MapForgePaletteRail({
         </button>
       )}
 
-      {/* Favorites — pinned brushes with number-key accelerators (1-9).
-          Star any tile to pin it here. Hidden until the first pin. */}
-      {favorites.length > 0 && (
+      {/* Groups — StarCraft-style control groups with number-key
+          accelerators (1-9), replacing Favorites. A slot
+          holds an armed brush or a copied sprite group; star a brush
+          tile below to save it into the first empty slot, or use
+          Ctrl+1..9 on the canvas. Hidden until the first group is saved. */}
+      {controlGroups.some((g) => g !== null) && (
         <div className="flex flex-col gap-0.5">
           <span className="text-[10px] uppercase tracking-wider text-amber-400">
-            Favorites <span className="text-gray-600">(1-9)</span>
+            Groups <span className="text-gray-600">(1-9)</span>
           </span>
-          <RecentBrushGrid
-            recentBrushes={favorites}
-            renderer={renderer}
-            activeBrush={activeBrush}
-            onPick={onPick}
-            size={44}
-            cols={2}
-            favoriteBrushes={favorites}
-            onToggleFavorite={onToggleFavorite}
-            showFavoriteNumbers
-          />
+          <ul className="grid grid-cols-2 gap-1">
+            {controlGroups.map((g, i) => g && (
+              <li key={i} className="relative">
+                <button
+                  type="button"
+                  onClick={() => onRecallGroup(i)}
+                  title={
+                    (g.kind === "brush" ? g.brush.sti_filename : `${g.group.items.length} sprites`)
+                    + `\nPress ${i + 1} to arm`
+                  }
+                  className="flex w-full items-center gap-1 rounded border border-gray-700 bg-gray-900 px-1 py-1.5 text-[9px] hover:bg-gray-800"
+                >
+                  <span aria-hidden="true">{g.kind === "brush" ? "🖌" : "▦"}</span>
+                  <span className="min-w-0 flex-1 truncate text-left text-gray-300">
+                    {g.kind === "brush"
+                      ? g.brush.sti_filename.replace(/\.sti$/i, "")
+                      : `${g.group.items.length} sprites`}
+                  </span>
+                </button>
+                <span
+                  className="pointer-events-none absolute left-0.5 top-0.5 rounded bg-amber-700/90 px-1 text-[8px] font-semibold leading-none text-amber-50"
+                >
+                  {i + 1}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -150,7 +179,7 @@ export function MapForgePaletteRail({
               onPick={onPick}
               size={44}
               cols={2}
-              favoriteBrushes={favorites}
+              favoriteBrushes={groupedBrushes}
               onToggleFavorite={onToggleFavorite}
             />
           )}
@@ -204,9 +233,11 @@ export function RecentBrushGrid({
   /** Fixed column count, or <= 0 for responsive auto-fill keyed to
    * `size` (used by the resizable pop-out panel so tiles reflow). */
   cols?: number;
-  /** Current favorites — drives each tile's pin (★/☆) state. */
+  /** Brushes already saved to a control group — drives each tile's star
+   * (★/☆) state. */
   favoriteBrushes?: ActiveBrush[];
-  /** When set, each tile shows a star button to pin/unpin. */
+  /** When set, each tile shows a star button that saves it into the
+   * first empty control-group slot. */
   onToggleFavorite?: (b: ActiveBrush) => void;
   /** When true, tiles show their 1-based index as a number badge — the
    * keyboard accelerator (1-9). Used by the Favorites row. */
@@ -322,8 +353,8 @@ function RecentBrushTile({
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
-          title={isFavorite ? "Unpin from Favorites" : "Pin to Favorites"}
-          aria-label={isFavorite ? "Unpin from Favorites" : "Pin to Favorites"}
+          title={isFavorite ? "Already in a group — save to another slot" : "Save to a group (Ctrl+1-9 on the canvas)"}
+          aria-label={isFavorite ? "Already in a group" : "Save to a control group"}
           className={`absolute right-0 top-0 rounded px-0.5 text-[11px] leading-none ${
             isFavorite ? "text-amber-300" : "text-gray-600 hover:text-amber-300"
           }`}

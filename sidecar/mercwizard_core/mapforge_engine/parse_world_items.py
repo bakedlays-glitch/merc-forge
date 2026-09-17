@@ -1,15 +1,15 @@
 """
 parse_world_items.py - WORLDITEM appendix parser for JA2 1.13 saved maps.
 
-Phase E1.5 follow-on (Option 1 / Phase WA): closes the items-section blocker
+Closes the items-section blocker
 that prevents `parse_appendix_minimal` from reading past the items appendix.
 
 Two engine code paths per WORLDITEM::Load (SaveLoadGame.cpp:2839):
 
   Path B (LEGACY, fixed-size) — major < 6.0 OR minor <= 26
     Reads sizeof(OLD_WORLDITEM_101) = 52 bytes per item. No recursion. No
-    Items.xml dependency. Covers 5,950 / 8,038 corpus records (~74%) per the
-    Phase E1.5 v2 corpus rebuild on 2026-05-19.
+    Items.xml dependency. Covers 5,950 / 8,038 corpus records (~74%) of
+    the corpus.
 
   Path A (MODERN, recursive) — major >= 6.0 AND minor > 26
     Reads variable-size WORLDITEM POD + OBJECTTYPE (with recursive

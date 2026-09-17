@@ -313,6 +313,36 @@ def test_schema_flag_set_matches_engine() -> None:
     assert "smoker" not in schema.FLAG_FIELDS
 
 
+def test_schema_payload_includes_help_for_every_field() -> None:
+    payload = {e["key"]: e for e in schema.schema_payload()}
+    missing = [s.key for s in schema.FIELD_SPECS if not payload.get(s.key, {}).get("help")]
+    assert missing == [], f"schema fields missing help: {missing}"
+    extra = set(schema._FIELD_DOCS) - {s.key for s in schema.FIELD_SPECS}
+    assert extra == set(), f"help for unknown fields: {extra}"
+    assert "negative" in payload["dislikebackground"]["help"].lower()
+    assert payload["dislikebackground"].get("note")
+    desert = payload["ap_desert"]["help"]
+    assert "percent" in desert.lower() or "%" in desert
+    assert "(100" in desert
+    assert "108" in desert
+    assert "[[AP" in desert and "[[percent" in desert
+    strength = payload["strength"]["help"]
+    assert "[[Strength]]" in strength
+    assert "[[percent" in strength
+    assert "[[Agility]]" in payload["agility"]["help"]
+    assert "[[Marksmanship]]" in payload["marksmanship"]["help"]
+    carry = payload["carrystrength"]["help"]
+    assert "[[Strength]]" in carry
+    # "not the Strength stat" is an intentional cross-link, not a false hit.
+    assert "not the [[Strength]] stat" in payload["capitulation"]["help"]
+    unknown = []
+    for e in payload.values():
+        for m in re.findall(r"\[\[([^|\]]+)", e.get("help", "")):
+            if m not in schema.HELP_TERMS:
+                unknown.append(m)
+    assert unknown == [], f"help links unknown glossary terms: {unknown}"
+
+
 # ════════════════════════════════════════════════════════════════════════════
 #  Route integration tests
 # ════════════════════════════════════════════════════════════════════════════
@@ -454,7 +484,7 @@ def test_route_no_backgrounds_file_returns_400(client: TestClient, tmp_path: Pat
     assert r.json()["detail"]["error"] == "BACKGROUNDS_NOT_PRESENT"
 
 
-# ── cp1252 / non-UTF-8 tolerance (review fix 2026-06-06) ─────────────────────
+# ── cp1252 / non-UTF-8 tolerance (review fix) ─────────────────────
 
 def test_editor_survives_cp1252_backgrounds(tmp_path: Path) -> None:
     """A Windows-1252 Backgrounds.xml (accented high bytes, no <?xml?> decl) must

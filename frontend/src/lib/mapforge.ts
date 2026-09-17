@@ -1,9 +1,9 @@
 /**
  * MapForge — frontend API client for the /api/v1/mapforge/* sidecar routes.
  *
- * Phase 0 (read-only): lists sector .dat files from the active install,
- * fetches sector metadata + room lists, renders sector PNGs, and inspects
- * individual tiles.
+ * Lists sector .dat files from the active install, fetches sector
+ * metadata and room lists, renders sector PNGs, inspects individual tiles,
+ * and drives the editing session, library and placement routes.
  *
  * Mirrors the Pydantic models in sidecar/routes/mapforge.py — keep these
  * shapes in sync when adding fields backend-side.
@@ -93,7 +93,7 @@ async function authedFetch(path: string, init?: RequestInit): Promise<Response> 
   return fetch(`http://127.0.0.1:${port}/api/v1${path}`, { ...init, headers });
 }
 
-async function jsonGet<T>(path: string): Promise<T> {
+export async function jsonGet<T>(path: string): Promise<T> {
   const res = await authedFetch(path);
   if (!res.ok) {
     let detail: unknown = null;
@@ -127,7 +127,7 @@ async function jsonBody<T>(
   return res.json() as Promise<T>;
 }
 
-function jsonPost<T>(path: string, body: unknown): Promise<T> {
+export function jsonPost<T>(path: string, body: unknown): Promise<T> {
   return jsonBody<T>("POST", path, body);
 }
 function jsonPut<T>(path: string, body: unknown): Promise<T> {
@@ -198,7 +198,7 @@ export async function streamInstallMaps(
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
       if (line.length > 0) {
-        // Parse inside try, dispatch outside — TODO #14 fix mirroring
+        // Parse inside try, dispatch outside — mirroring
         // the streamExtractSlf pattern in lib/tools.ts. Pre-fix the
         // backend "error" event re-throw was caught by the same
         // try/catch handling JSON.parse failures and silently logged
@@ -384,7 +384,7 @@ export function generateRadar(
   );
 }
 
-// ─── Edit op (Phase 2) ──────────────────────────────────────────────
+// ─── Edit op ────────────────────────────────────────────────────────
 export type EditOp =
   | "replace"
   | "add"
@@ -396,28 +396,7 @@ export type EditOp =
 export type LayerName =
   "land" | "objs" | "shadows" | "structs" | "roofs" | "onroofs";
 
-export interface EditTileBody {
-  dat: string;
-  x: number;
-  y: number;
-  layer?: LayerName;
-  op: EditOp;
-  entry_index?: number;
-  slot?: number;
-  sub?: number;
-  room_id?: number;
-}
-
-export interface EditTileResult {
-  ok: boolean;
-  op: EditOp;
-  before: number[][] | null;
-  after: number[][];
-  backup_path: string | null;
-  bytes_written: number;
-}
-
-// ─── JSD viewer (Phase 4: tile inspector) ────────────────────────────
+// ─── JSD viewer (tile inspector) ─────────────────────────────────────
 // Parsed representation of a slot's .jsd companion file. Used by the
 // tile inspector's per-entry "View JSD" panel to surface multi-tile
 // footprint + passability flags + PROFILE voxel grids.
@@ -544,13 +523,21 @@ export async function fetchStiFrameBlobUrl(
   return URL.createObjectURL(blob);
 }
 
-// ─── Tileset palette (Phase 2B) ──────────────────────────────────────
+// ─── Tileset palette ─────────────────────────────────────────────────
 export interface PaletteSlot {
   slot: number;
   sti_filename: string;
   frame_count: number;
   category: string;
   has_jsd: boolean;
+  /** Friendly name for The Wasteland's custom prop sheets (e.g.
+   * "Junktown furnishings" for gecko_props_v101.sti). null for stock
+   * art — the UI falls back to the filename. */
+  display_name?: string | null;
+  /** Which map / feature the prop belongs to (e.g. "Junktown (L8)"). */
+  origin?: string | null;
+  /** {sub index → prop name} for the sub-picker; empty for sheet-level art. */
+  sub_names?: Record<number, string>;
 }
 
 export interface TilesetPalette {
@@ -727,7 +714,7 @@ export async function prefetchPaletteSheet(
   return getCachedPaletteSheetBlobUrl(xmlPath, tileset, fingerprint);
 }
 
-// ─── Session-based editing (Phase 2A) ───────────────────────────────
+// ─── Session-based editing ──────────────────────────────────────────
 export interface SessionInfo {
   session_id: string;
   dat_path: string;
@@ -747,6 +734,11 @@ export interface SessionInfo {
   /** Original URI the client passed to /sessions (slf://... or a
    * filesystem path). Useful for debug + status display. */
   source_uri?: string;
+  /** Set ONLY on the open (POST /sessions) response: a crash-recovery
+   * autosave snapshot from a previous sidecar process exists for this
+   * map and differs from the on-disk file. Offer restore/discard via
+   * sessionRecovery(). */
+  recovery?: { saved_at: number; edit_count: number } | null;
 }
 
 export interface SessionEdit {
@@ -776,18 +768,49 @@ export interface SaveResult {
   backup_path: string | null;
 }
 
+/** Per-tab memory of the session WE opened for a map, so a reload can
+ * reclaim its own orphan (the browser kills the page before any close
+ * lands). sessionStorage is per-tab: another tab on the same map never
+ * names our session, so the sidecar keeps protecting it. */
+function ownSessionKey(datPath: string): string {
+  return `mapforge_own_session:${datPath.toLowerCase()}`;
+}
+export function rememberOwnSession(datPath: string, sessionId: string): void {
+  try { sessionStorage.setItem(ownSessionKey(datPath), sessionId); } catch { /* private mode */ }
+}
+export function forgetOwnSession(datPath: string): void {
+  try { sessionStorage.removeItem(ownSessionKey(datPath)); } catch { /* private mode */ }
+}
+
 export function openSession(
   datPath: string,
   xmlPath: string,
   tileset: number,
 ): Promise<SessionInfo> {
+  let previous: string | null = null;
+  try { previous = sessionStorage.getItem(ownSessionKey(datPath)); } catch { /* private mode */ }
   return jsonPost<SessionInfo>("/mapforge/sessions", {
     dat: datPath, xml: xmlPath, tileset,
+    ...(previous ? { previous_session_id: previous } : {}),
   });
 }
 
 export function closeSession(sessionId: string): Promise<{ closed: string }> {
   return jsonDelete<{ closed: string }>(`/mapforge/sessions/${sessionId}`);
+}
+
+/** Act on the crash-recovery snapshot offered by openSession().
+ * `restore` swaps the session's server-side state to the snapshot (the
+ * session becomes dirty; the .dat on disk is untouched until save);
+ * `discard` deletes the snapshot. Returns the updated SessionInfo. */
+export function sessionRecovery(
+  sessionId: string,
+  action: "restore" | "discard",
+): Promise<SessionInfo> {
+  return jsonPost<SessionInfo>(
+    `/mapforge/sessions/${encodeURIComponent(sessionId)}/recovery`,
+    { action },
+  );
 }
 
 /** Fetch the live SessionInfo for an existing session. Throws (HTTP 404
@@ -810,8 +833,14 @@ export function applyEdits(
   );
 }
 
-export function saveSession(sessionId: string): Promise<SaveResult> {
-  return jsonPost<SaveResult>(`/mapforge/sessions/${sessionId}/save`, {});
+/** `force` skips the sidecar's external-modification guard (409
+ * EXTERNAL_MODIFICATION when the .dat changed on disk since the session
+ * opened it). Callers pass it on an explicit retry after that 409. */
+export function saveSession(
+  sessionId: string, opts?: { force?: boolean },
+): Promise<SaveResult> {
+  const q = opts?.force ? "?force=true" : "";
+  return jsonPost<SaveResult>(`/mapforge/sessions/${sessionId}/save${q}`, {});
 }
 
 // ─── New sector + Save-a-copy-as (R6 "create / clone sectors") ──────────
@@ -1124,7 +1153,7 @@ export async function runGenerator(
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
       if (line.length > 0) {
-        // Parse inside try, dispatch outside — TODO #14 fix mirroring
+        // Parse inside try, dispatch outside — mirroring
         // streamExtractSlf in lib/tools.ts.
         let evt: GeneratorEvent | null = null;
         try {
@@ -1198,23 +1227,6 @@ export async function fetchSessionRender(params: {
   };
   const blob = await res.blob();
   return { url: URL.createObjectURL(blob), meta };
-}
-
-// ─── Stateless edit (Phase 2 fallback, will be replaced) ─────────────
-export async function editTile(body: EditTileBody): Promise<EditTileResult> {
-  const res = await authedFetch("/mapforge/sector/edit-tile", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let detail: unknown = null;
-    try { detail = await res.json(); } catch {}
-    throw new Error(
-      `Edit failed (HTTP ${res.status}): ${JSON.stringify(detail)}`
-    );
-  }
-  return res.json() as Promise<EditTileResult>;
 }
 
 /**
@@ -1410,7 +1422,7 @@ export function tileDiamondCorners(
   ];
 }
 
-// ─── Phase 3: client-side renderer (atlas + parsed dict) ────────────
+// ─── Client-side renderer (atlas + parsed dict) ─────────────────────
 // Together these power IsoRenderer.ts — sidecar serves data only; the
 // browser composites with ctx.drawImage so edits feel instant.
 
@@ -1584,7 +1596,7 @@ export async function streamAtlasBuild(
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
       if (line.length > 0) {
-        // Parse inside try, dispatch outside — TODO #14 fix mirroring
+        // Parse inside try, dispatch outside — mirroring
         // streamExtractSlf in lib/tools.ts.
         let evt: AtlasBuildEvent | null = null;
         try {
@@ -1656,7 +1668,7 @@ export async function streamPaletteSheetBuild(
       const line = buf.slice(0, nl).trim();
       buf = buf.slice(nl + 1);
       if (line.length > 0) {
-        // Parse inside try, dispatch outside — TODO #14 fix mirroring
+        // Parse inside try, dispatch outside — mirroring
         // streamExtractSlf in lib/tools.ts.
         let evt: PaletteSheetBuildEvent | null = null;
         try {
@@ -1698,7 +1710,7 @@ export async function fetchAtlasBlobUrl(
   xmlPath: string,
   tileset: number,
   onProgress?: (loaded: number, total: number | null) => void,
-  opts: { bypassCache?: boolean; sessionId?: string } = {},
+  opts: { bypassCache?: boolean; sessionId?: string; cacheKey?: string } = {},
 ): Promise<string> {
   const params: Record<string, string | number | undefined> = { xml: xmlPath, tileset };
   // See getAtlasManifest for the rationale: after an STI is added to
@@ -1707,6 +1719,11 @@ export async function fetchAtlasBlobUrl(
   // (max-age=86400 on this endpoint) would serve the pre-add PNG to
   // the reload path. Cache-bust to force a network fetch.
   if (opts.bypassCache) params._ = Date.now();
+  // Fingerprint cache key: a tileset art change (new/changed STI) yields a new
+  // fingerprint, so the atlas URL changes and the browser's 24h HTTP cache
+  // (max-age=86400 on this endpoint) can't serve the pre-change PNG. Caching
+  // still works across reloads while the tileset art is unchanged.
+  if (opts.cacheKey) params.v = opts.cacheKey;
   // sessionId triggers the partial-atlas fetch (sector-specific subset).
   if (opts.sessionId) params.session_id = opts.sessionId;
   const res = await authedFetch(
@@ -1897,7 +1914,7 @@ export function previewExtractSlfToLoose(
   );
 }
 
-// ─── Phase 4: STI library (Asset Browser catalog) ────────────────────
+// ─── STI library (Asset Browser catalog) ─────────────────────────────
 // Browse the 4000+ unique STIs that the sibling Asset Browser project
 // has cataloged across all 23 JA2 installs on the machine, then import
 // chosen ones into the active install's tileset.
@@ -1987,7 +2004,7 @@ export interface RecentAddition {
   has_jsd: boolean;
 }
 
-/** One sub-frame of a library STI, as returned by the Phase 3
+/** One sub-frame of a library STI, as returned by the
  * `/stis/{sha256}/subs` endpoint. `sha256` is the per-sub sha (NOT the
  * parent STI's), suitable for the `/subframes/{sha}/thumb` PNG
  * endpoint. */
@@ -2043,14 +2060,11 @@ export function getLibraryTags(): Promise<LibraryTag[]> {
   return jsonGet<LibraryTag[]>("/mapforge/library/tags");
 }
 
-/** Build the authed thumbnail URL. Thumbnails are PNGs cached by the
- * Asset Browser; the sidecar serves them with a long cache header so
- * the grid scrolls smoothly. NOTE: <img src=...> can't send the
- * X-MercWizard-Token header — for that we'd need fetch+blob, but the
- * Tauri CSP allows http://127.0.0.1:* for img-src in dev (and the
- * token check is bypassed for local-only same-origin requests when
- * auth is off). For now the URL is suitable for the dev workflow;
- * upgrade to blob-fetched if auth bites. */
+/** Blob URL for a library STI's thumbnail. Thumbnails are PNGs cached
+ * by the Asset Browser; the sidecar serves them with a long cache header
+ * so the grid scrolls smoothly. Fetched with the token on a request
+ * header and handed to <img> as an object URL, because an element-driven
+ * load cannot attach a header itself. Revoke the URL when done with it. */
 export async function getLibraryStiThumbBlobUrl(sha256: string): Promise<string> {
   const res = await authedFetch(`/mapforge/library/stis/${sha256}/thumb`);
   if (!res.ok) throw new Error(`thumb fetch failed: HTTP ${res.status}`);
@@ -2135,7 +2149,7 @@ export function copyTileToTileset(
   );
 }
 
-/** Phase 3: list every sub-frame of the given library STI. Powers
+/** List every sub-frame of the given library STI. Powers
  * the sub-grid in AddStiToTilesetModal + the "View subs" affordance
  * on RecentAdditionCard. Read-only — the catalog is the source of
  * truth, no edits ever go via this endpoint. */
@@ -2143,7 +2157,7 @@ export function listLibrarySubs(sha256: string): Promise<LibrarySubList> {
   return jsonGet<LibrarySubList>(`/mapforge/library/stis/${sha256}/subs`);
 }
 
-/** Phase 3: blob URL for a single sub-frame's thumbnail. The PNG is
+/** Blob URL for a single sub-frame's thumbnail. The PNG is
  * cached by the Asset_Browser scanner and proxied through the
  * MercWizard2 sidecar so a single auth token works for STI + sub
  * thumbs from the same origin. */
@@ -2155,7 +2169,7 @@ export async function getLibrarySubThumbBlobUrl(sub_sha256: string): Promise<str
 }
 
 
-// ─── Phase 4: inject-sub flow ────────────────────────────────────────
+// ─── Inject-sub flow ─────────────────────────────────────────────────
 
 export interface LooseSlot {
   slot: number;
@@ -2178,7 +2192,7 @@ export interface InjectSubResult {
   backup_path: string | null;
 }
 
-/** Phase 4: list every slot in the active install's tileset whose
+/** List every slot in the active install's tileset whose
  * STI is loose-on-disk (mutable). Drives the destination dropdown
  * of the inject-sub modal — SLF-only slots are excluded because v1
  * inject can't extract from SLFs first. */
@@ -2186,7 +2200,7 @@ export function listLooseSlots(tileset: number): Promise<LooseSlotList> {
   return jsonGet<LooseSlotList>(`/mapforge/library/tilesets/${tileset}/loose-slots`);
 }
 
-/** Phase 4: append one sub-frame from a library STI onto an existing
+/** Append one sub-frame from a library STI onto an existing
  * tileset slot's STI binary. The destination must be loose-on-disk
  * (use listLooseSlots to enumerate) and have a matching 8-bit
  * palette (unless `force=true`). On success the destination .sti is

@@ -7,6 +7,7 @@ One integration test exercises the real shipped artifact.
 """
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -46,6 +47,62 @@ SYNTH = {
     },
 }
 
+A_STI = "1" * 64
+OTHER_STI = "2" * 64
+A_FRAME = "a" * 64
+OTHER_FRAME = "b" * 64
+
+SYNTH_V2 = {
+    **copy.deepcopy(SYNTH),
+    "schema_version": 2,
+    "hash_algorithm": "sha256",
+    "maps": {},
+    "candidates": [
+        {
+            "source": "stock", "tileset_id": 7, "biome": "urban",
+            "layer": "structs", "slot": 12, "sub": 1, "weight": 5,
+            "sti_sha256": A_STI, "frame_sha256": A_FRAME,
+            "compatibility_id": f"sha256:{A_FRAME}",
+            "availability": "verified", "map_ids": [],
+            "source_installs": ["S"],
+            "jsd_sha256": "c" * 64, "anchor_sub": 1,
+            "structure_members": [[0, 0, 1]],
+            "scatter_eligible": True, "exclusion_reason": None,
+        },
+        {
+            "source": "stock", "tileset_id": 7, "biome": "urban",
+            "layer": "structs", "slot": 12, "sub": 1, "weight": 99,
+            "sti_sha256": OTHER_STI, "frame_sha256": OTHER_FRAME,
+            "compatibility_id": f"sha256:{OTHER_FRAME}",
+            "availability": "verified", "map_ids": [],
+            "source_installs": ["S"],
+            "jsd_sha256": "d" * 64, "anchor_sub": 1,
+            "structure_members": [[0, 0, 1]],
+            "scatter_eligible": True, "exclusion_reason": None,
+        },
+        {
+            "source": "combined", "tileset_id": 7, "biome": "urban",
+            "layer": "structs", "slot": 12, "sub": 1, "weight": 8,
+            "sti_sha256": A_STI, "frame_sha256": A_FRAME,
+            "compatibility_id": f"sha256:{A_FRAME}",
+            "availability": "verified", "map_ids": [],
+            "source_installs": ["R", "S"],
+            "jsd_sha256": "c" * 64, "anchor_sub": 1,
+            "structure_members": [[0, 0, 1]],
+            "scatter_eligible": True, "exclusion_reason": None,
+        },
+    ],
+    "compatibility": {
+        "7": {"12": {
+            A_STI: {"frames": {A_FRAME: [4]}, "source_installs": ["S"]},
+            OTHER_STI: {
+                "frames": {OTHER_FRAME: [1]}, "source_installs": ["R"]
+            },
+        }}
+    },
+    "diagnostics": {},
+}
+
 
 @pytest.fixture
 def synth_corpus(monkeypatch, tmp_path):
@@ -63,6 +120,16 @@ def synth_corpus(monkeypatch, tmp_path):
     yield
     gc._data.cache_clear()
     gc._coverage.cache_clear()
+
+
+@pytest.fixture
+def synth_schema2(monkeypatch, tmp_path):
+    p = tmp_path / "generator_corpus.json"
+    p.write_text(json.dumps(SYNTH_V2), encoding="utf-8")
+    monkeypatch.setattr(gc, "_CORPUS_PATH", p)
+    gc._data.cache_clear()
+    yield
+    gc._data.cache_clear()
 
 
 # ── loader ───────────────────────────────────────────────────────────────
@@ -103,6 +170,60 @@ def test_available_and_lists(synth_corpus):
     assert gc.list_sources() == ["stock", "redux", "combined"]
     assert "desert" in gc.list_biomes()
     assert gc.coverage("stock", "urban")["n_maps"] == 5
+
+
+def test_schema2_compatible_subs_uses_frame_identity_not_number(synth_schema2):
+    assert gc.compatible_subs("stock", 7, "structs", 12, A_STI) == [(4, 5)]
+
+
+def test_schema2_compatible_subs_rejects_unknown_active_art(synth_schema2):
+    assert gc.compatible_subs("stock", 7, "structs", 12, "f" * 64) == []
+
+
+def test_schema2_compatible_subs_falls_back_to_combined(synth_schema2):
+    assert gc.compatible_subs("redux", 7, "structs", 12, A_STI) == [(4, 8)]
+
+
+def test_schema2_generic_lookup_excludes_multitile_structure(monkeypatch, tmp_path):
+    corpus = copy.deepcopy(SYNTH_V2)
+    for candidate in corpus["candidates"]:
+        if candidate["sti_sha256"] == A_STI:
+            candidate["structure_members"] = [[0, 0, 1], [0, -1, 1]]
+            candidate["scatter_eligible"] = False
+            candidate["exclusion_reason"] = "multi_tile_structure"
+    path = tmp_path / "multi.json"
+    path.write_text(json.dumps(corpus), encoding="utf-8")
+    monkeypatch.setattr(gc, "_CORPUS_PATH", path)
+    gc._data.cache_clear()
+    try:
+        assert gc.compatible_subs("stock", 7, "structs", 12, A_STI) == []
+        assert gc.compatible_subs(
+            "stock", 7, "structs", 12, A_STI, include_multitile=True
+        ) == [(4, 5)]
+    finally:
+        gc._data.cache_clear()
+
+
+def test_schema1_identity_lookup_requires_explicit_unverified_opt_in(synth_corpus):
+    assert gc.compatible_subs("stock", 7, "structs", 12, A_STI) == []
+    assert gc.compatible_subs(
+        "stock", 7, "structs", 12, A_STI,
+        allow_unverified_schema1=True,
+    ) == [(1, 5), (2, 3)]
+
+
+def test_unknown_future_schema_is_rejected_loudly(monkeypatch, tmp_path):
+    corpus = copy.deepcopy(SYNTH)
+    corpus["schema_version"] = 99
+    path = tmp_path / "future.json"
+    path.write_text(json.dumps(corpus), encoding="utf-8")
+    monkeypatch.setattr(gc, "_CORPUS_PATH", path)
+    gc._data.cache_clear()
+    try:
+        with pytest.raises(gc.UnsupportedCorpusSchemaError):
+            gc.available()
+    finally:
+        gc._data.cache_clear()
 
 
 # ── generator wiring ───────────────────────────────────────────────────────

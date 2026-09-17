@@ -15,6 +15,13 @@ pub fn get_server_token(state: State<SidecarState>) -> String {
     (*state.token).clone()
 }
 
+/// One-shot: the `--route` passed at cold start, if any. Take-semantics so
+/// StrictMode's double effect in dev can't navigate twice.
+#[tauri::command]
+pub fn take_initial_route(state: State<crate::InitialRoute>) -> Option<String> {
+    state.0.lock().ok().and_then(|mut r| r.take())
+}
+
 #[tauri::command]
 pub async fn pick_directory(app: tauri::AppHandle, title: String) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -22,7 +29,9 @@ pub async fn pick_directory(app: tauri::AppHandle, title: String) -> Option<Stri
         .file()
         .set_title(&title)
         .pick_folder(move |path| {
-            let _ = tx.send(path.and_then(|p| p.into_path().ok().map(|p| p.to_string_lossy().to_string())));
+            let _ = tx.send(
+                path.and_then(|p| p.into_path().ok().map(|p| p.to_string_lossy().to_string())),
+            );
         });
     tokio::task::spawn_blocking(move || rx.recv().ok().flatten())
         .await
@@ -51,7 +60,8 @@ pub async fn pick_file(
         }
     }
     builder.pick_file(move |path| {
-        let _ = tx.send(path.and_then(|p| p.into_path().ok().map(|p| p.to_string_lossy().to_string())));
+        let _ =
+            tx.send(path.and_then(|p| p.into_path().ok().map(|p| p.to_string_lossy().to_string())));
     });
     tokio::task::spawn_blocking(move || rx.recv().ok().flatten())
         .await

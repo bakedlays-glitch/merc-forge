@@ -57,7 +57,7 @@ def detect_is_ub(install_root: Path, vfs_config_path: Optional[Path] = None) -> 
         # etc. and misclassifies the install as UB, which shifts
         # FIRST_RPC from 57 to 60 in slot_picker.engine_named_slots and
         # silently misroutes named-RPC slots 57-59 (MIGUEL, IRA,
-        # DIMITRI). Sweep bug-review finding. Split on dot-separated
+        # DIMITRI). Split on dot-separated
         # components and look for an exact "ub" or "ub-..." token.
         stem = vfs_config_path.stem.lower()
         # Strip "ubuntu" first — the only legitimate non-UB substring

@@ -1,8 +1,17 @@
 pydantic>=2.5,<3.0
-lxml>=5.0,<6.0
-Pillow>=10.0,<12.0
-fastapi>=0.110,<0.120
-uvicorn[standard]>=0.27,<0.40
+lxml>=6.1,<7.0
+# <14: Image.getdata() (used across quantize.py / sti_decode.py /
+# facegear.py) is deprecated and removed in Pillow 14 (Oct 2027); migrate
+# those callers to get_flattened_data (different return shape!) before
+# lifting this cap. Upper bound tracks the installed venv (12.x verified).
+Pillow>=10.0,<13.0
+# The packaged Windows listener hands Uvicorn an exclusively pre-bound
+# socket so the announced localhost port has no ownership race. 0.46.x is
+# covered by a real multi-request subprocess regression test; the former
+# <0.40 range selected the older Windows path that this project had recorded
+# as accepting one request and then stalling.
+fastapi>=0.136,<0.137
+uvicorn[standard]>=0.46,<0.47
 python-multipart>=0.0.9
 # Phase 2.7: cross-process file lock for mutating routes. Without it, two
 # MercWizard instances against the same install can race on shared EDT
@@ -14,8 +23,8 @@ portalocker>=2.8,<4.0
 # pkg_resources from setuptools<81, which was removed in newer setuptools.
 fs>=2.4,<3.0
 setuptools<81  # pkg_resources, needed transitively by `fs`
-pytest>=8.0,<9.0
-pytest-cov>=4.1,<7.0
+pytest>=9.0,<10.0
+pytest-cov>=7.1,<8.0
 # Build tool: build_sidecar.ps1 / launch_current.ps1 invoke PyInstaller to
 # produce the sidecar exe (docs/BUILD_SIDECAR.md). Pinned so an outside clone's
 # `pip install -r requirements.txt` provisions a working build.

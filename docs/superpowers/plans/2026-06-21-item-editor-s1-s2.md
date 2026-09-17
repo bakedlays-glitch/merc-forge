@@ -129,7 +129,7 @@ def test_esc_entitizes_non_ascii_and_strips_c0() -> None:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd sidecar && "C:/AI Projects/The Wasteland/MercWizard2/sidecar/.venv/Scripts/python.exe" -m pytest tests/test_xml_splice.py -v`
+Run: `cd sidecar && "<your checkout>/MercWizard2/sidecar/.venv/Scripts/python.exe" -m pytest tests/test_xml_splice.py -v`
 (If the worktree has no `.venv`, use the main checkout's venv python — see Global Constraints.)
 Expected: FAIL — `ModuleNotFoundError: No module named 'mercwizard_core.inject._xml_splice'`.
 

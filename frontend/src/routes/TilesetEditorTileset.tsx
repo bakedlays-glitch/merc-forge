@@ -95,7 +95,7 @@ export default function TilesetEditorTileset() {
   if (!Number.isFinite(tileset)) {
     return (
       <div className="mx-auto max-w-5xl px-6 py-8">
-        <Link to="/tileset-editor" className="text-sm text-blue-400 hover:underline">
+        <Link to="/tileset-editor" className="text-sm text-rust-400 hover:underline">
           ← Back to tileset list
         </Link>
         <p className="mt-3 rounded border border-red-700 bg-red-950 p-3 text-sm">
@@ -108,14 +108,14 @@ export default function TilesetEditorTileset() {
   return (
     <div className="mx-auto max-w-7xl px-6 py-6">
       <div className="mb-4">
-        <Link to="/tileset-editor" className="text-sm text-blue-400 hover:underline">
+        <Link to="/tileset-editor" className="text-sm text-rust-400 hover:underline">
           ← Back to tileset list
         </Link>
         <h1 className="mt-2 text-xl font-semibold">
           Tileset Editor · Tileset {tileset}
         </h1>
         {xmlPath && (
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-wasteland-500">
             Editing <code>{xmlPath}</code> · engine cap {engineMaxTileSlot}
           </p>
         )}
@@ -292,10 +292,10 @@ function SlotGrid({
   }, [palette.data, engineMaxTileSlot]);
 
   return (
-    <div className="flex flex-col rounded border border-gray-700 bg-gray-950">
-      <div className="border-b border-gray-800 bg-gray-900 px-2 py-1.5 text-xs">
-        <strong className="text-gray-200">Slots</strong>{" "}
-        <span className="text-gray-500">
+    <div className="flex flex-col rounded border border-wasteland-700 bg-wasteland-900">
+      <div className="border-b border-wasteland-800 bg-wasteland-900 px-2 py-1.5 text-xs">
+        <strong className="text-wasteland-200">Slots</strong>{" "}
+        <span className="text-wasteland-500">
           0–{engineMaxTileSlot} ·{" "}
           {slotByIndex.size} registered
         </span>
@@ -303,35 +303,35 @@ function SlotGrid({
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {(palette.isLoading || sheetMeta.isLoading || !sheetUrl) && (
           <div className="space-y-1.5" role="status" aria-busy="true">
-            <p className="text-xs text-gray-200">
+            <p className="text-xs text-wasteland-200">
               {bakeProgress?.label ? `${bakeProgress.label}…` : "Loading slot grid…"}
             </p>
             {bakeProgress?.detail && (
-              <p className="truncate font-mono text-[10px] text-blue-300">
+              <p className="truncate font-mono text-[10px] text-rust-400">
                 {bakeProgress.detail}
               </p>
             )}
             {bakeProgress?.current !== undefined && bakeProgress?.total ? (
               <>
-                <div className="h-1.5 w-full overflow-hidden rounded-full border border-gray-800 bg-gray-900">
+                <div className="h-1.5 w-full overflow-hidden rounded-full border border-wasteland-800 bg-wasteland-900">
                   <div
-                    className="h-full bg-blue-500 transition-[width] duration-100 ease-linear"
+                    className="h-full bg-rust-500 transition-[width] duration-100 ease-linear"
                     style={{
                       width: `${Math.min(100, Math.round((bakeProgress.current / bakeProgress.total) * 100))}%`,
                     }}
                   />
                 </div>
-                <p className="text-[10px] text-gray-500">
+                <p className="text-[10px] text-wasteland-500">
                   {bakeProgress.current} / {bakeProgress.total}{" "}
                   ({Math.round((bakeProgress.current / bakeProgress.total) * 100)}%)
                 </p>
               </>
             ) : (
-              <div className="h-1.5 w-full overflow-hidden rounded-full border border-gray-800 bg-gray-900">
-                <div className="h-full w-full bg-gradient-to-r from-blue-700/30 via-blue-400/60 to-blue-700/30 animate-pulse" />
+              <div className="h-1.5 w-full overflow-hidden rounded-full border border-wasteland-800 bg-wasteland-900">
+                <div className="h-full w-full bg-gradient-to-r from-rust-600/30 via-rust-400/60 to-rust-600/30 animate-pulse" />
               </div>
             )}
-            <p className="text-[10px] text-gray-600">
+            <p className="text-[10px] text-wasteland-600">
               First load of a tileset can take up to a minute while the
               sprite sheet bakes. Subsequent opens are instant.
             </p>
@@ -361,8 +361,8 @@ function SlotGrid({
                     isSelected
                       ? "border-emerald-500 bg-emerald-950/50 ring-1 ring-emerald-500"
                       : empty
-                        ? "border-gray-800 bg-gray-950 text-gray-700 hover:border-gray-600"
-                        : "border-gray-700 bg-gray-900 hover:border-gray-500"
+                        ? "border-wasteland-800 bg-wasteland-900 text-wasteland-700 hover:border-wasteland-600"
+                        : "border-wasteland-700 bg-wasteland-900 hover:border-wasteland-500"
                   }`}
                 >
                   {entry && cell ? (
@@ -377,12 +377,12 @@ function SlotGrid({
                       }}
                     />
                   ) : empty ? (
-                    <span className="text-gray-700">·</span>
+                    <span className="text-wasteland-700">·</span>
                   ) : (
-                    <span className="inline-block h-6 w-6 rounded bg-gray-800" />
+                    <span className="inline-block h-6 w-6 rounded bg-wasteland-800" />
                   )}
                   <span className={`absolute bottom-0 left-0 rounded-tr px-0.5 text-[7px] ${
-                    isSelected ? "bg-emerald-900/80 text-emerald-200" : "bg-gray-800/80 text-gray-400"
+                    isSelected ? "bg-emerald-900/80 text-emerald-200" : "bg-wasteland-800/80 text-wasteland-400"
                   }`}>
                     {slot}
                   </span>
@@ -446,20 +446,20 @@ function SlotDetail({
   }, [palette.data, selectedSlot]);
 
   return (
-    <div className="flex flex-col rounded border border-gray-700 bg-gray-950">
-      <div className="border-b border-gray-800 bg-gray-900 px-2 py-1.5 text-xs">
-        <strong className="text-gray-200">Slot detail</strong>
+    <div className="flex flex-col rounded border border-wasteland-700 bg-wasteland-900">
+      <div className="border-b border-wasteland-800 bg-wasteland-900 px-2 py-1.5 text-xs">
+        <strong className="text-wasteland-200">Slot detail</strong>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3 space-y-3">
         {selectedSlot === null && (
-          <p className="text-xs italic text-gray-500">
+          <p className="text-xs italic text-wasteland-500">
             Pick a slot from the grid to inspect or edit.
           </p>
         )}
         {selectedSlot !== null && !entry && (
-          <div className="text-xs text-gray-400">
+          <div className="text-xs text-wasteland-400">
             <p>Slot <span className="font-mono">{selectedSlot}</span> is empty.</p>
-            <p className="mt-1 text-gray-500">
+            <p className="mt-1 text-wasteland-500">
               Drop a library STI into this slot using the Library pane on
               the right (or pick "auto" to let the allocator place it).
             </p>
@@ -471,10 +471,10 @@ function SlotDetail({
               <h3 className="font-mono text-sm text-emerald-200">
                 {entry.sti_filename}
               </h3>
-              <p className="text-[11px] text-gray-500">
+              <p className="text-[11px] text-wasteland-500">
                 slot {entry.slot} · {entry.frame_count} frame
                 {entry.frame_count === 1 ? "" : "s"} · category{" "}
-                <span className="text-gray-300">{entry.category}</span>
+                <span className="text-wasteland-300">{entry.category}</span>
                 {entry.has_jsd && (
                   <> · <span className="text-amber-300">has JSD</span></>
                 )}
@@ -495,11 +495,11 @@ function SlotDetail({
                 library opens the InjectSubModal with that source pre-
                 set. The user then picks the destination slot + which
                 source sub to append inside the modal. */}
-            <div className="rounded border border-gray-800 p-2 text-xs">
-              <p className="mb-1 font-semibold text-gray-300">
+            <div className="rounded border border-wasteland-800 p-2 text-xs">
+              <p className="mb-1 font-semibold text-wasteland-300">
                 Inject sub-frame
               </p>
-              <p className="mb-2 text-[11px] text-gray-500">
+              <p className="mb-2 text-[11px] text-wasteland-500">
                 Append a single sub-frame from any library STI onto
                 this tileset's existing STI binaries. Click the button
                 below, then pick the source STI from the Library pane.
@@ -513,7 +513,7 @@ function SlotDetail({
                   <button
                     type="button"
                     onClick={() => onSetLibraryMode("add")}
-                    className="rounded border border-gray-700 px-2 py-0.5 text-[11px] text-gray-300 hover:border-gray-500"
+                    className="rounded border border-wasteland-700 px-2 py-0.5 text-[11px] text-wasteland-300 hover:border-wasteland-500"
                   >
                     Cancel inject — back to add mode
                   </button>
@@ -527,7 +527,7 @@ function SlotDetail({
                   + Pick source from library
                 </button>
               )}
-              <p className="mt-2 text-[10px] text-gray-600">
+              <p className="mt-2 text-[10px] text-wasteland-600">
                 Safety: source + dest palettes must match unless you
                 force; dest STI must be loose on disk (not SLF). See
                 <code className="mx-0.5">docs/ASSET_BROWSER_PLAN.md §4</code>.
@@ -555,11 +555,11 @@ function LibraryPane({
   // "add" mode. In "inject" mode we override clicks via onPickSha so
   // the parent can open the inject-sub modal instead.
   return (
-    <div className="flex flex-col rounded border border-gray-700 bg-gray-950">
-      <div className="flex items-center justify-between border-b border-gray-800 bg-gray-900 px-2 py-1.5 text-xs">
+    <div className="flex flex-col rounded border border-wasteland-700 bg-wasteland-900">
+      <div className="flex items-center justify-between border-b border-wasteland-800 bg-wasteland-900 px-2 py-1.5 text-xs">
         <div>
-          <strong className="text-gray-200">Library</strong>{" "}
-          <span className="text-gray-500">
+          <strong className="text-wasteland-200">Library</strong>{" "}
+          <span className="text-wasteland-500">
             (catalog across all installs)
           </span>
         </div>

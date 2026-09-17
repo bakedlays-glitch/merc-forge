@@ -29,12 +29,24 @@ _CORPUS_PATH = _DIR / "generator_corpus.json"
 _COVERAGE_PATH = _DIR / "coverage.json"
 
 
+class UnsupportedCorpusSchemaError(ValueError):
+    """Raised when a shipped corpus requires loader semantics we do not know."""
+
+
 @functools.lru_cache(maxsize=1)
 def _data() -> dict[str, Any]:
     if not _CORPUS_PATH.is_file():
         return {}
     try:
-        return json.loads(_CORPUS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(_CORPUS_PATH.read_text(encoding="utf-8"))
+        schema = data.get("schema_version", 1) if isinstance(data, dict) else None
+        if schema not in (1, 2):
+            raise UnsupportedCorpusSchemaError(
+                f"unsupported MapForge corpus schema {schema!r}"
+            )
+        return data
+    except UnsupportedCorpusSchemaError:
+        raise
     except (ValueError, OSError):
         return {}
 
@@ -123,6 +135,149 @@ def scatter_slots(source: str, biome: str, layer: str) -> list[int]:
     if not cell:
         return []
     return sorted(int(s) for s in cell)
+
+
+def _schema1_compatible_subs(source: str, layer: str, slot: int) -> list[tuple[int, int]]:
+    weights: dict[int, int] = {}
+    for layers in ((_data().get("scatter") or {}).get(source) or {}).values():
+        if not isinstance(layers, dict):
+            continue
+        for sub, weight in (((layers.get(layer) or {}).get(str(slot))) or {}).items():
+            try:
+                sub_i, weight_i = int(sub), int(weight)
+            except (TypeError, ValueError):
+                continue
+            if sub_i >= 1 and weight_i > 0:
+                weights[sub_i] = weights.get(sub_i, 0) + weight_i
+    return sorted(weights.items())
+
+
+def _schema2_compatible_subs(
+    source: str,
+    tileset_id: int,
+    layer: str,
+    slot: int,
+    active_sti_sha256: str,
+    *,
+    include_multitile: bool = False,
+) -> list[tuple[int, int]]:
+    data = _data()
+    try:
+        frames = data["compatibility"][str(tileset_id)][str(slot)][active_sti_sha256]["frames"]
+    except (KeyError, TypeError):
+        return []
+    weights: dict[int, int] = {}
+    fields = data.get("candidate_fields")
+    for raw_candidate in data.get("candidates") or []:
+        if isinstance(raw_candidate, dict):
+            candidate = raw_candidate
+        elif isinstance(raw_candidate, list) and isinstance(fields, list) and len(raw_candidate) == len(fields):
+            raw = dict(zip(fields, raw_candidate))
+            if "source_ref" in raw:
+                try:
+                    sti_ref, frame_ref = raw.get("sti_ref"), raw.get("frame_ref")
+                    candidate = {
+                        "source": data["sources"][raw["source_ref"]],
+                        "tileset_id": raw["tileset_id"],
+                        "biome": data["biomes"][raw["biome_ref"]],
+                        "layer": data["layers"][raw["layer_ref"]],
+                        "slot": raw["slot"], "sub": raw["sub"], "weight": raw["weight"],
+                        "sti_sha256": data["sti_hashes"][sti_ref] if sti_ref is not None else None,
+                        "frame_sha256": data["frame_hashes"][frame_ref] if frame_ref is not None else None,
+                        "availability": "verified" if sti_ref is not None and frame_ref is not None else "unresolved_art",
+                    }
+                    jsd_ref = raw.get("jsd_ref")
+                    candidate["jsd_sha256"] = (
+                        data.get("jsd_hashes", [])[jsd_ref]
+                        if jsd_ref is not None else None
+                    )
+                    structure_ref = raw.get("structure_ref")
+                    if structure_ref is not None:
+                        structure = data.get("structure_identities", [])[structure_ref]
+                        candidate["anchor_sub"] = structure[1]
+                        candidate["structure_members"] = structure[2]
+                    else:
+                        candidate["anchor_sub"] = None
+                        candidate["structure_members"] = None
+                    exclusion_ref = raw.get("exclusion_ref")
+                    exclusion = (
+                        data.get("exclusion_reasons", [])[exclusion_ref]
+                        if exclusion_ref is not None else None
+                    )
+                    candidate["exclusion_reason"] = exclusion
+                    candidate["scatter_eligible"] = exclusion is None
+                    if exclusion in {
+                        "missing_jsd", "corrupt_jsd", "missing_structure_record"
+                    }:
+                        candidate["availability"] = exclusion
+                except (KeyError, IndexError, TypeError):
+                    continue
+            else:
+                candidate = raw
+        else:
+            continue
+        if (
+            not isinstance(candidate, dict)
+            or candidate.get("source") != source
+            or candidate.get("layer") != layer
+            or candidate.get("tileset_id") != tileset_id
+            or candidate.get("slot") != slot
+            or candidate.get("availability") != "verified"
+            or (
+                layer in {"structs", "roofs", "onroofs"}
+                and not include_multitile
+                and candidate.get("scatter_eligible") is not True
+            )
+        ):
+            continue
+        active_subs = frames.get(candidate.get("frame_sha256"))
+        if not isinstance(active_subs, list):
+            continue
+        try:
+            weight = int(candidate.get("weight", 0))
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+        for active_sub in active_subs:
+            try:
+                active_sub_i = int(active_sub)
+            except (TypeError, ValueError):
+                continue
+            if active_sub_i >= 1:
+                weights[active_sub_i] = weights.get(active_sub_i, 0) + weight
+    return sorted(weights.items())
+
+
+def compatible_subs(
+    source: str,
+    tileset_id: int,
+    layer: str,
+    slot: int,
+    active_sti_sha256: str,
+    *,
+    allow_unverified_schema1: bool = False,
+    include_multitile: bool = False,
+) -> list[tuple[int, int]]:
+    """Identity-safe active sub/weight pairs, with combined-source fallback."""
+    schema = _data().get("schema_version", 1)
+    if schema == 1:
+        if not allow_unverified_schema1:
+            return []
+        result = _schema1_compatible_subs(source, layer, slot)
+        if not result and source != "combined":
+            result = _schema1_compatible_subs("combined", layer, slot)
+        return result
+    result = _schema2_compatible_subs(
+        source, tileset_id, layer, slot, active_sti_sha256,
+        include_multitile=include_multitile,
+    )
+    if not result and source != "combined":
+        result = _schema2_compatible_subs(
+            "combined", tileset_id, layer, slot, active_sti_sha256,
+            include_multitile=include_multitile,
+        )
+    return result
 
 
 # ── building tables ──────────────────────────────────────────────────────────

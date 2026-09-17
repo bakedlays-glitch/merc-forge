@@ -25,18 +25,9 @@
  *     uvY, depth). Single drawArrays per pass. The GPU's Z-buffer + the
  *     LEQUAL depth test does the engine-faithful clipping.
  *
- * Depth assignment (initial Phase 2 — painter parity):
- *   - LAND     depth 0.99 (deepest, drawn behind everything)
- *   - OBJS     depth 0.97
- *   - SHADOWS  depth 0.95
- *   - STRUCTS  depth = 0.5 - (tx + ty) * STRUCT_DEPTH_STEP
- *   - ROOFS    depth = struct_depth - 0.02
- *   - ONROOFS  depth = struct_depth - 0.04
- *
- *   `STRUCT_DEPTH_STEP` is small so that within an iso row, all tiles
- *   share the same depth (matches painter ordering for now). Phase 3
- *   will refine this to per-CELL depth from engine's sWorldY formula,
- *   which is what actually fixes the bug.
+ * Ground layers retain separate depth tiers. STRUCTS, ROOFS, and ONROOFS
+ * use the engine's world-Y and wall-height offsets via isoDepth.ts;
+ * z-strip deltas remain one iso row each.
  *
  * BurnsThrough mapping: engine rule is `existing_Z <= sprite_Z → draw`.
  * WebGL `LEQUAL` is `sprite_depth <= existing_depth → draw` (smaller
@@ -51,12 +42,15 @@ import {
   TILE_W,
   TILE_H,
   WALL_HEIGHT,
+  spriteIntersectsCrop,
   type LayerName,
   type RenderMeta,
   type RenderOptions,
   type ProgressPhase,
 } from "./IsoRenderer";
 import type { AtlasCell, AtlasManifest, ParsedSector } from "./mapforge";
+import { atlasTextureLayout } from "./atlasTextureLayout";
+import { ISO_ROW_DEPTH_STEP, structuralDepth } from "./isoDepth";
 
 const TILE_HW = TILE_W / 2;
 const TILE_HH = TILE_H / 2;
@@ -72,22 +66,13 @@ const LAYER_Y_LIFT_GL: Record<LayerName, number> = {
   onroofs: WALL_HEIGHT,
 };
 
-// Depth tier per layer. Smaller depth draws on top (LEQUAL test).
-const LAYER_BASE_DEPTH: Record<LayerName, number> = {
-  land:    0.99,
-  objs:    0.97,
+// Ground depth tiers stay behind structures. Structural layer depth is
+// calculated from the engine Z formula in isoDepth.ts.
+const GROUND_BASE_DEPTH = {
+  land: 0.99,
+  objs: 0.97,
   shadows: 0.95,
-  structs: 0.50,
-  roofs:   0.48,
-  onroofs: 0.46,
-};
-
-// Per-iso-row depth decrement within the STRUCT/ROOF/ONROOF tier.
-// Small enough that any single tile's struct + its (lifted) roof stay
-// closer to the same depth band than the next iso row's struct. With a
-// 160×160 sector, max (tx+ty) = 318; tier width 0.04 / 318 ≈ 1.25e-4
-// per row, well above 24-bit depth precision (~6e-8).
-const ISO_ROW_DEPTH_STEP = 0.04 / 320;
+} as const;
 
 // One Z-strip transition in the engine = `Z_STRIP_DELTA_Y` = 80 engine
 // Z units = exactly one iso-row's worth of base-Z change (since engine
@@ -130,6 +115,7 @@ precision highp float;
 in vec2 vUv;
 uniform sampler2D uAtlas;
 uniform float uShadowAlpha;   // 1.0 for normal, 0.5 for shadow pass
+uniform float uAlphaCut;      // alpha-test threshold (0.5 at 1:1; lower when minified)
 uniform bool uShadow;         // true: output black with src.alpha * uShadowAlpha
 out vec4 outColor;
 
@@ -138,7 +124,10 @@ void main() {
   // Engine: palette index 0 = transparent. The atlas PNG already ships
   // with alpha=0 for those pixels — discard via shader instead of
   // relying on blending (so the Z-buffer write is gated too).
-  if (src.a < 0.5) {
+  // When the atlas is MINIFIED (bigmap buffer < 1:1, mipmapped
+  // sampling) a 1-px chainlink wire averages to alpha ~0.5, so a
+  // fixed 0.5 cut would dash it. uAlphaCut drops to 0.2 there.
+  if (src.a < uAlphaCut) {
     discard;
   }
   if (uShadow) {
@@ -171,13 +160,18 @@ export class IsoRendererGL extends IsoRenderer {
   private uAtlas: WebGLUniformLocation | null = null;
   private uShadow: WebGLUniformLocation | null = null;
   private uShadowAlpha: WebGLUniformLocation | null = null;
+  private uAlphaCut: WebGLUniformLocation | null = null;
+  // Backing-store scale of the last full-map render (<1 on bigmaps
+  // under Chrome's drawing-buffer clamp). Drives the minification
+  // filter + alpha cut below.
+  private bufScale = 1;
 
   // Cached state for GL setup. The base class also keeps these in its
   // own private fields; we mirror in protected/public form would be
   // cleaner, but for now we re-read from the manifest passed to
   // create() / replaceAtlas() and stash here.
   private glCellMap: Map<number, AtlasCell> = new Map();
-  private glAtlasImg: HTMLImageElement;
+  private glAtlasImg: HTMLImageElement | HTMLCanvasElement;
   private glAtlasW: number;
   private glAtlasH: number;
   private glParsed: ParsedSector;
@@ -263,7 +257,9 @@ export class IsoRendererGL extends IsoRenderer {
     this.uAtlas = gl.getUniformLocation(prog, "uAtlas");
     this.uShadow = gl.getUniformLocation(prog, "uShadow");
     this.uShadowAlpha = gl.getUniformLocation(prog, "uShadowAlpha");
+    this.uAlphaCut = gl.getUniformLocation(prog, "uAlphaCut");
 
+    this.fitAtlasToDevice(gl);
     // Atlas texture upload.
     const tex = gl.createTexture();
     if (!tex) throw new Error("IsoRendererGL: createTexture failed");
@@ -273,6 +269,13 @@ export class IsoRendererGL extends IsoRenderer {
     gl.texImage2D(
       gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.glAtlasImg,
     );
+    // Mipmaps for MINIFICATION: bigmaps rasterize the whole map at
+    // ~0.55 scale (drawing-buffer clamp) and NEAREST sampling there
+    // drops 1-px art (chainlink fence wires) entirely - the zoomed-out
+    // 'broken fence' artifact. MIN filter is set per render (NEAREST
+    // at 1:1, mipmapped when the buffer is downscaled); MAG stays
+    // NEAREST so 1:1 / zoomed-in pixels remain crisp.
+    gl.generateMipmap(gl.TEXTURE_2D);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -327,11 +330,35 @@ export class IsoRendererGL extends IsoRenderer {
     const gl = this.gl!;
 
     const meta = this.computeMeta(opts);
-    if (canvas.width !== meta.canvasW || canvas.height !== meta.canvasH) {
-      canvas.width = meta.canvasW;
-      canvas.height = meta.canvasH;
+    // Chrome silently clamps a WebGL drawing buffer to ~2^25 total
+    // pixels (aspect preserved). A 360×360 bigmap's canvas
+    // (14520×7440 ≈ 108M px) came back as an 8046×4123 buffer, so a
+    // full-size gl.viewport rasterized only the bottom-left wedge and
+    // CSS stretched it across the canvas — cropped map + chunky
+    // NEAREST-upscaled sprites. Size the backing store to fit under
+    // the clamp instead: the vertex shader maps logical px → NDC via
+    // uViewport (resolution-independent), MapForgeSector pins the
+    // canvas CSS size to meta.canvasW/H, and hit-testing scales by
+    // clientWidth, so all logical coordinates are unaffected —
+    // bigmaps just rasterize at reduced resolution.
+    // ponytail: whole-map buffer at ~0.55 scale on 360×360 maps (soft
+    // at high zoom); upgrade path = viewport-region rendering.
+    const MAX_BUFFER_PX = 32 * 1024 * 1024;
+    const bufScale = Math.min(
+      1, Math.sqrt(MAX_BUFFER_PX / (meta.canvasW * meta.canvasH)),
+    );
+    const bufW = Math.max(1, Math.round(meta.canvasW * bufScale));
+    const bufH = Math.max(1, Math.round(meta.canvasH * bufScale));
+    this.bufScale = bufScale;
+    if (canvas.width !== bufW || canvas.height !== bufH) {
+      canvas.width = bufW;
+      canvas.height = bufH;
     }
-    gl.viewport(0, 0, meta.canvasW, meta.canvasH);
+    // Viewport from what Chrome ACTUALLY allocated, not what we asked
+    // for — the clamp threshold is device-dependent (observed ~33.17M
+    // px here, under 2^25), and a viewport larger than the real buffer
+    // is exactly the crop bug this block exists to fix.
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
     this.glMeta = meta;
 
     const t0 = performance.now();
@@ -342,7 +369,10 @@ export class IsoRendererGL extends IsoRenderer {
     // didn't bake with per-strip Z (probably running pre-v6 cached
     // code) and wall clipping won't work. See
     // docs/HANDOFF_iso_renderer_z_buffer.md.
-    if (!this.atlasStatsLogged) {
+    // Dev-only: this is a developer sanity check whose message tells the
+    // reader to restart for stale sidecar code — not something to say to
+    // someone running a release build.
+    if (import.meta.env.DEV && !this.atlasStatsLogged) {
       let n_zstrip = 0;
       let n_burns = 0;
       for (const cell of this.glCellMap.values()) {
@@ -362,6 +392,7 @@ export class IsoRendererGL extends IsoRenderer {
     }
 
     const { rx0, ry0, rx1, ry1 } = this.glResolveRegion(opts);
+    const spill = this.collectGlCropSpill(rx0, ry0, rx1, ry1);
     const skip = opts.skipLayers ?? new Set<LayerName>();
 
     // Iso-row groupings (mirror of base class).
@@ -376,6 +407,19 @@ export class IsoRendererGL extends IsoRenderer {
         }
         row.push([tx, ty]);
       }
+    }
+    for (const gn of spill.tiles) {
+      const tx = gn % this.glParsed.cols;
+      const ty = Math.floor(gn / this.glParsed.cols);
+      const k = tx + ty;
+      const row = rowsByXy.get(k);
+      if (row) row.push([tx, ty]);
+      else rowsByXy.set(k, [[tx, ty]]);
+    }
+    // Preserve this renderer's existing row order (ty ascending) for
+    // equal-Z overlap; only the new spill anchors need merging into it.
+    for (const row of rowsByXy.values()) {
+      row.sort((a, b) => a[1] - b[1]);
     }
     const orderedXy = [...rowsByXy.keys()].sort((a, b) => a - b);
 
@@ -403,16 +447,18 @@ export class IsoRendererGL extends IsoRenderer {
     if (!skip.has("land")) {
       for (const xy of orderedXy) {
         for (const [tx, ty] of rowsByXy.get(xy)!) {
+          const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
           this.emitTileLayerVerts(opaqueVerts, strictVerts, burnsVerts,
-            tx, ty, "land");
+            tx, ty, "land", inRegion ? undefined : (spill.entries.get("land")?.get(ty * this.glParsed.cols + tx) ?? []));
         }
       }
     }
     if (!skip.has("objs")) {
       for (const xy of orderedXy) {
         for (const [tx, ty] of rowsByXy.get(xy)!) {
+          const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
           this.emitTileLayerVerts(opaqueVerts, strictVerts, burnsVerts,
-            tx, ty, "objs");
+            tx, ty, "objs", inRegion ? undefined : (spill.entries.get("objs")?.get(ty * this.glParsed.cols + tx) ?? []));
         }
       }
     }
@@ -420,8 +466,9 @@ export class IsoRendererGL extends IsoRenderer {
     if (!skip.has("shadows")) {
       for (const xy of orderedXy) {
         for (const [tx, ty] of rowsByXy.get(xy)!) {
+          const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
           this.emitTileLayerVerts(shadowVerts, shadowVerts, shadowVerts,
-            tx, ty, "shadows");
+            tx, ty, "shadows", inRegion ? undefined : (spill.entries.get("shadows")?.get(ty * this.glParsed.cols + tx) ?? []));
         }
       }
     }
@@ -434,8 +481,9 @@ export class IsoRendererGL extends IsoRenderer {
       for (const xy of orderedXy) {
         for (const layer of layers4) {
           for (const [tx, ty] of rowsByXy.get(xy)!) {
+            const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
             this.emitTileLayerVerts(opaqueVerts, strictVerts, burnsVerts,
-              tx, ty, layer);
+              tx, ty, layer, inRegion ? undefined : (spill.entries.get(layer)?.get(ty * this.glParsed.cols + tx) ?? []));
           }
         }
       }
@@ -463,14 +511,16 @@ export class IsoRendererGL extends IsoRenderer {
       gl.depthFunc(gl.LEQUAL);
       this.drawBatch(gl, shadowVerts, true);
     }
-    // Per-render timing for perf budget enforcement (Phase 5 closeout
-    // of docs/HANDOFF_iso_renderer_z_buffer.md). Cold C6 sector should
+    // Per-render timing for perf budget enforcement.
+    // Cold C6 sector should
     // come in under 30 ms on typical modern hardware.
     // Logged every 60th render to avoid console spam during pan/zoom.
     const elapsed = performance.now() - t0;
     this.lastRenderMs = elapsed;
     this.renderCount += 1;
-    if (this.renderCount % 60 === 1) {
+    // Dev-only — a per-render timing trace has no audience in a release
+    // build, where it is just console noise for the lifetime of the session.
+    if (import.meta.env.DEV && this.renderCount % 60 === 1) {
       // eslint-disable-next-line no-console
       console.log(
         `[IsoRendererGL] render #${this.renderCount}: ${elapsed.toFixed(1)} ms ` +
@@ -486,6 +536,31 @@ export class IsoRendererGL extends IsoRenderer {
   // One-shot atlas-stats log gate — flips true after the first render
   // logs the manifest's zstrip counts. Resets when replaceAtlas swaps.
   private atlasStatsLogged = false;
+
+  /** The server's narrow atlas can exceed MAX_TEXTURE_SIZE in height.
+   * Repack only the GPU copy; keep source pixels and editor metadata intact. */
+  private fitAtlasToDevice(gl: WebGL2RenderingContext): void {
+    const limit = Math.min(16384, gl.getParameter(gl.MAX_TEXTURE_SIZE) as number);
+    if (this.glAtlasW <= limit && this.glAtlasH <= limit) return;
+    const packed = atlasTextureLayout([...this.glCellMap.values()], limit);
+    const canvas = document.createElement('canvas');
+    canvas.width = packed.width;
+    canvas.height = packed.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Unable to allocate GPU atlas repacking canvas');
+    ctx.imageSmoothingEnabled = false;
+    const cells = new Map<number, AtlasCell>();
+    for (const { source, target } of packed.placements) {
+      ctx.drawImage(this.glAtlasImg, source.x, source.y, source.w, source.h,
+        target.x, target.y, target.w, target.h);
+      cells.set((target.slot << 16) | (target.sub & 0xffff), target);
+    }
+    console.info(`[IsoRendererGL] repacked atlas ${this.glAtlasW}x${this.glAtlasH} -> ${canvas.width}x${canvas.height} (GPU limit ${limit})`);
+    this.glAtlasImg = canvas;
+    this.glAtlasW = canvas.width;
+    this.glAtlasH = canvas.height;
+    this.glCellMap = cells;
+  }
   // Perf instrumentation. lastRenderMs is the wall-clock time of the
   // most recent render() in milliseconds — readable for budget checks.
   private lastRenderMs = 0;
@@ -515,6 +590,10 @@ export class IsoRendererGL extends IsoRenderer {
     gl.uniform2f(this.uAtlasSize, this.glAtlasW, this.glAtlasH);
     gl.uniform1i(this.uShadow, shadow ? 1 : 0);
     gl.uniform1f(this.uShadowAlpha, 0.5);
+    const minified = this.bufScale < 1;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,
+      minified ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
+    gl.uniform1f(this.uAlphaCut, minified ? 0.2 : 0.5);
 
     const vertCount = verts.length / FLOATS_PER_VERTEX;
     gl.drawArrays(gl.TRIANGLES, 0, vertCount);
@@ -540,21 +619,21 @@ export class IsoRendererGL extends IsoRenderer {
     strictOut: number[],
     burnsOut: number[],
     tx: number, ty: number, layer: LayerName,
+    entriesOverride?: number[][],
   ): void {
     const parsed = this.glParsed;
     const gn = ty * parsed.cols + tx;
     // Shadows: overlay engine buddy shadows (ephemeral) — see IsoRenderer.
-    const entries = layer === "shadows"
+    const entries = entriesOverride ?? (layer === "shadows"
       ? effectiveShadowEntries(parsed, gn, this.glCellMap)
-      : parsed[layer][gn];
+      : parsed[layer][gn]);
     if (!entries || entries.length === 0) return;
     const yLift = LAYER_Y_LIFT_GL[layer];
-    const baseDepth = LAYER_BASE_DEPTH[layer];
     const isStructTier =
       layer === "structs" || layer === "roofs" || layer === "onroofs";
-    const tileBaseDepth = isStructTier
-      ? baseDepth - (tx + ty) * ISO_ROW_DEPTH_STEP
-      : baseDepth;
+    const tileBaseDepth = layer === "structs" || layer === "roofs" || layer === "onroofs"
+      ? structuralDepth(layer, tx + ty)
+      : GROUND_BASE_DEPTH[layer];
     const rawX = (tx - ty) * TILE_HW;
     const rawY = (tx + ty) * TILE_HH;
     const px = rawX - this.glMeta.ixMin;
@@ -624,6 +703,47 @@ export class IsoRendererGL extends IsoRenderer {
     }
   }
 
+  /** WebGL twin of IsoRenderer's crop-spill collector. It retains the
+   * tile-derived camera and admits every projected entry rectangle,
+   * including independent land, so GPU and Canvas2D crops stay coherent. */
+  private collectGlCropSpill(rx0: number, ry0: number, rx1: number, ry1: number): {
+    tiles: Set<number>;
+    entries: Map<LayerName, Map<number, number[][]>>;
+  } {
+    const entries = new Map<LayerName, Map<number, number[][]>>();
+    const tiles = new Set<number>();
+    const layers: LayerName[] = ["land", "objs", "shadows", "structs", "roofs", "onroofs"];
+    for (const layer of layers) entries.set(layer, new Map());
+    const parsed = this.glParsed;
+    for (let gn = 0; gn < parsed.rows * parsed.cols; gn++) {
+      const tx = gn % parsed.cols;
+      const ty = Math.floor(gn / parsed.cols);
+      if (tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1) continue;
+      const rawX = (tx - ty) * TILE_HW;
+      const rawY = (tx + ty) * TILE_HH;
+      for (const layer of layers) {
+        const source = layer === "shadows"
+          ? effectiveShadowEntries(parsed, gn, this.glCellMap)
+          : parsed[layer][gn];
+        if (!source || source.length === 0) continue;
+        const selected: number[][] = [];
+        for (const entry of source) {
+          if (entry.length < 2) continue;
+          const cell = this.glCellMap.get(((entry[0] as number) << 16)
+            | ((entry[1] as number) & 0xffff));
+          if (cell && spriteIntersectsCrop(rawX, rawY, cell, LAYER_Y_LIFT_GL[layer], this.glMeta)) {
+            selected.push(entry);
+          }
+        }
+        if (selected.length > 0) {
+          entries.get(layer)!.set(gn, selected);
+          tiles.add(gn);
+        }
+      }
+    }
+    return { tiles, entries };
+  }
+
   /** Local resolveRegion mirror — the base class's is private. */
   private glResolveRegion(opts: RenderOptions): {
     rx0: number; ry0: number; rx1: number; ry1: number;
@@ -679,11 +799,13 @@ export class IsoRendererGL extends IsoRenderer {
     }
     // Re-upload texture if GL is already initialized.
     if (this.gl && this.atlasTexture) {
+      this.fitAtlasToDevice(this.gl);
       this.gl.bindTexture(this.gl.TEXTURE_2D, this.atlasTexture);
       this.gl.texImage2D(
         this.gl.TEXTURE_2D, 0, this.gl.RGBA, this.gl.RGBA,
-        this.gl.UNSIGNED_BYTE, atlas,
+        this.gl.UNSIGNED_BYTE, this.glAtlasImg,
       );
+      this.gl.generateMipmap(this.gl.TEXTURE_2D);
     }
   }
 

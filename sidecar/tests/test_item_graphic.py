@@ -5,7 +5,7 @@ from mercwizard_core.mapforge_engine.item_graphic import (
 )
 import mercwizard_core.mapforge_engine.item_graphic as igph
 
-_INSTALL = r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+_INSTALL = os.environ.get("JA2_INSTALL", "")
 
 def test_bigitems_stem_padding():
     assert _bigitems_stem(0, 24) == "gun24"
@@ -30,7 +30,7 @@ def test_unknown_item_returns_none():
     assert render_item_graphic(_INSTALL, 65000) is None   # not in Items.xml
 
 
-# ── Task 5 additions: render_bigitem_by_ref + list_bigitem_graphics ──────────
+# ── render_bigitem_by_ref + list_bigitem_graphics ────────────────────────────
 
 @pytest.mark.skipif(not os.path.exists(_INSTALL), reason="canonical install not present")
 def test_render_by_ref_matches_item_render():

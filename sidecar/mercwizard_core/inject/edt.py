@@ -21,7 +21,7 @@ locations, depending on the merc's Type:
    bug causes expanded-AIM mercs to inherit a vanilla merc's bio because
    their bytes get written at the wrong offset.
 
-★★ THE MERC ROUTING BUG (discovered 2026-05-14, Eskimo Vengeance import):
+★★ THE MERC ROUTING BUG (discovered Eskimo Vengeance import):
    MercWizard 1.x and earlier MercWizard 2 routed Type=2 expansion bios to
    `Data-1.13/BinaryData/MercEdt/<uiIndex>.EDT`. The engine doesn't read
    those files — it reads MERCBIOS.EDT at `MercBioID × 1120` for every
@@ -57,6 +57,8 @@ import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
+
+from ..edt_text import edt_safe
 
 if TYPE_CHECKING:
     from ..install_context import InstallContext
@@ -110,11 +112,9 @@ def encode_field(text: str, byte_size: int, char_max: int) -> bytes:
     The result is a 16-bit little-endian sequence. Output buffer is exactly
     `byte_size` bytes, zero-padded after the encoded text.
 
-    Supplementary-plane characters (anything that would encode above
-    0xFFFE post-ROT) are clamped to 0xFFFE — the engine's UTF-16 reader
-    has no surrogate-pair support, so we can't preserve them. The audit
-    layer surfaces a CONTAINS_UNENCODABLE warning when the bio carries
-    such characters; this clamp is the last-resort safety net.
+    Text is normalized for the game's effectively 8-bit biography font before
+    truncation. The supplementary-plane clamp remains as a last-resort defense
+    if that normalization contract is ever bypassed.
     """
     if char_max < 0:
         raise ValueError(f"char_max must be non-negative, got {char_max}")
@@ -124,41 +124,18 @@ def encode_field(text: str, byte_size: int, char_max: int) -> bytes:
         )
 
     buf = bytearray(byte_size)
-    truncated = text[:char_max]
+    safe_text = edt_safe(text) or ""
+    truncated = safe_text[:char_max]
     for i, char in enumerate(truncated):
         val = ord(char)
         if val >= ROT_THRESHOLD:
             val += 1
         if val > 0xFFFE:
-            # Defensive clamp; emoji + supplementary-plane chars land here.
-            # See find_unencodable_chars() for the audit-side preview.
+            # Defensive clamp. edt_safe() normally makes this unreachable.
             val = 0xFFFE
         buf[i * 2] = val & 0xFF
         buf[i * 2 + 1] = (val >> 8) & 0xFF
     return bytes(buf)
-
-
-def find_unencodable_chars(text: str) -> list[tuple[int, str]]:
-    """Return (index, char) pairs for characters `encode_field` would clamp.
-
-    A character is unencodable if its codepoint (post-ROT) would exceed
-    0xFFFE — i.e. anything in the supplementary plane (emoji, rare CJK,
-    musical symbols, etc.). The engine reads bio strings via a 16-bit
-    UTF-16 reader with no surrogate-pair handling, so these characters
-    would be rendered as `□` (the U+FFFE sentinel glyph) in-game.
-
-    Used by the audit layer to warn the user BEFORE they save, so they
-    can decide whether to remove the offending characters or accept the
-    mangled in-game display.
-    """
-    bad: list[tuple[int, str]] = []
-    for i, char in enumerate(text):
-        val = ord(char)
-        if val >= ROT_THRESHOLD:
-            val += 1
-        if val > 0xFFFE:
-            bad.append((i, char))
-    return bad
 
 
 def decode_field(data: bytes) -> str:
@@ -352,7 +329,7 @@ def route_bio(
             # Without this, Move/Duplicate of any expansion-AIM slot on a
             # minimal install raised ValueError from read_bio that
             # propagated past relocator.py:128 / :279 (no try/except).
-            # Bug-review finding C3. Writes still raise — silent
+            # Writes still raise — silent
             # mis-routing on writes is the original bug we're fixing.
             if not for_write:
                 return EDTRoute(
@@ -398,8 +375,7 @@ def route_bio(
     #   1. If aim_bio_id is supplied → AIMBIOS.EDT (Type=1 case). This
     #      handles Vengeance's slot 203 etc. which carries a real AIM row.
     #      The earlier fall-through to NPCDATA silently wrote AIM bios to
-    #      a file the engine never reads for the AIM site — bug fix
-    #      2026-05-15.
+    #      a file the engine never reads for the AIM site.
     #   2. If merc_bio_id is supplied → MERCBIOS.EDT (Type=2 case).
     #   3. Else probe disk: per-file MercEdt/ if present, NPCDATA otherwise.
     #      Read-side fallback for installs whose XML doesn't bind the slot
@@ -416,7 +392,7 @@ def route_bio(
     # MercEdt: CLAUDE.md ("MercWizard 2 fixes BOTH symmetrically") +
     # mercwizard_core/inject/edt.py:_route_merc_expansion both call
     # `MercEdt/<n>.EDT` dead routing — the engine never reads those
-    # files for Type=1 or Type=2 bios. Bug-review finding E3 — the
+    # files for Type=1 or Type=2 bios — the
     # earlier code path landed write_bio on this dead route whenever a
     # legacy install retained the file. Reads can still surface the
     # legacy bytes for back-compat. Writes fall through to per-file NPC

@@ -23,21 +23,28 @@
  * live as URLs (so existing keyboard shortcuts / bookmarks work) but
  * they're no longer linked from the Hub.
  */
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+} from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   deleteMerc,
+  exportBundle,
   formatApiError,
   getApiBaseUrl,
+  getMediaToken,
   getRoster,
   getRosterPortraitSheet,
 } from "../lib/api";
-import { getServerToken } from "../lib/tauri";
+import { pickSaveFile } from "../lib/tauri";
+import DeleteMercModal from "../components/DeleteMercModal";
 import type { RosterEntry } from "../lib/schema";
-import { tierStyle } from "../lib/slotLocks";
+import { tierStyle, useSlotLockGuard } from "../lib/slotLocks";
+import { SlotLockWarningModal } from "../components/SlotLockWarningModal";
 import { categoryLabel, useSlotPicker } from "../lib/slotPicker";
 
 // Reusing the same 256-slot grid logic from SlotPicker but scoped to
@@ -75,14 +82,15 @@ export default function MercWizardRoster() {
     queryFn: () => getApiBaseUrl(),
     staleTime: Infinity,
   });
-  // Per-session token resolved once. `<img src=>` can't attach the
+  // Per-launch media token resolved once. `<img src=>` can't attach the
   // X-MercWizard-Token header (browser limitation on element-driven
-  // loads), so the token rides as a `?_t=<token>` query param.
-  // Pre-fix the portrait URLs 401'd silently and every cell fell back
-  // to its slot-number placeholder.
+  // loads), so a token rides as a `?_t=` query param instead. It is the
+  // GET-only one, not the session token, because a URL ends up in the
+  // WebView's disk cache. Pre-fix the portrait URLs 401'd silently and
+  // every cell fell back to its slot-number placeholder.
   const apiToken = useQuery({
-    queryKey: ["api-server-token"],
-    queryFn: () => getServerToken(),
+    queryKey: ["api-media-token"],
+    queryFn: () => getMediaToken(),
     staleTime: Infinity,
   });
   // Build the `&_t=...` suffix once per render. Empty when the token
@@ -121,6 +129,10 @@ export default function MercWizardRoster() {
   // ALL / EMPTY chips switch to the full grid / empty slots in one click.
   const [filter, setFilter] = useState<Filter>("filled");
   const [search, setSearch] = useState("");
+  // Sort order for the gallery. Slot is the engine-index order (default);
+  // name sorts filled mercs alphabetically with empties trailing; type
+  // groups by profile Type then slot.
+  const [sort, setSort] = useState<"slot" | "name" | "type">("slot");
   // Card-size control (Compact / Medium / Large), persisted so the user's
   // choice sticks between sessions. Drives both the responsive grid's min
   // column width and the portrait scale.
@@ -144,6 +156,36 @@ export default function MercWizardRoster() {
   const [replaceConfirm, setReplaceConfirm] = useState<{
     slot: number; existingName: string;
   } | null>(null);
+  // In-grid delete: slot pending the type-to-confirm modal (was /delete).
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  // In-grid export result banner (was /export). null = idle.
+  const [exportStatus, setExportStatus] = useState<
+    | { kind: "saved"; path: string }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
+
+  // Export straight from the grid: native save dialog → write bundle.
+  // In browser dev mode pickSaveFile returns null → silent no-op (the
+  // dialog is a Tauri shell feature).
+  const exportMut = useMutation({
+    mutationFn: async (entry: RosterEntry) => {
+      const name = entry.nickname ?? entry.name ?? `slot_${entry.slot}`;
+      const safe = name.replace(/[^A-Za-z0-9_-]/g, "_") || `slot_${entry.slot}`;
+      const path = await pickSaveFile(`${safe}.wmerc`, [
+        { name: "Merc Forge bundle", extensions: ["wmerc"] },
+      ]);
+      if (!path) return null;
+      const result = await exportBundle({ slot: entry.slot, out_path: path, include_voice: true });
+      return result.out_path;
+    },
+    onSuccess: (path) => {
+      if (path) setExportStatus({ kind: "saved", path });
+    },
+    onError: (err) => {
+      setExportStatus({ kind: "error", message: formatApiError(err) });
+    },
+  });
 
   // Close the context menu on any global click / Escape so it doesn't
   // get stuck open when the user clicks somewhere unrelated.
@@ -176,12 +218,13 @@ export default function MercWizardRoster() {
   // sitting in the slot — a real data inconsistency, since the next
   // Create write would either silently overwrite or trip the audit
   // SLOT_OCCUPIED check at submit time.
+  const lockGuard = useSlotLockGuard();
   const replaceMutation = useMutation({
-    mutationFn: (slot: number) => deleteMerc(slot),
+    mutationFn: (slot: number) => deleteMerc(slot, { force: true }),
     onSuccess: (_data, slot) => {
       qc.invalidateQueries({ queryKey: ["roster"] });
       // Slot picker — the just-cleared slot should flip to empty for
-      // the Create flow that's about to open. Bug-review finding E4.
+      // the Create flow that's about to open.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
       setReplaceConfirm(null);
       navigate(`/create?slot=${slot}`);
@@ -259,10 +302,30 @@ export default function MercWizardRoster() {
   // The gallery renders ONLY the matching slots (sorted), not all 256
   // greyed — so the filled-first default is a tight gallery and ALL shows
   // the full grid. Slot numbers on each card keep positions legible.
-  const visibleSlots = useMemo(
-    () => Array.from(visibleSet).sort((a, b) => a - b),
-    [visibleSet],
-  );
+  const visibleSlots = useMemo(() => {
+    const arr = Array.from(visibleSet);
+    const label = (s: number) => {
+      const e = byIdx.get(s);
+      return (e?.nickname ?? e?.name ?? "").toLowerCase();
+    };
+    if (sort === "name") {
+      // Filled mercs A→Z; empty/nameless slots trail in slot order so the
+      // gallery doesn't open on a wall of blanks.
+      arr.sort((a, b) => {
+        const la = label(a), lb = label(b);
+        if (!la && !lb) return a - b;
+        if (!la) return 1;
+        if (!lb) return -1;
+        return la.localeCompare(lb) || a - b;
+      });
+    } else if (sort === "type") {
+      const ty = (s: number) => byIdx.get(s)?.profile_type ?? 99;
+      arr.sort((a, b) => ty(a) - ty(b) || a - b);
+    } else {
+      arr.sort((a, b) => a - b);
+    }
+    return arr;
+  }, [visibleSet, sort, byIdx]);
 
   // Chip counts — computed ignoring the search box (counts reflect the
   // filter shape, not the search-narrowed result). One walk over 256
@@ -310,6 +373,57 @@ export default function MercWizardRoster() {
     [],
   );
 
+  // ── Keyboard grid navigation (roving tabindex) ─────────────────────
+  // Arrow keys walk the visible cells; Home/End jump to the ends. The
+  // grid is a responsive auto-fill layout, so the column count isn't a
+  // constant — read it off the resolved grid-template-columns at the
+  // moment of the keypress. Moving focus also selects, so the selection
+  // sidebar + action bar track the focused cell (listbox semantics).
+  const gridRef = useRef<HTMLDivElement>(null);
+  const columnCount = useCallback((): number => {
+    const el = gridRef.current;
+    if (!el) return 1;
+    const cols = getComputedStyle(el).gridTemplateColumns;
+    const n = cols ? cols.split(" ").filter(Boolean).length : 1;
+    return Math.max(1, n);
+  }, []);
+  const focusSlot = useCallback((slot: number) => {
+    setSelected(slot);
+    // The button already exists in the DOM; focus it directly. Its
+    // roving tabIndex updates on the re-render, but focus() works now.
+    gridRef.current
+      ?.querySelector<HTMLButtonElement>(`[data-roving-slot="${slot}"]`)
+      ?.focus();
+  }, []);
+  const handleGridKey = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      const keys = ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown", "Home", "End"];
+      if (!keys.includes(e.key)) return;
+      const list = visibleSlots;
+      if (list.length === 0) return;
+      const cur = selected != null ? list.indexOf(selected) : -1;
+      const cols = columnCount();
+      let next = cur < 0 ? 0 : cur;
+      switch (e.key) {
+        case "ArrowRight": next = Math.min(list.length - 1, cur + 1); break;
+        case "ArrowLeft":  next = Math.max(0, cur - 1); break;
+        case "ArrowDown":  next = Math.min(list.length - 1, cur + cols); break;
+        case "ArrowUp":    next = Math.max(0, cur - cols); break;
+        case "Home":       next = 0; break;
+        case "End":        next = list.length - 1; break;
+      }
+      e.preventDefault();
+      const slot = list[next];
+      if (slot != null) focusSlot(slot);
+    },
+    [visibleSlots, selected, columnCount, focusSlot],
+  );
+  // Which cell carries tabIndex=0 (the single roving tab stop): the
+  // selected cell when it's visible, else the first visible cell.
+  const rovingSlot = selected != null && visibleSet.has(selected)
+    ? selected
+    : visibleSlots[0] ?? null;
+
   function handleAction(action: ContextAction, slot: number) {
     setContextMenu(null);
     const entry = byIdx.get(slot);
@@ -332,8 +446,12 @@ export default function MercWizardRoster() {
       case "duplicate-from": navigate(`/duplicate?from=${slot}`); break;
       case "duplicate-to": navigate(`/duplicate?to=${slot}`); break;
       case "move-from": navigate(`/move?from=${slot}`); break;
-      case "delete": navigate(`/delete?slot=${slot}`); break;
-      case "export": navigate(`/export?slot=${slot}`); break;
+      case "delete": setDeleteTarget(slot); break;
+      case "export": {
+        setExportStatus(null);
+        if (entry) exportMut.mutate(entry);
+        break;
+      }
       case "import": navigate(`/import?slot=${slot}`); break;
     }
   }
@@ -345,8 +463,8 @@ export default function MercWizardRoster() {
         <div>
           <h1 className="text-2xl font-bold">Merc Wizard</h1>
           <p className="text-sm text-wasteland-400 mt-0.5">
-            Click a slot to select. Right-click for a context menu.
-            Actions also appear in the bottom bar.
+            Click a slot to select, or use the arrow keys. Right-click for a
+            context menu. Actions also appear in the bottom bar.
           </p>
         </div>
         <Link
@@ -394,6 +512,20 @@ export default function MercWizardRoster() {
           placeholder="Filter by name, nickname, or slot number…"
           className="flex-1 min-w-[16rem] rounded border border-wasteland-700 bg-wasteland-900 px-3 py-1 text-xs"
         />
+        {/* Sort control */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] uppercase text-wasteland-500">Sort</span>
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as typeof sort)}
+            className="rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1 text-xs"
+            aria-label="Sort order"
+          >
+            <option value="slot">Slot #</option>
+            <option value="name">Name</option>
+            <option value="type">Type</option>
+          </select>
+        </div>
         {/* Card-size control */}
         <div className="flex items-center gap-2">
           <span className="text-[10px] uppercase text-wasteland-500">Size</span>
@@ -418,7 +550,7 @@ export default function MercWizardRoster() {
       )}
       {roster.error && (
         <div className="rounded border border-red-500/60 bg-red-500/10 p-3 text-sm text-red-300">
-          {String(roster.error)}
+          {formatApiError(roster.error)}
         </div>
       )}
 
@@ -432,6 +564,10 @@ export default function MercWizardRoster() {
               </div>
             ) : (
               <div
+                ref={gridRef}
+                role="grid"
+                aria-label="Merc slots"
+                onKeyDown={handleGridKey}
                 className="grid gap-2"
                 style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cardMin}px, 1fr))` }}
               >
@@ -464,6 +600,7 @@ export default function MercWizardRoster() {
                       sheetW={sheet?.manifest.sheet_w ?? 0}
                       sheetH={sheet?.manifest.sheet_h ?? 0}
                       nickname={nick}
+                      roving={rovingSlot === slot}
                       onSelect={handleSlotSelect}
                       onContextMenu={handleSlotContextMenu}
                     />
@@ -616,6 +753,43 @@ export default function MercWizardRoster() {
         </div>
       )}
 
+      {/* In-grid delete — the type-to-confirm + slot-lock flow, no page hop. */}
+      {deleteTarget !== null && (
+        <DeleteMercModal
+          slot={deleteTarget}
+          nickname={byIdx.get(deleteTarget)?.nickname ?? null}
+          name={byIdx.get(deleteTarget)?.name ?? null}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
+
+      {/* In-grid export feedback. Success shows the written path;
+          browser mode (no save dialog) never sets this. */}
+      {(exportMut.isPending || exportStatus) && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-40 rounded border border-wasteland-600 bg-wasteland-900 px-4 py-2 text-sm shadow-lg flex items-center gap-3">
+          {exportMut.isPending && <span className="text-wasteland-300">Writing bundle…</span>}
+          {exportStatus?.kind === "saved" && (
+            <>
+              <span className="text-rust-400 font-semibold">Exported.</span>
+              <span className="text-xs text-wasteland-300 font-mono max-w-md truncate" title={exportStatus.path}>
+                {exportStatus.path}
+              </span>
+            </>
+          )}
+          {exportStatus?.kind === "error" && (
+            <span className="text-rust-300">Export failed: {exportStatus.message}</span>
+          )}
+          {exportStatus && !exportMut.isPending && (
+            <button
+              className="text-xs text-wasteland-400 hover:text-rust-400"
+              onClick={() => setExportStatus(null)}
+            >
+              dismiss
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Replace-with-new confirmation. Single dialog, one click to
           proceed. Behind the scenes: delete then navigate to /create. */}
       {replaceConfirm && (
@@ -699,7 +873,13 @@ export default function MercWizardRoster() {
               <button
                 type="button"
                 className="btn-primary"
-                onClick={() => replaceMutation.mutate(replaceConfirm.slot)}
+                onClick={() =>
+                  // Replace deletes the occupant — a quest-bound /
+                  // engine-named slot gets the same tier warning the
+                  // Create flow shows before writing over one.
+                  lockGuard.guard(replaceConfirm.slot, () =>
+                    replaceMutation.mutate(replaceConfirm.slot))
+                }
                 disabled={replaceMutation.isPending}
               >
                 {replaceMutation.isPending
@@ -711,6 +891,14 @@ export default function MercWizardRoster() {
             </div>
           </div>
         </div>
+      )}
+      {lockGuard.pending && (
+        <SlotLockWarningModal
+          lock={lockGuard.pending.lock}
+          action="delete"
+          onConfirm={lockGuard.confirm}
+          onCancel={lockGuard.cancel}
+        />
       )}
     </div>
   );
@@ -783,6 +971,9 @@ interface SlotCellProps {
   sheetW: number;
   sheetH: number;
   nickname: string | null;
+  /** True for the single cell that is the grid's tab stop (roving
+   *  tabindex). All other cells are removed from the tab order. */
+  roving: boolean;
   /** Stable refs from the parent's useCallback. */
   onSelect: (slot: number) => void;
   onContextMenu: (slot: number, x: number, y: number) => void;
@@ -791,7 +982,7 @@ interface SlotCellProps {
 const SlotCell = memo(function SlotCell({
   slot, filled, selected, tier, engineName, engineRole, profileType,
   sheetUrl, cellX, cellY, cellW, cellH, sheetW, sheetH, nickname,
-  onSelect, onContextMenu,
+  roving, onSelect, onContextMenu,
 }: SlotCellProps) {
   const showPortrait = !!sheetUrl;
   const lockStyle = tier !== "safe" ? tierStyle(tier as Parameters<typeof tierStyle>[0]) : null;
@@ -833,6 +1024,9 @@ const SlotCell = memo(function SlotCell({
     <button
       type="button"
       className={cls}
+      role="gridcell"
+      data-roving-slot={slot}
+      tabIndex={roving ? 0 : -1}
       onClick={() => onSelect(slot)}
       onContextMenu={(e: ReactMouseEvent) => {
         e.preventDefault();

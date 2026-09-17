@@ -19,7 +19,7 @@ table, lights, edgepoints, schedules, map-info tail.
 ## 2. Grounding findings (2026-06-20)
 
 Investigated the real install
-(`C:\Jagged Alliance 2\…Mod Prototype - Copy\Data-1.13\Maps`) with the sidecar
+(`<your JA2 1.13 install>\Data-1.13\Maps`) with the sidecar
 parser before designing.
 
 - **Appendix flag bits** (`parse_dat_ext.py`, per `worlddef.cpp:60-68`):

@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from mercwizard_core import backup as backup_mod
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.graphics import (
     GraphicsDeployError,
     deploy_graphics,
@@ -33,7 +33,7 @@ def deploy(install_id: str | None = Query(default=None)) -> dict:
             "error": "GAME_RUNNING",
             "message": "Close JA2 before deploying graphics config."})
     state = get_state()
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         targets = [info.path / n for n in
                    ("ddraw.ini", "ReShade.ini", "ja2_remastered.ini")]
         entry = backup_mod.snapshot(

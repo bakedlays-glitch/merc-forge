@@ -73,6 +73,7 @@ megapack/
 # their own rules above (and they have them).
 
 # ── Distribution artifacts + bundle exports ─────────────────────────
+/release/
 *.msi
 # Belt-and-suspenders against a stray installer / packaged build.
 *.exe
@@ -103,6 +104,13 @@ desktop.ini
 # ── Local testing scratch ───────────────────────────────────────────
 test_install/
 scratch/
+# Unique pytest basetemp directories used by isolated review and race tests.
+.pytest*/
+# Superpowers review ledgers and isolated package/test outputs are local evidence.
+.superpowers/
+# Task-local lock roots and alternate Cargo targets are fully regenerable.
+/.task2-lock-appdata/
+shell/target-*/
 # Playwright/browser-MCP run artifacts (screenshots, traces) dropped at
 # repo root during MapForge GUI smoke tests. Regenerable; not source.
 .playwright-mcp/
@@ -132,3 +140,12 @@ ja2-launcher/shell/gen/
 # tools/generated_schemas/ is the output dir of build_ini_schemas.py.
 # Regenerable from a vanilla Data-1.13 dir.
 ja2-launcher/tools/generated_schemas/
+# gensector one-shot render output (7 MB, regenerable by generate_sector.py)
+sidecar/gensector_render.png
+
+# Working state and in-progress plans: useful locally, not part of the
+# published project. STATUS.md is the live resume-state doc and
+# GENSECTOR_FIX_PLAN.md is an internal work plan.
+/STATUS.md
+/GENSECTOR_FIX_PLAN.md
+/RELEASE_CHECKLIST.md

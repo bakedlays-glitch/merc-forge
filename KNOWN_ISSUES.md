@@ -1,6 +1,6 @@
-# MercWizard 2 — Known Issues
+# Merc Forge — Known Issues
 
-Last reviewed: 2026-05-23.
+Last reviewed: 2026-08-02.
 
 This file tracks **currently open issues** — bugs the team has acknowledged but not yet fixed — and a separate "Deferred features" section for forward-looking work we've decided to skip for now. For the full history of the pre-distribution bug sweep (2026-05-13) and the audit + fix arcs that followed, see the git log and `DEVELOPER.md`'s "Version notes" section.
 
@@ -14,6 +14,10 @@ This file tracks **currently open issues** — bugs the team has acknowledged bu
 
 ---
 
+## Open — High
+
+- **Map Forge's recovered generator corpus does not preserve tileset/art identity** — schema 1 records observed subindices by source, biome, layer, and slot, but it does not record which tileset/STI gave a subindex its visual meaning. A valid frame-count clamp prevents out-of-range reads; it cannot prove that subindex 12 means the same art in two mods or tilesets. The corpus also does not preserve JSD multi-tile structure identity. Treat generated maps as candidates requiring visual/engine review, not as proof of cross-mod visual correctness. The recovery audit and schema-2 punch list are in [`../MAPFORGE_CORPUS_AUDIT_2026-08-02.md`](../MAPFORGE_CORPUS_AUDIT_2026-08-02.md).
+
 ## Open — Medium
 
 - **`ja2-launcher/` Settings/Presets/Wizard tabs are known-broken (frozen tree, do not fix in place)** — the standalone launcher's INI editor writes every override to `Data-User/`, a directory the engine **never mounts** (zero references in engine source; no vfs_config defines such a layer). Its edits are silent no-ops in-game. Verified in the 2026-06-07 adversarial review; the tree is deliberately frozen as reference. Do **not** copy its write model anywhere. Superseded by the MercForge INI editor (`mercwizard_core/ini_editor.py` + `routes/ini_editor.py`, engine semantics in `docs/INI_EDITOR_ENGINE_FACTS.md`). The launcher's Campaigns picker / Play / Diagnostic tabs are unaffected and correct.
@@ -22,15 +26,26 @@ This file tracks **currently open issues** — bugs the team has acknowledged bu
 
 These don't affect correctness in the deployed threat model (single user, Windows-only, localhost-only). Documented for future work.
 
+- **Release version has three authorities** — the frontend package and Tauri config say 1.0.0, the sidecar package says 2.0.0, and the latest local installer is 1.0.1. Runtime behavior is unaffected, but release automation and bug reports can misidentify a build. Pick one release authority and derive the other manifests and installer filename from it before the next public release.
+- **MapForge multi-tile stamp may place boulders as one unit instead of distinct subframes** — user report (2026-05-26), never re-confirmed since; parked as low priority 2026-08-01. What was verified clean before deferring: `mdrock.jsd` (slot 15) and `furn_6.jsd` (slot 73) both bake `ubNumberOfTiles=4` with correct 2×2 offsets `(0,0)(0,-1)(-1,0)(-1,-1)` → distinct subs 1–4, and the painter iterated `footprint.tiles` emitting one Placement per tile with `sub: ft.sub + subDelta` — so bake + dispatch looked correct for those two. Open questions if it resurfaces: (1) which STI misbehaved (the two checked are clean); (2) whether the placed subs are visually identical by STI design ("tileable identical pieces" → not a bug); (3) whether the auto-shadow companion doubles visuals; (4) "tall" two-tile trees like `tree2_t.jsd` where both tiles claim the same (bX,bY) and visually overlap. **Caveat:** the original painter line-refs (`MapForgeSector.tsx:1263-1267`) predate the R3/R4/gen-panel revamp — re-locate the dispatch before debugging; the revamp may have fixed this incidentally. Engine ref: `TileEngine/structure.cpp:AddStructureToWorld`; JSD spec: `Headless_Compiler/authoring/author_collision_jsd.py`.
+
 - **`_force_transparent_to_index_0` perf** — list zip; could be `numpy.where`. Runs in ~20 ms per call; not in any hot path.
 - **FaceGear auto-positioning quality varies per merc** — the algorithm assumes the eye XML coord tracks the goggle bbox row across all mercs in the source install, but vanilla art was hand-positioned and not coord-aligned (Christine's goggles sit at row 14 vs Narg's at row 11 despite both having `usEyesY=10`). Auto-positioning lands the gear close-enough for ~80% of vanilla-style portraits; outliers may need the Upload PNG path. No automatic fine-tune offered today.
-- ~~**Auto-position source-frame selection is naive**~~ — RESOLVED 2026-05-27 (see Resolved section). The source-picker abstraction was removed entirely; fine-tuning is now direct sOffsetX/sOffsetY editing via `POST /facegear/set-offset`. The auto_position route's source-merc override parameters were dropped — sidecar always uses first-non-empty as the starting point.
-- ~~**Auto-position offset isn't editable in the UI after writing**~~ — RESOLVED 2026-05-27 (see Resolved section). The ±1px nudge arrow widget was added earlier; the remaining gap was that it only surfaced after a session-local Auto / nudge mutation. Fixed by extending `GET /facegear/overlay` to also return the frame's signed `offset_xy` and using it as the live-offset fallback in `FaceGearOverlayAuthor.tsx`.
 ---
 
 ## Deferred features
 
 Tracked here so they don't get forgotten between sessions. Not bugs — work the team has consciously decided to defer.
+
+### GENSECTOR Track B — shippable settlement generator (open, optional)
+
+Track A (prove the 4 socket smoothers + validator) is DONE — the
+`mapforge-socket-generator` branch merged to main 2026-07-16 and `sidecar/test_socket_generators.py`
+passes 8/8 (needs a live sidecar on :8000). Two tails remain open:
+- **Engine-load check:** `SOCKTEST.DAT` (written by the harness to the active install's `Data-1.13/Maps/`)
+  has not been loaded in `ja2mapeditor.exe` / the game — manual step.
+- **Track B** (make `sidecar/generate_sector.py` a shippable settlement generator) was explicitly scoped
+  optional in the plan and remains unbuilt. The script is a standalone CLI, never wired to the UI.
 
 ### Animation template-overlay library (low priority)
 
@@ -77,6 +92,8 @@ round-trip; see [docs/WMERC_FORMAT.md](docs/WMERC_FORMAT.md)).
 
 The following items from the 2026-05-13 bug sweep + 2026-05-15 audit have been fixed. Removing them entirely would lose the git-blame signal pointing at the fix commits.
 
+- **EDT biography injection could write glyphs the game font cannot render** — resolved 2026-08-02. `mercwizard_core.edt_text.edt_safe` now applies the shared typography/NFKD/visible-fallback policy at `encode_field()` before truncation, while preserving Latin-1. Audit previews the exact normalized value for `biographyText` and `additionalInfoText` without applying EDT policy to XML-only names. AIMBIOS and MERCBIOS HTTP round trips are pinned to normalized 1,120-byte records; the full suite passes, and the rebuilt PyInstaller archive contains the new module with three-copy sidecar hash parity.
+- **Launcher could run a stale packaged executable after a frontend-only build** — resolved 2026-08-02. `launch_current.ps1` now rebuilds when source is newer than `frontend/dist`, when shell sources are newer than the release executable, or when `frontend/dist/index.html` is newer than that executable. `tests/test_launch_checks.ps1` covers all three freshness states.
 - **Install + active install persistence to AppData** — `routes/state.py` has `_load_from_disk()` / `_save_to_disk()` / `_persistence_enabled()` (test-aware).
 - **`backup.snapshot` tracking created files** — `BackupEntry.files_created` exists; `record_files_created` is called by `deploy_import` for the Step 7 rollback path.
 - **Cross-mod schema warning surfacing** — `partial_failures` is emitted in the report and rendered in the Import page.

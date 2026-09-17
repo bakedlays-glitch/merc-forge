@@ -10,6 +10,7 @@ the ja2py library doesn't know about:
 """
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 from typing import Optional
@@ -96,16 +97,18 @@ def _build_palette_source(
     return canvas
 
 
-def write_smallface_sti(
+def write_animated_face_sti(
     out_path: Path,
-    base_48x43: Image.Image,
+    base: Image.Image,
     anim_frames_7: list[Image.Image],
 ) -> None:
-    """Write the 8-frame 48x43 SmallFace STI.
+    """Write an engine face STI with one base + seven animation frames.
 
-    The 7 animation frames must match the canonical sizes exactly. Caller is
-    expected to use animate_skip.make_skip_frames() or
-    animate_explicit.make_explicit_frames() to produce them.
+    JA2 accepts different base and sub-frame sizes for tactical and talk-panel
+    faces, but the shape contract is identical: frames 1-4 share one eye size
+    and frames 5-7 share one mouth size.  The shared writer prevents the RPC
+    90x100 path from drifting from the proven 48x43 palette/ETRLE/atomic-write
+    path.
 
     Palette is computed across the **union** of base + all 7 anim frames
     (via `_build_palette_source`) so colors unique to the anim frames
@@ -117,10 +120,7 @@ def write_smallface_sti(
         AssertionError: If sizes or frame count are wrong (intentionally
             loud; an invalid STI written to disk would crash the game).
     """
-    assert base_48x43.size == SMALLFACE_BASE_SIZE, (
-        f"Base frame must be {SMALLFACE_BASE_SIZE}; got {base_48x43.size}. "
-        "The 8-frame STI requires an exact 48x43 base or the engine crashes."
-    )
+    assert base.size[0] > 0 and base.size[1] > 0, f"Base frame must be non-empty; got {base.size}"
     assert len(anim_frames_7) == 7, (
         f"Need exactly 7 animation frames; got {len(anim_frames_7)}. "
         "The engine has no path for fewer frames - it'll garble or crash."
@@ -144,9 +144,9 @@ def write_smallface_sti(
         )
 
     # Build the shared palette over the union of base + all 7 anim frames.
-    palette_source = _build_palette_source(base_48x43, anim_frames_7)
+    palette_source = _build_palette_source(base, anim_frames_7)
     palette_p = quantize_with_anchor(palette_source)
-    base_p = quantize_against_palette(base_48x43, palette_p)
+    base_p = quantize_against_palette(base, palette_p)
     anim_p = [quantize_against_palette(f, palette_p) for f in anim_frames_7]
 
     # Build the ja2py Images8Bit container. Use the union-quantize palette,
@@ -175,13 +175,27 @@ def write_smallface_sti(
     images = Images8Bit(
         sub_images,
         palette,
-        width=SMALLFACE_BASE_SIZE[0],
-        height=SMALLFACE_BASE_SIZE[1],
+        width=base.size[0],
+        height=base.size[1],
     )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "wb") as f:
-        save_8bit_sti(images, f)
+    # Atomic write: a process kill mid-save otherwise leaves a truncated
+    # face STI the engine dies on (struct error at load).
+    from ..sti_decode import atomic_save_sti
+    atomic_save_sti(images, out_path)
+
+
+def write_smallface_sti(
+    out_path: Path,
+    base_48x43: Image.Image,
+    anim_frames_7: list[Image.Image],
+) -> None:
+    """Write the canonical eight-frame 48x43 tactical face STI."""
+    assert base_48x43.size == SMALLFACE_BASE_SIZE, (
+        f"Base frame must be {SMALLFACE_BASE_SIZE}; got {base_48x43.size}. "
+        "The SmallFace STI requires an exact 48x43 base."
+    )
+    write_animated_face_sti(out_path, base_48x43, anim_frames_7)
 
 
 def write_static_sti(out_path: Path, img: Image.Image) -> None:
@@ -207,9 +221,8 @@ def write_static_sti(out_path: Path, img: Image.Image) -> None:
         height=img.size[1],
     )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "wb") as f:
-        save_8bit_sti(images, f)
+    from ..sti_decode import atomic_save_sti
+    atomic_save_sti(images, out_path)
 
 
 def verify_smallface_sti(sti_path: Path) -> dict:
@@ -252,4 +265,33 @@ def verify_smallface_sti(sti_path: Path) -> dict:
         # report them instead of asserting the vanilla canonicals.
         "eye_subframe_size": frame_sizes[1] if eye_sizes_consistent else None,
         "mouth_subframe_size": frame_sizes[5] if mouth_sizes_consistent else None,
+    }
+
+
+def verify_animated_face_sti(
+    sti_path: Path | bytes,
+    *,
+    expected_base_size: tuple[int, int],
+) -> dict:
+    """Read back the generic eight-frame face layout used by RPC talk faces.
+
+    Accepting bytes lets read-only audits verify a B-face sourced directly
+    from Faces.slf without extracting it into the live install.
+    """
+    if isinstance(sti_path, bytes):
+        images = load_8bit_sti(io.BytesIO(sti_path))
+    else:
+        with open(sti_path, "rb") as f:
+            images = load_8bit_sti(f)
+    frame_sizes = [sub.image.size for sub in images.images]
+    eye_ok = len(frame_sizes) == 8 and len(set(frame_sizes[1:5])) == 1
+    mouth_ok = len(frame_sizes) == 8 and len(set(frame_sizes[5:8])) == 1
+    base_size = frame_sizes[0] if frame_sizes else None
+    return {
+        "valid": len(frame_sizes) == 8 and base_size == expected_base_size and eye_ok and mouth_ok,
+        "frame_count": len(frame_sizes),
+        "base_size": base_size,
+        "canvas_size": (images.width, images.height),
+        "eye_subframe_size": frame_sizes[1] if eye_ok else None,
+        "mouth_subframe_size": frame_sizes[5] if mouth_ok else None,
     }

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from mercwizard_core import gap, voice as voice_mod
+from mercwizard_core import body_types, gap, voice as voice_mod
 from mercwizard_core.bundle import (
     ImportAuditError,
     SlotOccupiedError,
@@ -497,6 +497,49 @@ def test_deploy_import_blocks_occupied_slot_without_force(tmp_path: Path) -> Non
     assert profile["zName"] == "Tycho"
 
 
+def test_deploy_import_observed_body_type_is_preserve_only(tmp_path: Path) -> None:
+    source = tmp_path / "source-observed"
+    merc = _populate_install(source, slot=220)
+    source_profiles = source / "Data-1.13" / "TableData" / "MercProfiles.xml"
+    profiles_xml.upsert(source_profiles, merc.model_copy(update={"ubBodyType": 91}))
+    bundle = tmp_path / "observed.wmerc"
+    export_merc(source, 220, bundle)
+
+    empty_target = _empty_install(tmp_path / "empty-target")
+    profiles_xml.upsert(
+        empty_target / "Data-1.13" / "TableData" / "MercProfiles.xml",
+        Merc(uiIndex=200, ubFaceIndex=200, Type=1, zName="Observed", zNickname="Obs", ubBodyType=91),
+    )
+    with pytest.raises(ImportAuditError) as empty_error:
+        deploy_import(empty_target, bundle, target_slot=234)
+    assert {issue["code"] for issue in empty_error.value.issues} == {"BODY_TYPE_PRESERVE_ONLY"}
+
+    same_target = _empty_install(tmp_path / "same-target")
+    profiles_xml.upsert(
+        same_target / "Data-1.13" / "TableData" / "MercProfiles.xml",
+        Merc(uiIndex=234, ubFaceIndex=234, Type=1, zName="Observed", zNickname="Obs", ubBodyType=91),
+    )
+    with pytest.raises(ImportAuditError) as same_error:
+        deploy_import(same_target, bundle, target_slot=234, force=True)
+    assert {issue["code"] for issue in same_error.value.issues} == {"BODY_TYPE_PRESERVE_ONLY"}
+    assert profiles_xml.read_slot(
+        same_target / "Data-1.13" / "TableData" / "MercProfiles.xml", 234,
+    )["zName"] == "Observed"
+
+    different_target = _empty_install(tmp_path / "different-target")
+    profiles_xml.upsert(
+        different_target / "Data-1.13" / "TableData" / "MercProfiles.xml",
+        Merc(uiIndex=200, ubFaceIndex=200, Type=1, zName="Observed", zNickname="Obs", ubBodyType=91),
+    )
+    profiles_xml.upsert(
+        different_target / "Data-1.13" / "TableData" / "MercProfiles.xml",
+        Merc(uiIndex=234, ubFaceIndex=234, Type=1, zName="Other", zNickname="Other", ubBodyType=92),
+    )
+    with pytest.raises(ImportAuditError) as different_error:
+        deploy_import(different_target, bundle, target_slot=234, force=True)
+    assert {issue["code"] for issue in different_error.value.issues} == {"BODY_TYPE_PRESERVE_ONLY"}
+
+
 def test_deploy_import_blocks_on_audit_error(tmp_path: Path) -> None:
     """An RPC-typed merc deployed into an AIM-bound slot must raise ImportAuditError.
 
@@ -534,6 +577,33 @@ def test_deploy_import_blocks_on_audit_error(tmp_path: Path) -> None:
         deploy_import(target, bundle, target_slot=175)
     codes = {issue["code"] for issue in exc.value.issues}
     assert "NPC_IN_AIM_SLOT" in codes
+
+
+def test_deploy_import_accepts_wasteland_marcus_body_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    merc = _populate_install(source, slot=220)
+    profiles_xml.upsert(
+        source / "Data-1.13" / "TableData" / "MercProfiles.xml",
+        merc.model_copy(update={"ubBodyType": 41}),
+    )
+    bundle = tmp_path / "marcus.wmerc"
+    export_merc(source, ui_index=220, out_path=bundle)
+
+    target = tmp_path / "Wasteland target"
+    _empty_install(target)
+    (target / "Data-1.13" / "TileSets" / "Tileset 70").mkdir(parents=True)
+    (target / "ja2.exe").write_bytes(b"\0" * body_types.CANONICAL_WASTELAND_EXE_SIZE)
+    monkeypatch.setattr(
+        body_types,
+        "_sha256_file",
+        lambda _path: body_types.CANONICAL_WASTELAND_EXE_SHA256,
+    )
+
+    report = deploy_import(target, bundle, target_slot=220)
+
+    assert report.target_slot == 220
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1272,7 +1342,7 @@ def test_bundle_round_trip_preserves_explicit_animation_frames(tmp_path: Path) -
 def test_legacy_bundle_with_stale_merc_availability_row_is_silently_ignored(
     tmp_path: Path,
 ) -> None:
-    """Regression: a legacy bundle (Vengeance Eskimo export, pre-2026-05-14)
+    """Regression: a legacy bundle (Vengeance Eskimo export)
     carries `table_rows/MercAvailability.xml` for the source slot's row.
     Processing that row clobbers the importer's auto-allocated MercBioID
     and lands Eskimo's bio past the target install's MERCBIOS.EDT EOF
@@ -1334,7 +1404,7 @@ def test_legacy_bundle_with_stale_merc_availability_row_is_silently_ignored(
     )
 
     # No UNRECOGNIZED-table warnings for the three intentional skips
-    # — they may appear as "intentionally skipped" info per TODO #12
+    # — they may appear as "intentionally skipped" info
     # (the import report now surfaces what was deliberately dropped
     # vs what was mystery-dropped), but they must NOT carry the
     # "unrecognized table name" wording reserved for actual mystery
@@ -1344,7 +1414,7 @@ def test_legacy_bundle_with_stale_merc_availability_row_is_silently_ignored(
         f"unrecognized-table warning leaked through: {failures_blob!r}"
     # Intentional-skip notes are present (informational, not error).
     assert "intentionally skipped" in failures_blob, \
-        "INTENTIONAL_SKIPS should surface as informational entries (TODO #12)"
+        "INTENTIONAL_SKIPS should surface as informational entries"
 
     # Auto-allocated MercBioID stuck — stale 47 from the bundled row did NOT
     # win. compute_merc_bio_id picks the lowest free in [0, 199] for slot

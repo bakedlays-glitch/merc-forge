@@ -21,10 +21,11 @@ Usage::
 
     sidecar/.venv/Scripts/python.exe tools/scan_cliff_faces.py
     sidecar/.venv/Scripts/python.exe tools/scan_cliff_faces.py \
-        --installs-dir "C:/Jagged Alliance 2" --top 8
+        --installs-dir "<dir holding your JA2 installs>" --top 8
 """
 from __future__ import annotations
 
+import os
 import argparse
 import hashlib
 import sys
@@ -91,9 +92,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("roots", nargs="*", help="install root dir(s) to sweep")
-    ap.add_argument("--installs-dir", default="C:/Jagged Alliance 2",
+    ap.add_argument("--installs-dir", default=os.environ.get("JA2_INSTALLS_DIR", ""),
                     help="sweep every immediate subdir as an install root "
-                         "(default: C:/Jagged Alliance 2)")
+                         "(default: $JA2_INSTALLS_DIR)")
     ap.add_argument("--no-slf", action="store_true",
                     help="loose maps only (skip Maps.slf)")
     ap.add_argument("--top", type=int, default=10,

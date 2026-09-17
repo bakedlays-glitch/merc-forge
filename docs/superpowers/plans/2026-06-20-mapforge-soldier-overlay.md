@@ -197,7 +197,7 @@ import os
 import pytest
 from mercwizard_core.mapforge_engine.parse_dat_ext import parse_dat_full
 
-_A6 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+_A6 = (r"<your JA2 1.13 install>"
        r"\Data-1.13\Maps\A6.DAT")
 
 @pytest.mark.skipif(not os.path.exists(_A6), reason="canonical install not present")

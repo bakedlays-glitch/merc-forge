@@ -44,7 +44,7 @@ def _persistence_enabled() -> bool:
     %APPDATA%/MercWizard/state.json at import time and writes back on
     every `set_active`/`register_manual_install`. Tests using tmp_path
     fixtures end up persisting fake install paths into the user's REAL
-    appdata — exactly what happened on 2026-05-13 when test_move_merc0's
+    appdata — exactly what happened when test_move_merc0's
     `fake_install` ID survived into a production launch and stuck the
     Tauri shell in a respawn loop.
 
@@ -184,7 +184,14 @@ class SidecarState:
             "settings": self._settings,
         }
         try:
-            state_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            # Atomic tmp + os.replace: a crash mid-write otherwise leaves
+            # corrupt JSON, which _load_from_disk treats as "no prior
+            # state" — silently forgetting every registered install and
+            # the active pick on next launch.
+            import os as _os
+            tmp = state_file.with_suffix(state_file.suffix + ".mwtmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            _os.replace(tmp, state_file)
         except OSError as e:
             log.error(
                 "state.json write FAILED: %s (%s). Active install id = %r will "
@@ -217,7 +224,7 @@ class SidecarState:
         (Pre-fix this accepted an `extra_paths` kwarg that was no longer
         wired to any caller — the Settings rescan-extra-paths surface it
         advertised was never implemented. Dropped to match what callers
-        actually do. Bug-review finding C7.)
+        actually do.)
         """
         with self._lock:
             persisted_snapshot = list(self._persisted_installs)
@@ -420,7 +427,7 @@ class SidecarState:
     # is now the explicit `apply_vfs_config` endpoint in routes/installs.py,
     # which builds the path string itself. The duplicate helper used
     # the OPPOSITE slash direction from the live endpoint, which the
-    # bug-review (finding B7) flagged as an inconsistency. Removed
+    # a review flagged as an inconsistency. Removed
     # rather than reconciled because nothing called it. If a future
     # consumer needs in-process VFS application, call
     # mercwizard_core.vfs.write_vfs_config_to_ja2_ini directly with

@@ -78,7 +78,7 @@ def test_quantize_opaque_dark_hair_pixels_never_collide_with_transparent_index()
     The pre-fix anchor-based swap could fail when MAXCOVERAGE clustered the
     anchor pixel with dark hair: swapping the cluster's index to 0 dragged
     the hair with it, leaving Eskimo with see-through hair (the user saw the
-    yellow M.E.R.C. canvas through his hair, 2026-05-14). The shift-by-1
+    yellow M.E.R.C. canvas through his hair). The shift-by-1
     fix reserves index 0 by construction — no opaque pixel can ever land
     there regardless of color.
     """

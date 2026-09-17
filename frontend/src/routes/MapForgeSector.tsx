@@ -7,7 +7,7 @@
  * optional room-number labels), and an inspector panel that auto-updates
  * on canvas clicks.
  *
- * Phase 0.6 polish:
+ * View controls:
  *   - mouse-wheel zoom + drag pan (CSS transform on a wrapper div)
  *   - SVG overlay with diamond grid for room-scope views (skipped for
  *     full-sector renders where 25k diamonds would tank performance)
@@ -15,10 +15,6 @@
  *   - pinned diamond highlight (the tile shown in the inspector)
  *   - room-number labels (toggleable)
  *   - "Reset view" snaps zoom/pan back to 1×/origin
- *
- * Phase 1 (next):
- *   - sub-frame visual picker
- *   - first writable edit op
  */
 import {
   useCallback,
@@ -32,6 +28,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { formatApiError, mediaUrl } from "../lib/api";
+import { isRunningInTauri } from "../lib/tauri";
 import {
   applyEdits,
   closeSession,
@@ -45,8 +42,11 @@ import {
   getSessionAppendix,
   getSessionParsed,
   getStiJsd,
+  getTilesetPalette,
   newSector,
   openSession,
+  rememberOwnSession,
+  sessionRecovery,
   prefetchPaletteSheet,
   saveCopyAs,
   saveSession,
@@ -54,6 +54,7 @@ import {
   validateSession,
   type AppendixEntities,
   type LayerName,
+  type PaletteSlot,
   type RecentAddition,
   type RoomSummary,
   type SectorInfo,
@@ -72,12 +73,19 @@ import {
   type ProgressPhase,
   type RenderMeta,
   type GhostRegionTile,
+  type RegionRender,
+  type SpriteHit,
+  type UndoEntry,
 } from "../lib/IsoRenderer";
 import { IsoRendererGL } from "../lib/IsoRendererGL";
+import { propFrameLabel, type PropFrameLabel } from "../lib/mapforgePropLabels";
 import { type ActiveBrush } from "./MapForgePalette";
 import { MapForgeAssetBrowserBody } from "./MapForgeAssetViewer";
 import { MapForgeTilesetBrowser } from "./MapForgeTilesetBrowser";
 import { MapForgePaletteRail } from "./MapForgePaletteRail";
+import { CommandCard, cardCellsFor } from "../components/CommandCard";
+import { usePersistentControlGroups, seedFromFavorites, type ControlGroup } from "../lib/controlGroups";
+import { AtlasFrameThumb, LoadProgressBar, TileInspectorPanel } from "./MapForgeTileInspector";
 import {
   MapForgeLogFull,
   MapForgeLogProvider,
@@ -89,6 +97,7 @@ import { MapForgeGeneratePanel } from "./MapForgeGeneratePanel";
 import { MapForgeHelpOverlay } from "./MapForgeHelpOverlay";
 import { MapForgeValidateBody } from "./MapForgeValidatePanel";
 import ConfirmModal from "../components/ConfirmModal";
+import { useDialog } from "../components/DialogProvider";
 import {
   MapForgeDock,
   PANEL_ORDER,
@@ -115,9 +124,9 @@ import {
 } from "../lib/mapforgeSettings";
 import { findShadowSlot, isShadowOnlySlot } from "../lib/jaSlotPairs";
 import {
-  usePersistentBrushBucket, usePersistentClipboard, sameBrush,
+  usePersistentBrushBucket, usePersistentClipboard, usePersistentSpriteClipboard, sameBrush,
   RECENT_BRUSHES_KEY, FAVORITE_BRUSHES_KEY,
-  RECENT_BRUSHES_CAP, FAVORITE_BRUSHES_CAP,
+  RECENT_BRUSHES_CAP,
   readJournalEntry, writeJournalEntry, clearJournalEntry,
 } from "../lib/brushBuckets";
 import { useUnsavedGuard } from "../lib/useUnsavedGuard";
@@ -133,6 +142,37 @@ import {
   CLIP_LAYERS,
   type ClipboardRegion,
 } from "../lib/mapClipboard";
+import {
+  EMPTY_TABLES,
+  buildOccupancy,
+  localCheck,
+  worstOf,
+  refKey,
+  sliceGroup,
+  groupRefsAt,
+  groupPasteEdits,
+  deleteEdits,
+  moveEdits,
+  groupToRegionTiles,
+  mergeVerdicts,
+  oracleToVerdicts,
+  armKindFor,
+  categoryOf,
+  fenceSubsForLine,
+  footprintTiles,
+  queueCommitEdits,
+  type SpriteRef,
+  type SpriteGroup,
+  type PlacementTables,
+  type TileVerdict,
+  type Occupancy,
+  type QueuedGhost,
+} from "../lib/mapPlacement";
+import {
+  getPlacementTables,
+  checkPlacement,
+  trailingDebounce,
+} from "../lib/placementApi";
 
 /** UI tool modes — they choose the REGION a stroke covers. Inspect =
  * click-to-pin; Pencil = click/drag (brush radius); Shape = drag a
@@ -148,6 +188,42 @@ type Payload = "tiles" | "erase" | "height" | "room";
 /** Non-ground layers cleared by the Erase payload — keeps the floor. */
 const ERASE_LAYERS: LayerName[] = ["objs", "shadows", "structs", "roofs", "onroofs"];
 
+/** Rebindable actions that only mean something in the mode-less model
+ * — gated off entirely (no dispatch, no preventDefault)
+ * when settings.legacyTools is on, so their default bindings (Ctrl+C/X/V,
+ * Delete, arrows, Escape, R) keep the page's normal behaviour instead of
+ * being silently swallowed for an action that can never fire. */
+const MODELESS_ONLY_ACTIONS = new Set<MapForgeActionId>([
+  "sel-copy", "sel-cut", "sel-paste", "sel-delete",
+  "sel-cycle-next", "sel-cycle-prev",
+  "nudge-left", "nudge-right", "nudge-up", "nudge-down",
+  "cancel",
+]);
+
+/** Placeholder `ActiveBrush.category` values used by pick paths that
+ * source a brush from a tile ALREADY on the map (eyedropper, the tile
+ * inspector's "pick as brush") rather than from the categorised palette
+ * — they can't know the sidecar's real category classification, so
+ * `armKindFor` (spec D8) can't tell a wall from a truck for them. Route
+ * these through the plain paint brush (the pre-existing behaviour, and
+ * the far more likely intent for "keep painting what I just clicked")
+ * instead of guessing "ghost" for anything not in BRUSH_FAMILIES. */
+const UNCATEGORIZED_BRUSH_SOURCES = new Set(["(eyedropped)", "(picked from tile)"]);
+
+/** Step through a SPARSE sub list (gaps allowed — some slots are missing
+ * a sub between others), wrapping at both ends. Review finding #2: a
+ * dense `subCount` max (`getSlotInfo`) can land the ghost/selection R
+ * cycle on a hole; only `renderer.listValidSubs(slot)` is safe to step
+ * through (the file's existing per-brush `cycleSub(delta)` below already
+ * does this for the active brush — same pattern, applied to ghosts and
+ * selected sprites). No-op (returns `current`) on an empty list. */
+function stepValidSub(subs: number[], current: number, dir: 1 | -1): number {
+  if (subs.length === 0) return current;
+  const idx = subs.indexOf(current);
+  const base = idx < 0 ? -1 : idx;
+  return subs[(base + dir + subs.length) % subs.length] ?? current;
+}
+
 /** Compile-time exhaustiveness guard. When a new `Tool` is added to the
  * union, any `if`/`switch` that forwards an unhandled value here stops
  * compiling (the argument is no longer narrowed to `never`) — so a new
@@ -157,42 +233,19 @@ function assertNever(x: never): never {
   throw new Error(`Unhandled Tool case: ${JSON.stringify(x)}`);
 }
 
+/** One placement-queue entry: the pure `QueuedGhost`
+ * (anchor+group) mapPlacement.ts's `queueCommitEdits` needs, plus a
+ * route-only pre-rendered ghost canvas for the queue overlay. A
+ * `QueuedPlacement[]` still satisfies `queueCommitEdits(queue: QueuedGhost[], …)`
+ * structurally — the extra `render` field is simply ignored by it. */
+interface QueuedPlacement extends QueuedGhost { render: RegionRender | null }
+
 /** What a committed stroke writes to each tile. `place` paints the active
  * brush into a layer; `set_room` stamps a room id. Mirrors the subset of
  * edit ops the shape + pencil tools emit. */
 type StrokeSpec =
   | { op: "place"; layer: LayerName; slot: number; sub: number }
   | { op: "set_room"; roomId: number };
-
-/** Per-flag tooltip text for the JSD viewer's flag chips. Mirrors the
- *  bit definitions in JA2 1.13's worlddat.h. Keep in sync with the
- *  backend's `flag_names` decoder — if a new flag bit gets surfaced
- *  there but isn't named here, the chip falls back to "(no description
- *  available)". */
-function _jsdFlagTooltip(flag: string): string {
-  const table: Record<string, string> = {
-    TILE_ON_ROOF: "Renders on the upper floor (roof level) — appears only when the user is on or peering at the roof.",
-    HAS_SHADOW_BUDDY: "Slot has a paired shadow sprite at slot+1; engine auto-draws both.",
-    DAMAGED: "Marks the struct as the damaged variant — used for ruin / blasted-wall states.",
-    EXPLOSIVE: "Triggers an explosion when destroyed (mines, gas tanks, etc.).",
-    PARTIAL_WALL: "Half-height or fragmentary wall — engine treats it as cover but not as full sight-block.",
-    FULL_WALL: "Full-height wall — blocks line of sight + walking.",
-    WIREFRAME: "Drawn in wireframe overlay above other tiles for editor / debug visibility.",
-    PASSABLE: "Mercs and projectiles can pass through this struct (vegetation, smoke).",
-    EXIT_GRID: "Tile marks a sector boundary or strategic exit point.",
-    BLOCKS_LOS: "Hard line-of-sight block — engine treats as an opaque obstacle.",
-    OBSTACLE: "Treated as an obstacle for pathfinding even when visually subtle (rope, low fence).",
-    SLIDING_DOOR: "Door variant — slides open horizontally rather than swinging.",
-    DOOR: "Engine recognizes this as an openable/closeable door.",
-    OPENABLE: "Tile responds to the 'open' action (containers, hatches).",
-    SEETHROUGH: "Visible-through tile — engine renders behind it but treats as light cover.",
-    BURNABLE: "Catches fire when exposed to flame attacks.",
-    TALL_OBJECT: "Renders with a height lift so it occludes tiles to the south correctly.",
-    STRUCTURE: "Solid structural piece (walls, big rocks) — engine snaps shadows + LOS to it.",
-    GENERIC: "Default flag with no special engine behavior — usually surface decoration.",
-  };
-  return table[flag] ?? `${flag} — engine flag; no description in our table yet.`;
-}
 
 /**
  * Translate one generator-emitted op (backend snake_case shape from
@@ -250,133 +303,6 @@ function _mirrorGeneratorOp(renderer: IsoRenderer, op: unknown): void {
 // against pathological maps, but at a much larger limit.
 const GRID_MAX_TILES = 80_000;
 
-/**
- * Atlas-backed thumb — renders a single (slot, sub) sprite from the
- * already-loaded IsoRenderer atlas image. Zero HTTP, ~50 microseconds
- * per render (one ctx.drawImage call). Used for in-tileset entries
- * where the renderer's cellMap has the data.
- *
- * Falls back to nothing (placeholder) when the (slot, sub) isn't in
- * the cellMap. The caller can use StiFrameImage as a fallback for
- * arbitrary slot/sub the renderer doesn't know about (e.g., a slot
- * the user is typing into the edit form).
- */
-function AtlasFrameThumb({
-  renderer, slot, sub, size = 48, className,
-}: {
-  renderer: IsoRenderer | null;
-  slot: number;
-  sub: number;
-  size?: number;
-  className?: string;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [missing, setMissing] = useState(false);
-  useEffect(() => {
-    if (!renderer || !canvasRef.current) return;
-    const ctx = canvasRef.current.getContext("2d");
-    if (!ctx) return;
-    const ok = renderer.drawCellInto(ctx, slot, sub, size, size);
-    setMissing(!ok);
-  }, [renderer, slot, sub, size]);
-  if (missing) {
-    return (
-      <span
-        className={`inline-flex items-center justify-center rounded bg-gray-800 text-[8px] text-gray-500 ${className ?? ""}`}
-        style={{ width: size, height: size }}
-        title={`slot ${slot} sub ${sub} — not in atlas`}
-      >?</span>
-    );
-  }
-  return (
-    <canvas
-      ref={canvasRef}
-      width={size}
-      height={size}
-      className={`inline-block bg-gray-900 ${className ?? ""}`}
-      style={{
-        imageRendering: "pixelated",
-        width: size,
-        height: size,
-      }}
-    />
-  );
-}
-
-/**
- * Render one STI sub-frame as an inline <img>. Handles the
- * authedFetch → blob → object URL → revoke lifecycle so the parent
- * tree doesn't have to. Re-fetches when (xmlPath, tileset, slot, sub)
- * change. Used in the edit form (live preview of the proposed
- * slot/sub which may not yet be in the loaded atlas).
- *
- * For inspector entry previews — where the slot/sub IS in the atlas
- * — prefer AtlasFrameThumb above. Zero HTTP, instant render.
- */
-function StiFrameImage({
-  xmlPath, tileset, slot, sub, maxSize = 48, className,
-}: {
-  xmlPath: string;
-  tileset: number;
-  slot: number;
-  sub: number;
-  maxSize?: number;
-  className?: string;
-}) {
-  const [url, setUrl] = useState<string | null>(null);
-  const [err, setErr] = useState(false);
-  useEffect(() => {
-    if (!xmlPath) { setUrl(null); return; }
-    let cancelled = false;
-    let created: string | null = null;
-    setErr(false);
-    fetchStiFrameBlobUrl(xmlPath, tileset, slot, sub)
-      .then((u) => {
-        if (cancelled) { URL.revokeObjectURL(u); return; }
-        created = u;
-        setUrl(u);
-      })
-      .catch(() => { if (!cancelled) setErr(true); });
-    return () => {
-      cancelled = true;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [xmlPath, tileset, slot, sub]);
-  if (err) {
-    return (
-      <span
-        className={`inline-block text-[8px] text-red-400 ${className ?? ""}`}
-        style={{ width: maxSize, height: maxSize, lineHeight: `${maxSize}px`, textAlign: "center" }}
-        title={`No frame for slot ${slot} sub ${sub}`}
-      >?</span>
-    );
-  }
-  if (!url) {
-    return (
-      <span
-        className={`inline-block animate-pulse rounded bg-gray-800 ${className ?? ""}`}
-        style={{ width: maxSize, height: maxSize }}
-      />
-    );
-  }
-  return (
-    <img
-      src={url}
-      alt={`slot ${slot} sub ${sub}`}
-      className={`inline-block bg-gray-900 ${className ?? ""}`}
-      style={{
-        maxWidth: maxSize, maxHeight: maxSize,
-        imageRendering: "pixelated",
-        objectFit: "contain",
-      }}
-    />
-  );
-}
-
-// Default-export wrapper that mounts the log provider. The inner
-// `MapForgeSectorInner` is what owns all the state + effects; that
-// keeps `useMapForgeLog()` callable anywhere in the tree without
-// having to wire props through.
 export default function MapForgeSector() {
   return (
     <MapForgeLogProvider>
@@ -387,6 +313,7 @@ export default function MapForgeSector() {
 
 function MapForgeSectorInner() {
   const log = useMapForgeLog();
+  const { confirm, prompt } = useDialog();
   // User-customizable editor settings (hotkeys, default tool/brush).
   // Loaded once at mount; updated by the settings modal. Persists to
   // localStorage via lib/mapforgeSettings.
@@ -426,7 +353,7 @@ function MapForgeSectorInner() {
   // makes `parsed.rooms[g] === selectedRoom` always false (NaN !== NaN)
   // and `info.rooms.find((r) => r.room_id === NaN)` returns undefined,
   // which then crashes `room.tiles.size` reads in the zoom modal.
-  // Normalize NaN to null. Bug-review finding D5.
+  // Normalize NaN to null.
   const selectedRoom = (() => {
     if (roomParam === null) return null;
     const n = parseInt(roomParam, 10);
@@ -439,6 +366,10 @@ function MapForgeSectorInner() {
   // / renders / inspects go through this session so the parsed dict
   // is held in RAM and never re-parsed per operation.
   const [session, setSession] = useState<SessionInfo | null>(null);
+  // Crash-recovery autosave offered by the open response: a snapshot from
+  // a previous sidecar process exists for this map and differs from disk.
+  const [recoveryOffer, setRecoveryOffer] =
+    useState<{ saved_at: number; edit_count: number } | null>(null);
   // Bumped on `sidecar:restarted`. Sessions live in the sidecar's
   // in-memory dict; a restart wipes them all, leaving the frontend
   // holding a stale session_id. Without this counter the open-session
@@ -450,7 +381,7 @@ function MapForgeSectorInner() {
 
   const tileset = useMemo(() => {
     if (tilesetParam !== null) {
-      // Same NaN-guard treatment as selectedRoom — bug-review D5.
+      // Same NaN-guard treatment as selectedRoom.
       const parsed = parseInt(tilesetParam, 10);
       if (Number.isFinite(parsed)) return parsed;
     }
@@ -458,6 +389,18 @@ function MapForgeSectorInner() {
     // session in parallel) over info.data's. Both should agree.
     return session?.tileset ?? info.data?.tileset_in_header ?? 0;
   }, [tilesetParam, session, info.data]);
+  // Share the palette's React Query entry: the Brush Box and inspector
+  // read the same names, including the per-frame labels.
+  const propLabels = useQuery({
+    queryKey: ["mapforge", "palette", xmlPath, tileset],
+    queryFn: () => getTilesetPalette(xmlPath, tileset),
+    enabled: !!xmlPath && tileset >= 0,
+    staleTime: 5 * 60 * 1000,
+  });
+  const propSlots = useMemo(
+    () => new Map<number, PaletteSlot>(propLabels.data?.slots.map((slot) => [slot.slot, slot]) ?? []),
+    [propLabels.data],
+  );
   const [sessionError, setSessionError] = useState<string | null>(null);
   const isSlfBundled = datPath.startsWith("slf://");
 
@@ -498,6 +441,7 @@ function MapForgeSectorInner() {
     // UI here.
     setSession(null);
     setSessionError(null);
+    setRecoveryOffer(null);
     if (!datPath || !xmlPath) return;
     let cancelled = false;
     let openedId: string | null = null;
@@ -507,6 +451,9 @@ function MapForgeSectorInner() {
     // the palette sheet. Shared by the fresh-open and recovery paths.
     const adopt = (s: SessionInfo) => {
       openedId = s.session_id;
+      // Per-tab breadcrumb so a reload can reclaim THIS session if the
+      // page dies before closing it (reload-wins, own-session-only).
+      rememberOwnSession(datPath, s.session_id);
       setSession(s);
       // Fire-and-forget preload of the palette sprite sheet. The
       // sheet is what the Asset Browser needs, and its cold bake is
@@ -519,6 +466,10 @@ function MapForgeSectorInner() {
       // preload just falls back to the on-demand bake.
       // User feedback: "Can you make it load faster and/or preload?"
       prefetchPaletteSheet(xmlPath, s.tileset).catch(() => {});
+      // A crash-recovery autosave snapshot exists (previous sidecar
+      // process died with unsaved edits). Surface the restore/discard
+      // choice — the modal is rendered at top level.
+      if (s.recovery && !s.read_only) setRecoveryOffer(s.recovery);
     };
 
     (async () => {
@@ -570,7 +521,28 @@ function MapForgeSectorInner() {
       if (cancelled) return;
       // ─── Normal fresh open ─────────────────────────────────────────
       try {
-        const s = await openSession(datPath, xmlPath, initialTileset);
+        // Two page mounts can race for the same map's writable session
+        // (React StrictMode double-mount in dev, or a reload while the
+        // previous page's close is still in flight): the older sibling's
+        // session closes moments after our POST 409s, so a
+        // WRITABLE_SESSION_EXISTS here is usually transient. Retry
+        // briefly before surfacing; a map genuinely open elsewhere
+        // still 409s after the retries.
+        let s: SessionInfo;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            s = await openSession(datPath, xmlPath, initialTileset);
+            break;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (attempt < 4 && msg.includes("WRITABLE_SESSION_EXISTS")) {
+              await new Promise((r) => setTimeout(r, 700));
+              if (cancelled) return;
+              continue;
+            }
+            throw err;
+          }
+        }
         if (cancelled) {
           closeSession(s.session_id).catch(() => {});
           return;
@@ -591,8 +563,13 @@ function MapForgeSectorInner() {
         // new session becomes dirty). This is what makes the journal a
         // RELOAD/CRASH recovery (cleanup doesn't run on a hard reload) and
         // not a phantom "couldn't recover" toast after a clean nav-away.
-        closeSession(openedId).catch(() => {});
-        clearJournalEntry(datPath);
+        // The sidecar REFUSES to close a dirty session without force
+        // (StrictMode/HMR re-run this cleanup right after a reconnect to
+        // a live dirty session — that used to destroy its edits), so
+        // only clear the breadcrumb once the close actually happened.
+        closeSession(openedId)
+          .then(() => clearJournalEntry(datPath))
+          .catch(() => {});
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- sessionRestartEpoch
@@ -619,6 +596,10 @@ function MapForgeSectorInner() {
   // useState. Bump the epoch so the open-session effect re-fires
   // with a fresh session_id.
   useEffect(() => {
+    // Browser/vite dev mode has no Tauri shell — `listen` would throw
+    // "Cannot read properties of undefined (reading 'transformCallback')".
+    // No shell also means no watchdog to emit the event, so skip cleanly.
+    if (!isRunningInTauri()) return;
     let cleanup: (() => void) | undefined;
     let cancelled = false;
     import("@tauri-apps/api/event").then(({ listen }) => {
@@ -709,20 +690,45 @@ function MapForgeSectorInner() {
   // keys 1-9.
   const [recentBrushes, setRecentBrushes] =
     usePersistentBrushBucket(RECENT_BRUSHES_KEY, xmlPath, tileset);
-  const [favorites, setFavorites] =
-    usePersistentBrushBucket(FAVORITE_BRUSHES_KEY, xmlPath, tileset);
+  // Favorites (frozen, read-only now) — kept alive for one release as the
+  // seeding source for control groups below; nothing writes to it anymore
+  // Groups absorb the Favorites row and its hotkeys.
+  const [favorites] = usePersistentBrushBucket(FAVORITE_BRUSHES_KEY, xmlPath, tileset);
+  // StarCraft-style control groups (1-9) — replaces Favorites. A slot
+  // holds an armed brush or a copied sprite group; Ctrl+N saves, N
+  // recalls (dispatcher below); the rail's star toggle writes into the
+  // first empty slot (toggleFavorite, name kept for prop compatibility).
+  const [controlGroups, setControlGroup] = usePersistentControlGroups(xmlPath, tileset);
+  // One-time upgrade path: seed empty groups from Favorites the first
+  // time this (xmlPath, tileset) bucket is seen with real favorites and
+  // no group state yet. `favorites` is frozen (nothing writes to it any
+  // more), so this settles after at most one real seed per bucket —
+  // seedFromFavorites' own "every slot null" guard makes re-runs no-ops.
+  useEffect(() => {
+    if (favorites.length === 0) return;
+    if (!controlGroups.every((g) => g === null)) return;
+    const seeded = seedFromFavorites(controlGroups, favorites);
+    seeded.forEach((g, i) => { if (g) setControlGroup(i, g); });
+  }, [favorites, controlGroups, setControlGroup]);
   const toggleFavorite = useCallback((b: ActiveBrush) => {
-    setFavorites((prev) =>
-      prev.some((f) => sameBrush(f, b))
-        ? prev.filter((f) => !sameBrush(f, b))
-        // Newest pin wins when the 1-9 bar is full (oldest drops off).
-        : [...prev, b].slice(-FAVORITE_BRUSHES_CAP),
-    );
-  }, [setFavorites]);
-  // Ref mirror so the global keydown listener reads favorites without
-  // re-binding on every pin/unpin (matches the toggleBrowseAssetsRef pattern).
-  const favoritesRef = useRef<ActiveBrush[]>([]);
-  useEffect(() => { favoritesRef.current = favorites; }, [favorites]);
+    const idx = controlGroups.findIndex((g) => g === null);
+    if (idx === -1) {
+      log?.append({
+        severity: "warn",
+        message: "All 9 groups are full — recall one (1-9), then Ctrl+that number to overwrite it.",
+      });
+      return;
+    }
+    setControlGroup(idx, { kind: "brush", brush: b });
+    log?.append({
+      severity: "info",
+      message: `Saved ${b.sti_filename.replace(/\.sti$/i, "")} to group ${idx + 1}.`,
+    });
+  }, [controlGroups, setControlGroup, log]);
+  // Ref mirror so the global keydown listener reads control groups without
+  // re-binding on every save (matches the toggleBrowseAssetsRef pattern).
+  const controlGroupsRef = useRef<ControlGroup[]>([]);
+  useEffect(() => { controlGroupsRef.current = controlGroups; }, [controlGroups]);
 
   // ─── Recent additions panel (user request) ──────────────
   // "Just added" is a parallel surface to "Recent picks": when the user
@@ -790,11 +796,42 @@ function MapForgeSectorInner() {
   // here. `navigate` is set up below in the navigation callback.
   const navigate = useNavigate();
 
-  // ─── Tool + active brush (Phase 2B/C) ──────────────────────────────
+  // ─── Tool + active brush ───────────────────────────────────────────
   // Initial tool comes from user settings. Subsequent changes (e.g.
   // via the hotkey dispatcher or the toolbar selector) override.
-  const [tool, setTool] = useState<Tool>(() => loadSettings().defaultTool);
+  const [toolState, setTool] = useState<Tool>(() => loadSettings().defaultTool);
   const [activeBrush, setActiveBrush] = useState<ActiveBrush | null>(null);
+  // One-shot shape armed from the command card (mode-less only — the card
+  // itself is a later phase; nothing sets this yet, but the derivation
+  // below already honours it so that phase is a pure UI add). The next
+  // drag draws that shape, then the arm clears (commitShape →
+  // setOneShotShape(null)).
+  const [oneShotShape, setOneShotShape] = useState<ShapeKind | null>(null);
+  // Payload (R4): what pencil/shape strokes DO — place the brush, erase the
+  // non-ground layers, set per-tile height, or write a room id. Replaces the
+  // old erase toggle + the Height tool + the Room shape-kind, so Erase /
+  // Height / Room now work with BOTH the pencil radius and the shape tools.
+  // MOVED UP from its original home (next to brushRadius/heightMode below)
+  // because the mode-less `tool` derivation right after needs it, and
+  // `tool` itself is read in several effect dependency arrays further
+  // down the file — a `const` declared where `tool` used to live would
+  // throw (TDZ) at render for those earlier reads.
+  const [payload, setPayload] = useState<Payload>("tiles");
+  // Mode-less model (spec D1): the internal tool is DERIVED from what is
+  // armed — nothing → select (box-select + sprite pick), a brush or a
+  // non-tile payload → pencil, a one-shot shape → shape. The legacy bar
+  // (settings.legacyTools) restores the explicit tool state.
+  const modeless = !settings.legacyTools;
+  const tool: Tool = modeless
+    ? (oneShotShape ? "shape" : (activeBrush || payload !== "tiles") ? "pencil" : "select")
+    : toolState;
+  // Stable mirror for closures that can't list `modeless` as a dep
+  // (event handlers declared once, hotkey dispatcher, etc.).
+  const modelessRef = useRef(modeless);
+  useEffect(() => { modelessRef.current = modeless; }, [modeless]);
+  // Sprite pick / hover outline / Shift+drag move live on the inspect tool
+  // today; in the mode-less model they also live on select.
+  const inspectLike = tool === "inspect" || (modeless && tool === "select");
   // Track recent picks for the rail's quick-switch grid. On every
   // activeBrush change (non-null), prepend to the list and dedupe by
   // (slot, sub). Cap at RECENT_BRUSHES_CAP, rolling over LRU-style.
@@ -808,15 +845,38 @@ function MapForgeSectorInner() {
       [brush, ...prev.filter((b) => !sameBrush(b, brush))].slice(0, RECENT_BRUSHES_CAP)
     );
   }, [activeBrush]);
+  // `armGroup` (declared further down, once `renderer` exists) assigns
+  // itself here every render — a ref indirection so `armBrush` (declared
+  // now, before `renderer`) can arm a ghost without forward-referencing
+  // a callback that isn't declared yet.
+  const armGroupRef = useRef<((group: SpriteGroup, label?: string) => void) | null>(null);
   // Arming a brush from ANY surface (palette, recent rail, just-added,
   // eyedropper, inspector) selects the pencil too — a pick means the user
   // wants to paint with it. Centralized so no pick site can forget: the
   // palette + rail picks used to set the brush but leave the tool on
   // Inspect, so the user's first click silently did nothing.
+  //
+  // Mode-less (spec D8): sprite-family art (vehicle/landmark/scatter/
+  // vegetation/sign) arms a placement GHOST instead of a paint brush;
+  // walls/doors/windows/roofs/floors stay drag-brushes (laid in runs).
   const armBrush = useCallback((b: ActiveBrush | null) => {
+    if (modelessRef.current && b && !UNCATEGORIZED_BRUSH_SOURCES.has(b.category) && armKindFor(b) === "ghost") {
+      // This branch returns before `setActiveBrush` — the recent-picks
+      // effect above only fires on an `activeBrush` change, so a ghost
+      // arm would otherwise never land in the Recent rail / BrushChip
+      // (review finding #12). Same bookkeeping, called directly.
+      setRecentBrushes((prev) =>
+        [b, ...prev.filter((x) => !sameBrush(x, b))].slice(0, RECENT_BRUSHES_CAP)
+      );
+      armGroupRef.current?.({
+        sourceTileset: tileset, sourceSector: "palette", w: 1, h: 1,
+        items: [{ dx: 0, dy: 0, layer: b.layer as LayerName, slot: b.slot, sub: b.sub }],
+      }, b.sti_filename.replace(/\.sti$/i, ""));
+      return;
+    }
     setActiveBrush(b);
     if (b) setTool("pencil");
-  }, []);
+  }, [tileset]);
   // Paint stroke buffer — accumulates tiles during a drag so we don't
   // re-apply the same edit twice. Each tile in the stroke fires its
   // own applyEdits round-trip in the background; the local renderer
@@ -829,7 +889,7 @@ function MapForgeSectorInner() {
   const [shapeKind, setShapeKind] = useState<ShapeKind>("rect-fill");
   const [shapeAnchor, setShapeAnchor] = useState<Tile | null>(null);
   const [shapeCursor, setShapeCursor] = useState<Tile | null>(null);
-  // ─── Select / region copy-paste state (A5 Phase 4) ────────────────
+  // ─── Select / region copy-paste state ─────────────────────────────
   // selectAnchor/selectCursor mirror shapeAnchor/shapeCursor: anchor =
   // where the marquee drag started, cursor = the live end-point. Both
   // null when no select drag is in progress. selectRect is the COMMITTED
@@ -864,7 +924,10 @@ function MapForgeSectorInner() {
     if (tool !== "select") setPasteMode(false);
   }, [tool]);
   // Esc cancels an armed paste (mirrors the rect-corner picker's Esc).
+  // Legacy-tools-only: mode-less routes Escape through the "cancel"
+  // action/cancelOneLevel instead (this effect would double-handle it).
   useEffect(() => {
+    if (modelessRef.current) return;
     if (!pasteMode) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") { e.preventDefault(); setPasteMode(false); }
@@ -875,7 +938,10 @@ function MapForgeSectorInner() {
   // Delete / Backspace clears the committed marquee selection (R4). Own
   // effect (gated on a live selection) so it doesn't re-bind the global
   // dispatcher; the input-focus guard keeps it out of text fields.
+  // Mode-less: Delete goes to the SPRITE selection below
+  // instead — this REGION (terrain) delete is legacy-tools-only.
   useEffect(() => {
+    if (modeless) return;
     if (tool !== "select" || !selectRect) return;
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
@@ -890,10 +956,88 @@ function MapForgeSectorInner() {
     // doDeleteSelection reads live state via stable session_id/renderer +
     // the selectRect in deps; re-binding only on tool/selection change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tool, selectRect]);
+  }, [modeless, tool, selectRect]);
+
+  // ─── Mode-less sprite selection ───────────────────────────────────────
+  const [selection, setSelection] = useState<SpriteRef[]>([]);
+  const selectionRef = useRef<SpriteRef[]>([]);
+  useEffect(() => { selectionRef.current = selection; }, [selection]);
+  const [spriteClipboard, setSpriteClipboard] = usePersistentSpriteClipboard(xmlPath, tileset);
+  // Placement tables (categories/tiers/fences/road slot) — fetched from the
+  // sidecar's placement oracle whenever the resolved tileset (or a
+  // sidecar restart) changes. Stay at EMPTY_TABLES while the fetch is in
+  // flight or on failure — `categoryOf` returns null for every slot, so
+  // `localCheck`'s solid-struct branch (ROOF/ROAD/TILE) never runs and
+  // only BOUNDS can fire (the honest answer when the sidecar/sitekit isn't
+  // reachable, rather than a stale or half-populated table).
+  const [placementTables, setPlacementTables] = useState<PlacementTables>(EMPTY_TABLES);
+  // True once a placement-tables fetch or placement-check round-trip has
+  // failed since the last success — the status line prefixes
+  // "oracle offline · " while set. Mirrored into a ref so the (frequent)
+  // per-hover check effect below can tell "still offline" from "just went
+  // offline" without depending on this state (which would re-fire it).
+  const [oracleOffline, setOracleOffline] = useState(false);
+  const oracleOfflineRef = useRef(false);
+  // Shared offline/online transition logger for BOTH this tables fetch and
+  // the per-hover check effect further down — whichever fails FIRST logs
+  // once (via the ref guard), and a later success from EITHER path flips
+  // it back with one "back online" line. Fixes review finding #1: before,
+  // each effect gated its own log on this same ref but only the check
+  // effect ever set it on failure with a log call — a sidecar that was
+  // already down at load flipped the ref via the tables effect (silently)
+  // and the check effect then saw "already offline" and never logged
+  // either, so nothing was ever printed.
+  const markOracleOnline = () => {
+    if (oracleOfflineRef.current) {
+      log?.append({ severity: "success", message: "Placement oracle back online." });
+    }
+    oracleOfflineRef.current = false;
+    setOracleOffline(false);
+  };
+  const markOracleOffline = (detail: string) => {
+    if (!oracleOfflineRef.current) {
+      log?.append({ severity: "warn", message: detail });
+    }
+    oracleOfflineRef.current = true;
+    setOracleOffline(true);
+  };
+  useEffect(() => {
+    // tileset 0 is a REAL registered tileset ("GENERIC 1") — the sidecar's
+    // session-open deliberately keeps sess.tileset = 0 when the map header
+    // says so, so gating this fetch on `tileset > 0` would permanently
+    // disable placement tables for those maps. Gate on a session being
+    // open instead: no session → no fetch, which also makes the transient
+    // pre-session `tileset` value moot (nothing to skip — there's simply
+    // nothing to fetch yet).
+    if (!session?.session_id) return;
+    let live = true;
+    getPlacementTables(tileset)
+      .then((t) => {
+        if (!live) return;
+        setPlacementTables(t);
+        markOracleOnline();
+      })
+      .catch(() => {
+        if (!live) return;
+        setPlacementTables(EMPTY_TABLES);
+        markOracleOffline("Placement oracle offline — validity is local-only (BOUNDS).");
+      });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- log is a
+    // stable context value, omitted to avoid re-fire churn.
+  }, [tileset, session?.session_id, sessionRestartEpoch]);
+  // Selection cleared on sector/tileset switch or sidecar restart.
+  useEffect(() => { setSelection([]); }, [datPath, tilesetParam, sessionRestartEpoch]);
+
   // Room id written by the "Mark region as room" shape. The toolbar lets
   // the user retarget an existing room or pick 0 to clear membership.
   const [roomId, setRoomId] = useState(1);
+  // Highest room id actually painted since this editor mounted. The
+  // "New room (N)" suggestion is otherwise computed from the `info`
+  // query — a snapshot of the file as it was on disk at open — so a
+  // second "new room" in the same sitting would offer the same N again
+  // and silently merge the two regions into one room.
+  const [maxPaintedRoomId, setMaxPaintedRoomId] = useState(0);
   // Per-generator-stream op counter used to throttle setRenderEpoch
   // bumps during a long stream. Mirrors each op into the renderer, but
   // only triggers a React repaint every N ops — without throttling
@@ -902,15 +1046,27 @@ function MapForgeSectorInner() {
   const genPanelOpCount = useRef(0);
   const consoleOpCount = useRef(0);
 
-  // ─── Phase 3: client-side renderer state ──────────────────────────
+  // ─── Client-side renderer state ───────────────────────────────────
   // The renderer holds the atlas, the darken atlas, and a local copy
   // of the parsed sector. Edits mutate `renderer.parsed` directly so
   // re-renders are instant; the backend session is still authoritative
   // for save, and applyEdits round-trips mirror local mutations.
   const [renderer, setRenderer] = useState<IsoRenderer | null>(null);
   const [renderMeta, setRenderMeta] = useState<RenderMeta | null>(null);
+  // Dynamic zoom floor: a 360x360 bigmap's canvas (14520x7440) can never fit
+  // the viewport at the classic 0.25 floor -- let big maps zoom out until the
+  // whole canvas fits the window (with a little margin); small maps keep 0.25.
+  const minZoomRef = useRef(0.25);
+  useEffect(() => {
+    if (!renderMeta) { minZoomRef.current = 0.25; return; }
+    const fit = Math.min(
+      window.innerWidth / renderMeta.canvasW,
+      window.innerHeight / renderMeta.canvasH,
+    );
+    minZoomRef.current = Math.max(0.02, Math.min(0.25, fit * 0.9));
+  }, [renderMeta]);
   const [renderError, setRenderError] = useState<string | null>(null);
-  // Tactical appendix overlay — items / entry points / exit grids / soldiers / lights.
+  // Tactical appendix overlay state.
   const [appendix, setAppendix] = useState<AppendixEntities | null>(null);
   const [showItems, setShowItems] = useState(false);
   const [showEntries, setShowEntries] = useState(true);
@@ -1028,12 +1184,66 @@ function MapForgeSectorInner() {
   // Inspector pin + hover
   const [pinned, setPinned] = useState<{ x: number; y: number } | null>(null);
   const [hovered, setHovered] = useState<{ x: number; y: number } | null>(null);
+  // Sprite-aware pick (inspect tool): the struct sprite under the cursor
+  // + its OWNING tile. Solves "which square do I click to select the
+  // cooling tower" — big sprites live on one anchor tile the visual
+  // extends far away from. Probed on hovered-TILE change (not every
+  // mousemove); Ctrl bypasses it for a raw tile pick.
+  const [spriteHit, setSpriteHit] = useState<SpriteHit | null>(null);
+  const spriteProbeTileRef = useRef<{ x: number; y: number } | null>(null);
+  // The exact entry a sprite-click pinned (layer/slot/sub) — the Delete
+  // hotkey removes THIS entry; null for plain tile pins (falls back to
+  // the topmost visible entry on the pinned tile).
+  const pinnedPickRef = useRef<{ layer: LayerName; slot: number; sub: number } | null>(null);
+  // Grab-and-move — click to grab and move an object such as a
+  // truck: Shift+mousedown on a sprite in INSPECT arms a move;
+  // mouseup over another tile drops it (moveEntry). Escape cancels.
+  const moveRef = useRef<{ hit: SpriteHit } | null>(null);
+  const [moving, setMoving] = useState(false);
+  useEffect(() => {
+    if (!moving) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { moveRef.current = null; setMoving(false); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [moving]);
+  // Delete / Backspace in INSPECT mode removes the pinned entry — the
+  // sprite-picked one when the pin came from a sprite click, else the
+  // topmost visible entry on the pinned tile. Same input-focus guard as
+  // the select-tool delete; undoable, no confirm (the hotkey is for speed).
+  // Mode-less: the sprite SELECTION delete wins whenever a
+  // selection is live — checked inside onKey (against the live ref, not
+  // the effect's own re-run condition) so a selection made/cleared after
+  // this effect last bound still takes precedence correctly.
+  useEffect(() => {
+    if (!inspectLike || !pinned) return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      if (modeless && selectionRef.current.length > 0) return;
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        void deletePinnedEntry();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // deletePinnedEntry reads live state; re-bind on tool/pin change only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspectLike, pinned, modeless]);
   // Live Shift tracking. Drives the multi-tile stamp preview: hover
   // a multi-tile brush over the canvas → outline diamonds appear on
   // every footprint tile. Holding Shift inverts stamp/manual mode for
   // the next paint, so we hide the preview when Shift flips us into
   // manual mode (no stamp will happen). Keeps the preview honest.
   const [shiftHeld, setShiftHeld] = useState(false);
+  // Ref mirror for the placement ghost's `run()` closure (armGroup below)
+  // — Shift+click keeps the ghost armed; that closure is created once per
+  // arm and must read the LIVE shift state at click time, not whatever it
+  // was when the ghost was armed.
+  const shiftHeldRef = useRef(false);
+  useEffect(() => { shiftHeldRef.current = shiftHeld; }, [shiftHeld]);
   useEffect(() => {
     const down = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(true); };
     const up = (e: KeyboardEvent) => { if (e.key === "Shift") setShiftHeld(false); };
@@ -1063,11 +1273,9 @@ function MapForgeSectorInner() {
   // Optional override of which layer the pencil tool paints into.
   // null = use the brush's category-implied default (CATEGORY_TO_LAYER).
   const [paintLayer, setPaintLayer] = useState<LayerName | null>(null);
-  // Payload (R4): what pencil/shape strokes DO — place the brush, erase the
-  // non-ground layers, set per-tile height, or write a room id. Replaces the
-  // old erase toggle + the Height tool + the Room shape-kind, so Erase /
-  // Height / Room now work with BOTH the pencil radius and the shape tools.
-  const [payload, setPayload] = useState<Payload>("tiles");
+  // `payload` now declared up near `tool` (see the mode-less derivation
+  // comment there) — `tool`'s derivation needs it before several effects
+  // between here and there read `tool`.
   // Brush radius in tiles. 1 = single tile (default), 2 = the clicked
   // tile + 4 neighbors (diamond of side 3), etc. The brush footprint
   // is Manhattan-distance so it stays diamond-shaped in iso space —
@@ -1175,6 +1383,11 @@ function MapForgeSectorInner() {
     h: number;
     label: string;
     region?: ClipboardRegion;
+    /** Set when this ghost is a mode-less sprite-group arm (armGroup) —
+     * carries the SAME items `region` was built from, so the local
+     * validity check below can re-run localCheck against the
+     * live occupancy without re-deriving anchors from `region`. */
+    group?: SpriteGroup;
     run: (x: number, y: number) => void | Promise<void>;
   } | null>(null);
   // True while a placement stamp's backend round-trip is in flight —
@@ -1183,10 +1396,13 @@ function MapForgeSectorInner() {
   const [placementStampBusy, setPlacementStampBusy] = useState(false);
   // Exit placement mode when the user switches tools, sectors, tilesets
   // or the sidecar restarts — a stale run() closure must never fire
-  // against a different session.
+  // against a different session. Depends on `toolState` (the EXPLICIT
+  // legacy tool), not the derived `tool`: `armGroup` clears `activeBrush`,
+  // which flips the derived tool pencil→select, and that would cancel
+  // the ghost `armGroup` just armed if this effect watched `tool`.
   useEffect(() => {
     setPlacingBuilding(null);
-  }, [tool, datPath, tilesetParam, sessionRestartEpoch]);
+  }, [toolState, datPath, tilesetParam, sessionRestartEpoch]);
   // Arming a paint brush is an explicit "I'm painting now, not placing" —
   // exit building placement. (The tool-change effect above misses it:
   // arming a brush leaves you on the pencil, so the tool often doesn't
@@ -1203,7 +1419,11 @@ function MapForgeSectorInner() {
     if (placingBuilding) { setPickingRect(null); setPickingPoint(null); }
   }, [placingBuilding]);
   // ESC exits placement mode (mirrors the region picker's ESC effect).
+  // Mode-less: `cancelOneLevel` already handles Esc on an
+  // armed ghost via the rebindable "cancel" action — skip here so a
+  // single Esc press doesn't get handled twice.
   useEffect(() => {
+    if (modelessRef.current) return;
     if (!placingBuilding) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -1214,11 +1434,34 @@ function MapForgeSectorInner() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [placingBuilding]);
+  // ─── Fence line-drag + placement queue ───────────────────────────────
+  // `lineAnchor`: the tile a fence-armed drag started from (mousedown in
+  // onCanvasMouseDown); null once no drag is in flight — everything else
+  // about the line (topology subs, synthesized ghost group, verdicts) is
+  // a DERIVED memo off (lineAnchor, hovered), same pattern as the
+  // pre-existing placement ghost/verdicts below, not state written
+  // imperatively from the mouse handlers.
+  // `queue`: StarCraft-style stacked ghosts from Shift+click — `render`
+  // is route-only display state alongside the pure QueuedGhost shape
+  // (anchor+group) `queueCommitEdits` consumes.
+  const [lineAnchor, setLineAnchor] = useState<Tile | null>(null);
+  const [queue, setQueue] = useState<QueuedPlacement[]>([]);
+  const queueRef = useRef<QueuedPlacement[]>([]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  // Disarming via ANY path (tool/session/sector change, arming a brush,
+  // Esc dropping the ghost entirely, or a completed plain-click place)
+  // must drop both — a stale line/queue must never survive into whatever
+  // gets armed next. Re-arming a DIFFERENT group without disarming first
+  // (e.g. recalling a control group while another is already armed)
+  // deliberately does NOT clear the queue — only an actual `null` gets here.
+  useEffect(() => {
+    if (!placingBuilding) { setLineAnchor(null); setQueue([]); }
+  }, [placingBuilding]);
   // Bumped on every local mutation that should re-paint the canvas.
   // The render effect depends on this so React schedules a paint after
   // each edit. (Mutating `renderer.parsed` doesn't itself trigger React.)
   const [renderEpoch, setRenderEpoch] = useState(0);
-  // ─── Generator ghost preview (UX Phase 2) ───────────────────────────
+  // ─── Generator ghost preview ────────────────────────────────────────
   // A dry-run's ops applied to the LOCAL renderer only — completely
   // outside the undo/dirty machinery. First-touch pre-state per axis is
   // kept here and restored on clear, so the backend session never sees
@@ -1330,14 +1573,258 @@ function MapForgeSectorInner() {
   // only, so ghost-engine snapshots can no longer interleave with the
   // stamp's local edits at all.
   const ghostCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // ─── Fence line-drag ────────────────────────────────────────────────
+  // Armed when the ghost is exactly ONE `structs` item whose category is
+  // `fence`. `lineDrag` derives everything from (fenceArmed, lineAnchor,
+  // hovered) — the topology-derived subs, a synthesized single-item-per-
+  // tile SpriteGroup relative to the line's min tile, and whether a real
+  // topology table exists for this slot (falls back to the armed sub for
+  // every tile, straight runs only, when it doesn't).
+  const fenceArmed = useMemo(() => {
+    const items = placingBuilding?.group?.items;
+    if (!placingBuilding?.group || !items || items.length !== 1) return null;
+    const it = items[0]!;
+    if (it.layer !== "structs") return null;
+    if (categoryOf(placementTables, it.slot, it.sub) !== "fence") return null;
+    return { slot: it.slot, sub: it.sub, group: placingBuilding.group };
+  }, [placingBuilding, placementTables]);
+  const lineDrag = useMemo(() => {
+    if (!fenceArmed || !lineAnchor || !hovered || !renderer) return null;
+    if (lineAnchor.x === hovered.x && lineAnchor.y === hovered.y) return null;
+    const parsed = renderer.getParsed();
+    const { slot, sub } = fenceArmed;
+    const inBounds = (x: number, y: number) => x >= 0 && y >= 0 && x < parsed.cols && y < parsed.rows;
+    const existing = (x: number, y: number) =>
+      inBounds(x, y) && (parsed.structs[y * parsed.cols + x] ?? []).some((e) => e[0] === slot);
+    const isRoad = (x: number, y: number) =>
+      inBounds(x, y) && (parsed.objs[y * parsed.cols + x] ?? []).some((e) => e[0] === placementTables.roadSlot);
+    const lineTiles = shapeTiles("line", lineAnchor, hovered);
+    const subsTable = placementTables.fences[String(slot)];
+    const entries = subsTable
+      ? fenceSubsForLine(lineTiles, slot, subsTable, existing, isRoad)
+      : lineTiles.map((t) => ({ x: t.x, y: t.y, sub, ...(isRoad(t.x, t.y) ? { skipped: "ROAD" as const } : {}) }));
+    const kept = entries.filter((e) => e.skipped !== "ROAD");
+    const xs = lineTiles.map((t) => t.x); const ys = lineTiles.map((t) => t.y);
+    const minX = Math.min(...xs); const minY = Math.min(...ys);
+    const group: SpriteGroup = {
+      sourceTileset: fenceArmed.group.sourceTileset, sourceSector: fenceArmed.group.sourceSector,
+      w: Math.max(...xs) - minX + 1, h: Math.max(...ys) - minY + 1,
+      items: kept.map((e) => ({ dx: e.x - minX, dy: e.y - minY, layer: "structs" as const, slot, sub: e.sub })),
+    };
+    return { lineTiles, anchor: { x: minX, y: minY }, group, hasTable: !!subsTable };
+    // renderEpoch: `existing`/`isRoad` read the live parsed sector, which
+    // mutates in place (undo, an edit landing mid-drag) — same reasoning
+    // as the sibling ghost/occupancy memos below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fenceArmed, lineAnchor, hovered, renderer, placementTables, renderEpoch]);
+
   const placementGhost = useMemo(() => {
+    if (!renderer) return null;
+    if (lineDrag) return renderer.renderRegionToCanvas(groupToRegionTiles(lineDrag.group, (s) => renderer.getFootprint(s)), 0.7);
     const region = placingBuilding?.region;
-    if (!region || !renderer) return null;
+    if (!region) return null;
     return renderer.renderRegionToCanvas(region.tiles, 0.7);
     // renderEpoch: re-render after an atlas hot-swap (replaceAtlas keeps
     // the renderer identity but changes the cellMap).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [placingBuilding, renderer, renderEpoch]);
+  }, [placingBuilding, renderer, renderEpoch, lineDrag]);
+
+  // ─── Placement validity ────────────────────────────────────────────
+  // Struct occupancy index for the instant local check — rebuilt when the
+  // parsed sector changes (renderEpoch bumps on every local edit). Review
+  // finding #10: `buildOccupancy` walks the WHOLE sector (~130k tiles) —
+  // only worth paying for while something can actually consult it (a
+  // ghost armed, a selection to nudge, or a Shift+drag move in flight);
+  // otherwise it's an empty index and the memo skips the scan.
+  const occupancy = useMemo<Occupancy>(() => {
+    if (!renderer || !(placingBuilding?.group || selection.length > 0 || moving)) {
+      return new Map<number, { ref: SpriteRef; cat: string }[]>();
+    }
+    return buildOccupancy(renderer.getParsed(), placementTables, (s) => renderer.getFootprint(s));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderer, placementTables, renderEpoch, placingBuilding, selection, moving]);
+  // Ref mirror so the hotkey dispatcher and other handlers reachable from
+  // a stale closure (review finding #10b) always read the CURRENT
+  // occupancy without needing it in their own effect's deps array.
+  const occupancyRef = useRef<Occupancy>(occupancy);
+  useEffect(() => { occupancyRef.current = occupancy; }, [occupancy]);
+  // Local-only verdicts for the LINE — no queue, no oracle
+  // (the instant local pass is all a line drag needs); ROAD entries are
+  // already excluded from `lineDrag.group`'s items, so they never appear
+  // here as a candidate at all (a gap, not a red tile).
+  const lineVerdicts = useMemo<TileVerdict[]>(() => {
+    if (!lineDrag || !renderer) return [];
+    return localCheck(renderer.getParsed(), placementTables, occupancy,
+      groupRefsAt(lineDrag.group, lineDrag.anchor), (s) => renderer.getFootprint(s));
+  }, [lineDrag, renderer, placementTables, occupancy]);
+  // Per-footprint-tile verdicts for the armed sprite ghost at the hovered
+  // tile — the INSTANT local pass (BOUNDS/ROOF/ROAD/TILE); the debounced
+  // sidecar oracle below refines it (RING/CONTACT/INVERSION, plus a
+  // second opinion on the local tests) into `verdicts`. The
+  // candidate list is `[...queued refs, ...current refs]` so an earlier
+  // QUEUED ghost counts as occupied for the one about to be placed
+  // `localCheck`'s own batch rule does that automatically — but
+  // only the CURRENT group's tail entries are returned for display (the
+  // queued ghosts get their own dashed outline via `queuedTiles`, not a
+  // verdict tint). A second `localCheck` over JUST the current refs
+  // (identical tiles, occupancy unaffected by queue-batching) tells us
+  // how many tail entries are "ours" to slice off.
+  const localVerdicts = useMemo<TileVerdict[]>(() => {
+    const grp = placingBuilding?.group;
+    if (!grp || !hovered || !renderer) return [];
+    const fp = (s: number) => renderer.getFootprint(s);
+    const currentRefs = groupRefsAt(grp, hovered);
+    const currentOnly = localCheck(renderer.getParsed(), placementTables, occupancy, currentRefs, fp);
+    if (queue.length === 0) return currentOnly;
+    const queueRefs = queue.flatMap((q) => groupRefsAt(q.group, q.anchor));
+    const combined = localCheck(renderer.getParsed(), placementTables, occupancy,
+      [...queueRefs, ...currentRefs], fp);
+    return combined.slice(combined.length - currentOnly.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placingBuilding, hovered, renderer, placementTables, occupancy, queue]);
+  // Oracle refinement (sidecar placement/check) for the SAME
+  // (group, hovered) anchor as `localVerdicts` — populated by the debounced
+  // check effect below. Empty whenever no ghost is armed or the last check
+  // for the current anchor hasn't resolved yet (never a stale anchor's
+  // verdicts merged into a live one).
+  const [oracleVerdicts, setOracleVerdicts] = useState<TileVerdict[]>([]);
+  const verdicts = useMemo(() => mergeVerdicts(localVerdicts, oracleVerdicts), [localVerdicts, oracleVerdicts]);
+  const verdictsRef = useRef<TileVerdict[]>([]);
+  useEffect(() => { verdictsRef.current = verdicts; }, [verdicts]);
+  // (x,y) anchor a debounced oracle check is currently in flight for. The
+  // status line shows a pending glyph only while this still matches
+  // `hovered` AND the local pass is green (a local red/yellow already has
+  // something definitive to say; the oracle can only refine it further).
+  const [oraclePendingAnchor, setOraclePendingAnchor] = useState<{ x: number; y: number } | null>(null);
+  // True latest values for the async check's resolve/catch to compare
+  // against — NOT the anchor closed over when the request was issued.
+  // Updated every render those values change, independent of the debounced
+  // check effect's own dependency list, so a ghost disarmed or moved while
+  // a check is in flight is detected even though `seq` alone wouldn't catch
+  // a disarm (cancel() can't abort an already-in-flight fetch).
+  const hoveredRef = useRef(hovered);
+  useEffect(() => { hoveredRef.current = hovered; }, [hovered]);
+  const placingGroupRef = useRef<SpriteGroup | null>(placingBuilding?.group ?? null);
+  useEffect(() => { placingGroupRef.current = placingBuilding?.group ?? null; }, [placingBuilding]);
+  const oracleSeqRef = useRef(0);
+  // Lazily built so a throwaway debounce instance isn't constructed on
+  // every render — only the very first mount pays for it.
+  const oracleDebounceRef = useRef<ReturnType<typeof trailingDebounce<[() => void]>> | null>(null);
+  if (!oracleDebounceRef.current) {
+    oracleDebounceRef.current = trailingDebounce(80, (run: () => void) => run());
+  }
+  // (group, x, y) of the last anchor a check was ISSUED for — read fresh on
+  // every effect run, not just on resolve. Review finding #2: clearing
+  // `oracleVerdicts` on every effect run (including a `renderEpoch` bump at
+  // the SAME anchor+group) blanked a just-confirmed RING/CONTACT block back
+  // to green for the debounce+round-trip window, and `commitQueueAndPlace`
+  // (which reads `verdictsRef.current`) could place during that window. Now the
+  // clear only happens when the anchor or the group actually changed; a
+  // same-key recheck (an edit at the same hover) leaves the last-confirmed
+  // verdict on screen until the fresh response replaces it in place.
+  const prevOracleCheckKeyRef = useRef<{ grp: SpriteGroup; x: number; y: number } | null>(null);
+  useEffect(() => {
+    let live = true;
+    const grp = placingBuilding?.group;
+    if (!grp || !hovered || !session) {
+      oracleDebounceRef.current!.cancel();
+      prevOracleCheckKeyRef.current = null;
+      setOracleVerdicts((v) => (v.length > 0 ? [] : v));
+      setOraclePendingAnchor(null);
+      return () => { live = false; };
+    }
+    const sessionId = session.session_id;
+    const anchor = { x: hovered.x, y: hovered.y };
+    const prevKey = prevOracleCheckKeyRef.current;
+    const sameAnchorAndGroup = prevKey?.grp === grp && prevKey.x === anchor.x && prevKey.y === anchor.y;
+    prevOracleCheckKeyRef.current = { grp, x: anchor.x, y: anchor.y };
+    if (!sameAnchorAndGroup) {
+      setOracleVerdicts((v) => (v.length > 0 ? [] : v));
+    }
+    if (oraclePendingAnchor?.x !== anchor.x || oraclePendingAnchor?.y !== anchor.y) {
+      setOraclePendingAnchor(anchor);
+    }
+    const seq = ++oracleSeqRef.current;
+    oracleDebounceRef.current!.call(() => {
+      const stillCurrent = () =>
+        live && seq === oracleSeqRef.current
+        && placingGroupRef.current === grp
+        && hoveredRef.current?.x === anchor.x && hoveredRef.current?.y === anchor.y;
+      checkPlacement(sessionId, groupRefsAt(grp, anchor))
+        .then((res) => {
+          if (!stillCurrent()) return;
+          // Real footprint fn (not a stub) — oracleToVerdicts now expands a
+          // multi-tile candidate's verdict onto every one of its footprint
+          // tiles, not just the sidecar-reported offending tile.
+          setOracleVerdicts(oracleToVerdicts(res.results, renderer ? (s) => renderer.getFootprint(s) : () => null));
+          setOraclePendingAnchor(null);
+          markOracleOnline();
+        })
+        .catch(() => {
+          if (!stillCurrent()) return;
+          setOracleVerdicts([]);
+          setOraclePendingAnchor(null);
+          markOracleOffline("Placement oracle offline — falling back to local-only placement checks.");
+        });
+    });
+    // Cancel a still-pending (not yet fired) debounced call whenever this
+    // effect re-runs (new anchor/edit superseding it — the debounce's own
+    // trailing-edge replace already handles that case, this is belt &
+    // braces) or the component unmounts (so a fetch that hadn't started
+    // yet never fires against a dead route).
+    return () => { live = false; oracleDebounceRef.current!.cancel(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- log (via
+    // markOracle{On,Off}line) is a stable context value, omitted to avoid
+    // re-fire churn; oraclePendingAnchor is read for a skip-if-unchanged
+    // check only, not a real trigger.
+  }, [placingBuilding, hovered, session?.session_id, renderEpoch]);
+
+  /** Arm a sprite ghost: reuses the building-
+   * placement overlay — `run` fires on left mousedown at the hovered tile.
+   * Shift+click ENQUEUES it and stays armed; a plain
+   * click commits the whole queue plus this placement as one stroke, then
+   * disarms on success. Red refuses (enforced in `enqueueGroup` /
+   * `commitQueueAndPlace`). Fence line-drag bypasses `run`
+   * entirely for a real drag — see onCanvasMouseDown/Up — `run` here is
+   * still what a zero-length line (a plain click on a fence) falls back to. */
+  const armGroup = useCallback((group: SpriteGroup, label?: string) => {
+    if (!renderer) {
+      log?.append({ severity: "warn", message: "Atlas still loading — try again in a moment." });
+      return;
+    }
+    setActiveBrush(null); setPayload("tiles"); setOneShotShape(null);
+    const region: ClipboardRegion = {
+      sourceTileset: group.sourceTileset, sourceSector: group.sourceSector,
+      w: group.w, h: group.h,
+      tiles: groupToRegionTiles(group, (s) => renderer.getFootprint(s)).map((t) => ({ ...t, room: 0, height: 0 })),
+    };
+    setPlacingBuilding({
+      w: group.w, h: group.h, group,
+      label: label ?? (group.items.length === 1
+        ? `s${group.items[0]!.slot}.${group.items[0]!.sub}`
+        : `${group.items.length} sprites`),
+      region,
+      run: (x, y) => {
+        // Capture Shift's state at CLICK time — the round-trip below can
+        // take 100ms+, long enough for a quick single click's Shift to
+        // have already released by the time `.then` runs.
+        if (shiftHeldRef.current) {
+          enqueueGroupRef.current({ x, y }, group);
+          return;
+        }
+        return commitQueueAndPlaceRef.current({ x, y }, group).then((placed) => {
+          if (placed) setPlacingBuilding(null);
+        });
+      },
+    });
+    // enqueueGroupRef / commitQueueAndPlaceRef / shiftHeldRef are stable
+    // refs; renderer is the only real dependency (armBrush calls this
+    // through armGroupRef, so its own identity churn on renderer swap is
+    // harmless).
+  }, [renderer]);
+  armGroupRef.current = armGroup;
+
   useEffect(() => {
     const cv = ghostCanvasRef.current;
     if (!cv) return;
@@ -1359,18 +1846,66 @@ function MapForgeSectorInner() {
     ctx.clearRect(0, 0, cv.width, cv.height);
     ctx.drawImage(placementGhost.canvas, 0, 0);
     // Anchor alignment: the offscreen render's (0,0) tile must land on
-    // the hovered tile — same tileToCanvasPixel math as the SVG overlay,
-    // plus the region render's own bbox origin. Zoom needs no special
-    // handling: the overlay canvas lives inside the same CSS-transformed
-    // wrapper as the main canvas + SVG.
-    const p = tileToCanvasPixel(hovered.x, hovered.y, renderMeta);
+    // the hovered tile (or, mid fence line-drag, the line's min tile —
+    // same tileToCanvasPixel math as the SVG overlay, plus the
+    // region render's own bbox origin. Zoom needs no special handling:
+    // the overlay canvas lives inside the same CSS-transformed wrapper
+    // as the main canvas + SVG.
+    const anchor = lineDrag ? lineDrag.anchor : hovered;
+    const p = tileToCanvasPixel(anchor.x, anchor.y, renderMeta);
     cv.style.transform =
       `translate(${p.x + placementGhost.originX}px, `
       + `${p.y + placementGhost.originY}px)`;
     cv.style.display = "block";
-  }, [placementGhost, hovered, placementStampBusy, renderMeta]);
+  }, [placementGhost, hovered, placementStampBusy, renderMeta, lineDrag]);
 
-  // ── Brush hover ghost (R3 W6) ────────────────────────────────────────
+  // ─── Placement queue overlay ───────────────────────────────────────
+  // Unlike the single-ghost canvas above (tight bbox, retranslated per
+  // hover), queued ghosts sit at MANY different anchors at once — so this
+  // canvas spans the whole main render and each queued ghost's own
+  // pre-rendered `render.canvas` (from `enqueueGroup`) is drawn at its
+  // own anchor's pixel position, no CSS transform needed.
+  const queueCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const cv = queueCanvasRef.current;
+    if (!cv) return;
+    if (queue.length === 0 || !renderMeta) {
+      cv.style.display = "none";
+      return;
+    }
+    if (cv.width !== renderMeta.canvasW || cv.height !== renderMeta.canvasH) {
+      cv.width = renderMeta.canvasW;
+      cv.height = renderMeta.canvasH;
+    }
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    for (const q of queue) {
+      if (!q.render) continue;
+      const p = tileToCanvasPixel(q.anchor.x, q.anchor.y, renderMeta);
+      ctx.drawImage(q.render.canvas, p.x + q.render.originX, p.y + q.render.originY);
+    }
+    cv.style.display = "block";
+    // renderEpoch: re-render after an atlas hot-swap (cellMap changed) —
+    // each queued render's canvas is itself frozen at enqueue time, but
+    // this positions them fresh whenever renderMeta/zoom changes.
+  }, [queue, renderMeta, renderEpoch]);
+  // Full JSD-footprint tiles of every queued ghost, for the dashed
+  // outline `IsoOverlay` draws (its own footprint, not just the anchor —
+  // matches how the verdict/selection diamonds expand multi-tile structs).
+  const queuedTiles = useMemo(() => {
+    if (queue.length === 0 || !renderer) return [];
+    const fp = (s: number) => renderer.getFootprint(s);
+    const out: { x: number; y: number }[] = [];
+    for (const q of queue) {
+      for (const r of groupRefsAt(q.group, q.anchor)) {
+        for (const ft of footprintTiles(r.x, r.y, r.slot, r.sub, fp)) out.push({ x: ft.x, y: ft.y });
+      }
+    }
+    return out;
+  }, [queue, renderer]);
+
+  // ── Brush hover ghost ────────────────────────────────────────────────
   // The armed brush rendered as a translucent sprite at the hovered tile —
   // the same engine the building-placement ghost uses (renderRegionToCanvas).
   // For a multi-tile struct in stamp mode it shows the whole footprint
@@ -1435,6 +1970,105 @@ function MapForgeSectorInner() {
       `translate(${p.x + brushGhost.originX}px, ${p.y + brushGhost.originY}px)`;
     cv.style.display = "block";
   }, [brushGhost, hovered, renderMeta, tool, placingBuilding, ghostActive, pickingRect, pickingPoint, payload]);
+
+  // ── Grab-and-move ghost ──────────────────────────────────────────────
+  // Shift+click grabs a sprite (moveRef + setMoving); like every other
+  // placement mode it needs a translucent sprite following the cursor so
+  // you see WHERE it drops. Same engine as the brush hover ghost above —
+  // the grabbed (slot, sub) rendered as one tile at 0.6 alpha. moveRef is
+  // a ref, but `moving` flips true in the same handler right after it's
+  // set, so gating on `moving` recomputes with moveRef.current already in.
+  const moveGhostCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const moveGhost = useMemo(() => {
+    const mv = moveRef.current;
+    if (!moving || !mv || !renderer) return null;
+    const layers: Record<LayerName, number[][]> =
+      { land: [], objs: [], shadows: [], structs: [], roofs: [], onroofs: [] };
+    layers[mv.hit.layer] = [[mv.hit.slot, mv.hit.sub]];
+    // Include the buddy shadow the move actually relocates (structs only:
+    // shadows slot+1, same sub — the Estoni pairs moveEntry rides along)
+    // so the ghost previews the shadow moving too, not just the sprite.
+    if (mv.hit.layer === "structs") {
+      const parsed = renderer.getParsed();
+      const gn = mv.hit.y * parsed.cols + mv.hit.x;
+      const sh = parsed.shadows[gn] ?? [];
+      if (sh.some((en) => en && en[0] === mv.hit.slot + 1 && en[1] === mv.hit.sub)) {
+        layers.shadows = [[mv.hit.slot + 1, mv.hit.sub]];
+      }
+    }
+    return renderer.renderRegionToCanvas([{ dx: 0, dy: 0, layers }], 0.6);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moving, renderer, renderEpoch]);
+  useEffect(() => {
+    const cv = moveGhostCanvasRef.current;
+    if (!cv) return;
+    if (!moveGhost || !moving || !hovered || !renderMeta) {
+      cv.style.display = "none";
+      return;
+    }
+    if (cv.width !== moveGhost.canvas.width || cv.height !== moveGhost.canvas.height) {
+      cv.width = moveGhost.canvas.width;
+      cv.height = moveGhost.canvas.height;
+    }
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(moveGhost.canvas, 0, 0);
+    const p = tileToCanvasPixel(hovered.x, hovered.y, renderMeta);
+    cv.style.transform =
+      `translate(${p.x + moveGhost.originX}px, ${p.y + moveGhost.originY}px)`;
+    cv.style.display = "block";
+  }, [moveGhost, moving, hovered, renderMeta]);
+
+  // ─── Sprite selection outline ──────────────────────────────────────
+  // Same technique as the placement/brush ghosts: render the SELECTED
+  // sprites once to an offscreen canvas (full alpha, not translucent —
+  // this is "what's selected", not a preview) and position it via CSS
+  // transform at the selection's top-left tile. The CSS drop-shadow
+  // filter gives the glow outline without a per-sprite alpha mask.
+  const selectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const selectionGhost = useMemo(() => {
+    if (selection.length === 0 || !renderer) return null;
+    const grp = sliceGroup(renderer.getParsed(), selection, tileset, "sel", isShadowOnlySlot);
+    if (!grp) return null;
+    const tiles = groupToRegionTiles(grp, (s) => renderer.getFootprint(s));
+    return renderer.renderRegionToCanvas(tiles, 1.0);
+    // `renderEpoch` is restored here (it had been dropped by an earlier
+    // #10c had dropped it to avoid re-rendering this canvas on every edit
+    // anywhere in the sector). That concern is now moot for the common
+    // case — the `selection.length === 0` short-circuit above means this
+    // memo does nothing while nothing is selected, which is when most
+    // sector-wide edits (generators, paint strokes) happen. The rebuild
+    // this re-adds only fires per edit while a selection is ACTIVELY live
+    // (small, bounded cost) — and it's necessary: an edit elsewhere that
+    // changes what a selected sprite's neighbor looks like (e.g. a
+    // generator repainting the ground under it) must repaint this ghost,
+    // not just a nudge/cycle that reassigns the selection's own refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tileset` is
+    // still not tracked (pre-existing gap, unrelated to this fix).
+  }, [selection, renderer, renderMeta, renderEpoch]);
+  useEffect(() => {
+    const cv = selectionCanvasRef.current;
+    if (!cv) return;
+    if (!selectionGhost || selection.length === 0 || !renderMeta) {
+      cv.style.display = "none";
+      return;
+    }
+    if (cv.width !== selectionGhost.canvas.width || cv.height !== selectionGhost.canvas.height) {
+      cv.width = selectionGhost.canvas.width;
+      cv.height = selectionGhost.canvas.height;
+    }
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.drawImage(selectionGhost.canvas, 0, 0);
+    const minX = Math.min(...selection.map((r) => r.x));
+    const minY = Math.min(...selection.map((r) => r.y));
+    const p = tileToCanvasPixel(minX, minY, renderMeta);
+    cv.style.transform =
+      `translate(${p.x + selectionGhost.originX}px, ${p.y + selectionGhost.originY}px)`;
+    cv.style.display = "block";
+  }, [selectionGhost, selection, renderMeta]);
 
   // Region pick for the Generate panel — drag/click two corners on the
   // canvas while the panel stays docked. STICKY: stays armed and re-aims
@@ -1507,7 +2141,10 @@ function MapForgeSectorInner() {
   // Zoom + pan (applied to the CANVAS+SVG wrapper via CSS transform)
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
-  const dragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+  const dragRef = useRef<{ startX: number; startY: number; panX: number; panY: number; moved: boolean } | null>(null);
+  // Set when a plain-left drag actually panned - the click that follows
+  // mouseup must not pin the inspector.
+  const panConsumedClickRef = useRef(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // On-screen size of the canvas VIEWPORT container (the overflow-hidden
@@ -1518,9 +2155,11 @@ function MapForgeSectorInner() {
   // a plain useRef + mount-effect would go stale.
   const [canvasViewportSize, setCanvasViewportSize] = useState({ w: 0, h: 0 });
   const canvasViewportRoRef = useRef<ResizeObserver | null>(null);
+  const canvasViewportElRef = useRef<HTMLDivElement | null>(null);
   const setCanvasViewportEl = useCallback((el: HTMLDivElement | null) => {
     canvasViewportRoRef.current?.disconnect();
     canvasViewportRoRef.current = null;
+    canvasViewportElRef.current = el;
     if (!el) return;
     const measure = () => {
       const r = el.getBoundingClientRect();
@@ -1547,11 +2186,11 @@ function MapForgeSectorInner() {
   const demoAnimRef = useRef<number | null>(null);
   // Latest-value ref so the (mount-once) hook closures never go stale.
   const demoRef = useRef({
-    zoom, pan, renderMeta,
+    zoom, pan, renderMeta, selectedRoom,
     ready: false,
   });
   demoRef.current = {
-    zoom, pan, renderMeta,
+    zoom, pan, renderMeta, selectedRoom,
     ready: !!(session && renderer && renderMeta && firstPaintDone),
   };
   useEffect(() => {
@@ -1589,7 +2228,15 @@ function MapForgeSectorInner() {
        * viewportCenter + pan + (p − canvasCenter) · zoom, so the pan
        * that centers p is (canvasCenter − p) · zoom. */
       panTo: (x: number, y: number, ms = 1200): Promise<void> => {
-        const meta = demoRef.current.renderMeta;
+        // Bigmap "detail window" (~L2578): once cropped, renderMeta is the
+        // CROPPED region's meta, but the frame div this pan centers on
+        // stays sized to the full map (fullMetaRef) — use that instead so
+        // the target lands in frame-relative space, not the crop's own
+        // (confirmed live: a second panTo while cropped landed thousands
+        // of px off). Room view keeps renderMeta — fullMetaRef only ever
+        // tracks the last full-sector (non-room) meta.
+        const rm = demoRef.current.renderMeta;
+        const meta = demoRef.current.selectedRoom === null ? (fullMetaRef.current ?? rm) : rm;
         if (!meta) return Promise.resolve();
         const z = demoRef.current.zoom;
         const c = tileCenterPx(x, y, meta);
@@ -1609,7 +2256,7 @@ function MapForgeSectorInner() {
       zoomTo: (z: number, ms = 900): Promise<void> => {
         const fromZ = demoRef.current.zoom;
         const fromPan = { ...demoRef.current.pan };
-        const toZ = Math.max(0.25, Math.min(8, z));
+        const toZ = Math.max(minZoomRef.current, Math.min(8, z));
         return animate((k) => {
           const nz = fromZ + (toZ - fromZ) * k;
           const s = nz / fromZ;
@@ -1754,7 +2401,7 @@ function MapForgeSectorInner() {
       enterPhase("decoding-atlas", PHASE_WEIGHTS["fetching-parsed"]);
 
       // 4 + 5. Decode atlas + bake shadow atlas, reported by the
-      // renderer. Always WebGL2 since 2026-05-26 — the Canvas2D
+      // renderer. Always WebGL2 — the Canvas2D
       // painter's algorithm can't reproduce the engine's per-strip
       // Z-buffer clipping (e.g. lawless4 sub 16 sticking through walls
       // at C6 (62, 86)). The base IsoRenderer class is kept only as a
@@ -1907,10 +2554,13 @@ function MapForgeSectorInner() {
         // the warm JSD index cache and finishes in ~3-4 s.
         await streamAtlasBuild(xmlPath, session.tileset, () => {});
         if (cancelled) return;
-        const [url, manifest] = await Promise.all([
-          fetchAtlasBlobUrl(xmlPath, session.tileset),
-          getAtlasManifest(xmlPath, session.tileset),
-        ]);
+        // Manifest first (tiny) so its fingerprint can cache-key the atlas URL.
+        // Without it the browser's 24h HTTP cache serves the pre-art-change full
+        // atlas over the freshly-baked one (e.g. dirt road after a roadtile swap).
+        const manifest = await getAtlasManifest(xmlPath, session.tileset);
+        if (cancelled) return;
+        const url = await fetchAtlasBlobUrl(xmlPath, session.tileset, undefined,
+                                            { cacheKey: manifest.fingerprint });
         if (cancelled) {
           URL.revokeObjectURL(url);
           return;
@@ -1994,14 +2644,95 @@ function MapForgeSectorInner() {
   // numeric values match, the reference change cascades stale data.
   // If a future generator changes parsed.rooms (none currently do),
   // wire a SEPARATE recompute trigger here, not renderEpoch.
+  // ─── Detail window (bigmap sharpness) ──────────────────────────────
+  // Chrome clamps the GL drawing buffer to ~2^25 px, so a whole 360×360
+  // map rasterizes at ~0.55 scale and looks mushy/blocky when zoomed
+  // in. When the user zooms in on such a map, re-render ONLY the
+  // visible tile window (plus margin) — a region small enough to
+  // rasterize 1:1 — and absolutely position that region canvas where
+  // the full map would have put it, so the pan/zoom transform and all
+  // meta-driven overlay/hit-test math keep working unchanged.
+  const [detailBbox, setDetailBbox] = useState<[number, number, number, number] | null>(null);
+  // Full-map meta captured whenever we render un-regioned; the frame
+  // div keeps THESE dims so entering/leaving detail mode never moves
+  // the world under the transform's -50% centering.
+  const fullMetaRef = useRef<RenderMeta | null>(null);
+
+  // A room is a standalone canvas, not a window into the full-map frame.
+  // Discard the previous detail window and camera when changing scope.
+  useEffect(() => {
+    setDetailBbox(null);
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, [selectedRoom]);
+
   useEffect(() => {
     if (!renderer) return;
+    if (selectedRoom === null && !detailBbox) {
+      fullMetaRef.current = renderer.computeMeta({});
+    }
     const meta = renderer.computeMeta({
       roomId: selectedRoom,
       ring: 5,
+      bbox: selectedRoom === null ? detailBbox : null,
     });
     setRenderMeta(meta);
-  }, [renderer, selectedRoom]);
+  }, [renderer, selectedRoom, detailBbox]);
+
+  // Watch zoom/pan and pick the detail window (debounced). Only for
+  // full-sector views of maps big enough to hit the buffer clamp.
+  useEffect(() => {
+    if (!renderer || !info.data || selectedRoom !== null || !renderMeta) return;
+    const fm = fullMetaRef.current;
+    if (!fm || fm.canvasW * fm.canvasH <= 32 * 1024 * 1024) return;
+    const cols = info.data.cols, rows = info.data.rows;
+    const timer = window.setTimeout(() => {
+      if (zoom < 0.75) {
+        setDetailBbox(null);
+        return;
+      }
+      const el = canvasRef.current;
+      const vp = canvasViewportElRef.current;
+      if (!el || !vp) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const scale = el.clientWidth / rect.width;
+      const vr = vp.getBoundingClientRect();
+      const meta = renderMeta;
+      const hw = meta.tileW / 2, hh = meta.tileH / 2;
+      let tx0 = Infinity, ty0 = Infinity, tx1 = -Infinity, ty1 = -Infinity;
+      for (const [cx, cy] of [[vr.left, vr.top], [vr.right, vr.top],
+                              [vr.left, vr.bottom], [vr.right, vr.bottom]] as const) {
+        const px = (cx - rect.left) * scale;
+        const py = (cy - rect.top) * scale;
+        const A = (px + meta.ixMin) / hw;
+        const B = (py + meta.iyMin) / hh;
+        const tx = (A + B) / 2 - 1, ty = (B - A) / 2;
+        tx0 = Math.min(tx0, tx); tx1 = Math.max(tx1, tx);
+        ty0 = Math.min(ty0, ty); ty1 = Math.max(ty1, ty);
+      }
+      const M = 10;                                  // margin tiles
+      // Snap to an 8-tile grid so small pans reuse the rendered window.
+      const snap = (v: number, up: boolean) =>
+        up ? Math.ceil(v / 8) * 8 : Math.floor(v / 8) * 8;
+      const bx0 = Math.max(0, snap(tx0 - M, false));
+      const by0 = Math.max(0, snap(ty0 - M, false));
+      const bx1 = Math.min(cols - 1, snap(tx1 + M, true));
+      const by1 = Math.min(rows - 1, snap(ty1 + M, true));
+      if (bx1 <= bx0 || by1 <= by0) return;
+      if (bx0 === 0 && by0 === 0 && bx1 === cols - 1 && by1 === rows - 1) {
+        setDetailBbox(null);
+        return;
+      }
+      setDetailBbox((prev) =>
+        prev && prev[0] === bx0 && prev[1] === by0 && prev[2] === bx1 && prev[3] === by1
+          ? prev : [bx0, by0, bx1, by1]);
+    }, 280);
+    return () => window.clearTimeout(timer);
+    // renderMeta in deps: after a detail render lands, the recomputed
+    // window (now in region coordinates) must still resolve correctly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderer, info.data, selectedRoom, zoom, pan, canvasViewportSize, renderMeta]);
 
   // ─── Paint the canvas. Runs after the canvas has mounted (renderMeta
   // is non-null → the JSX renders the <canvas>, the ref is populated,
@@ -2020,6 +2751,7 @@ function MapForgeSectorInner() {
     renderer.render(canvasRef.current, {
       roomId: selectedRoom,
       ring: 5,
+      bbox: selectedRoom === null ? detailBbox : null,
       skipLayers: hiddenLayers,
       highlightTiles,
     });
@@ -2028,7 +2760,7 @@ function MapForgeSectorInner() {
       setRendererLoading(false);
       setLoadPhase(null);
     }
-  }, [renderer, renderMeta, selectedRoom, hiddenLayers, renderEpoch, highlightTiles, firstPaintDone]);
+  }, [renderer, renderMeta, selectedRoom, detailBbox, hiddenLayers, renderEpoch, highlightTiles, firstPaintDone]);
 
   // Repaint when full-screen flips — the <canvas> remounts (dock slot
   // ↔ render-only view), so bump renderEpoch to redraw into the new
@@ -2037,15 +2769,18 @@ function MapForgeSectorInner() {
     setRenderEpoch((e) => e + 1);
   }, [focusMode]);
 
-  // Convert a mouse event on the canvas to canvas-native pixel coords.
-  // Canvas backing-store size (set by IsoRenderer.render) may differ
-  // from on-screen size when zoom is non-1 — same scaling as the
-  // previous img approach.
+  // Convert a mouse event on the canvas to LOGICAL canvas pixel coords
+  // (renderMeta space). Scale by clientWidth (CSS size, pinned to
+  // meta.canvasW), NOT canvas.width: on bigmaps IsoRendererGL renders
+  // into a downscaled backing store to stay under Chrome's WebGL
+  // drawing-buffer clamp, so the attribute size is no longer the
+  // logical size. clientWidth ÷ bounding rect cancels the zoom
+  // transform either way.
   const eventToCanvasPixel = useCallback((e: { clientX: number; clientY: number }) => {
     if (!canvasRef.current) return null;
     const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = canvasRef.current.width / rect.width;
-    const scaleY = canvasRef.current.height / rect.height;
+    const scaleX = canvasRef.current.clientWidth / rect.width;
+    const scaleY = canvasRef.current.clientHeight / rect.height;
     return {
       px: (e.clientX - rect.left) * scaleX,
       py: (e.clientY - rect.top) * scaleY,
@@ -2134,6 +2869,9 @@ function MapForgeSectorInner() {
       return;
     }
     // 1. Snapshot pre-edit state for undo (per affected axis).
+    if (spec.op === "set_room") {
+      setMaxPaintedRoomId((m) => Math.max(m, spec.roomId));
+    }
     for (const t of tiles) {
       if (spec.op === "set_room") renderer.recordRoomSnapshot(t.x, t.y);
       else renderer.recordSnapshot(t.x, t.y, spec.layer);
@@ -2470,8 +3208,73 @@ function MapForgeSectorInner() {
     }
   }
 
+  /** Delete hotkey (inspect tool): remove the sprite-picked entry at the
+   * pinned tile — or, for a plain tile pin, the topmost visible entry
+   * there. No confirm modal (the hotkey exists for speed); fully
+   * undoable via the stroke machinery like every other edit. */
+  async function deletePinnedEntry() {
+    if (!session || !renderer || session.read_only || !pinned) return;
+    const parsed = renderer.getParsed();
+    const gn = pinned.y * parsed.cols + pinned.x;
+    let layer: LayerName | null = null;
+    let idx = -1;
+    const pick = pinnedPickRef.current;
+    if (pick) {
+      const entries = parsed[pick.layer][gn] ?? [];
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i];
+        if (e && e[0] === pick.slot && e[1] === pick.sub) {
+          layer = pick.layer; idx = i; break;
+        }
+      }
+    }
+    if (layer === null) {
+      for (const l of ["onroofs", "roofs", "structs", "objs"] as const) {
+        const entries = parsed[l][gn] ?? [];
+        if (entries.length > 0) { layer = l; idx = entries.length - 1; break; }
+      }
+    }
+    if (layer === null || idx < 0) return;
+    renderer.beginStroke(`Delete ${layer}[${idx}] (${pinned.x},${pinned.y})`);
+    renderer.recordSnapshot(pinned.x, pinned.y, layer);
+    renderer.applyLocalEdit({
+      x: pinned.x, y: pinned.y, op: "remove", layer, entryIndex: idx,
+    });
+    renderer.endStroke();
+    bumpHistory();
+    setRenderEpoch((e) => e + 1);
+    setSpriteHit(null);
+    pinnedPickRef.current = null;
+    setEditsInFlight((n) => n + 1);
+    try {
+      const res = await applyEdits(session.session_id,
+        [{ x: pinned.x, y: pinned.y, op: "remove", layer, entry_index: idx }]);
+      setSession(res.session);
+    } catch (err) {
+      // Backend rejected — revert the optimistic local edit and discard
+      // the stroke so Ctrl+Y can't replay it (inspector applyEdit's
+      // pattern).
+      const entry = renderer.discardLastUndo();
+      if (entry) {
+        for (const s of entry.snapshots) {
+          renderer.applyLocalEdit({
+            x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries,
+          });
+        }
+      }
+      setRenderEpoch((e) => e + 1);
+      log?.append({
+        severity: "error",
+        message: "Delete rejected by the backend",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
   /** Paint the current room id onto the brush-radius tiles around `tile`
-   * (R4 Room payload, pencil). Runs inside the pencil's open stroke;
+   * (the Room payload, under the pencil). Runs inside the pencil's open stroke;
    * dedup'd per tile via strokeRef. */
   async function paintRoomAt(tile: { x: number; y: number }) {
     if (!session || !renderer || session.read_only) return;
@@ -2491,6 +3294,7 @@ function MapForgeSectorInner() {
         renderer.recordRoomSnapshot(x, y);
         renderer.applyLocalEdit({ x, y, op: "set_room", roomId });
         edits.push({ x, y, op: "set_room", room_id: roomId });
+        setMaxPaintedRoomId((m) => Math.max(m, roomId));
       }
     }
     if (edits.length === 0) return;
@@ -2639,7 +3443,7 @@ function MapForgeSectorInner() {
     // Ghost preview live: undoing under it would interleave with the
     // snapshots the ghost will restore — so the FIRST Ctrl+Z acts as
     // "Clear preview" (a silent no-op here just felt broken, user
-    // feedback 2026-06-11). The next Ctrl+Z undoes map edits normally.
+    // feedback). The next Ctrl+Z undoes map edits normally.
     if (ghostActive) {
       clearGhost();
       log?.append({
@@ -2651,6 +3455,11 @@ function MapForgeSectorInner() {
     }
     const entry = renderer.popUndo();
     if (!entry) return;
+    // Review finding #3: an undo can remove/replace the sprites the
+    // mode-less selection points at (stale refs → moveEdits/cycle would
+    // place a phantom). Cheaper and safer to just clear than to diff.
+    setSelection([]);
+    setSpriteHit(null);
     setEditsInFlight((n) => n + 1);
     try {
       // Local apply first so the canvas reflects the revert immediately.
@@ -2687,11 +3496,51 @@ function MapForgeSectorInner() {
         setSession(res.session);
       }
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn("undo backend sync failed", e);
+      // The sidecar did NOT apply the revert — and Save serializes the
+      // SIDECAR's session, so silently keeping the local revert would
+      // make the canvas lie about what a save writes. Roll the local
+      // mirror forward again (popRedo returns the pre-undo capture,
+      // and restores the stroke to the undo stack) and tell the user.
+      rollbackHistorySync(renderer.popRedo(), "Undo", e);
     } finally {
       setEditsInFlight((n) => Math.max(0, n - 1));
     }
+  }
+
+  /** Recovery path for a failed undo/redo backend sync: re-apply the
+   * mirror entry locally so the canvas matches the sidecar session
+   * again (local-first apply had already diverged it), then surface
+   * the failure in the log — a console.warn here once let users save
+   * a different map than the one on their screen. */
+  function rollbackHistorySync(
+    mirror: UndoEntry | null, what: string, e: unknown,
+  ) {
+    if (renderer && mirror) {
+      for (const s of mirror.snapshots) {
+        renderer.applyLocalEdit({
+          x: s.x, y: s.y, op: "set_entries",
+          layer: s.layer, entries: s.entries,
+        });
+      }
+      for (const r of mirror.roomSnapshots) {
+        renderer.applyLocalEdit({
+          x: r.x, y: r.y, op: "set_room", roomId: r.roomId,
+        });
+      }
+      for (const h of mirror.heightSnapshots) {
+        renderer.applyLocalEdit({
+          x: h.x, y: h.y, op: "set_height", height: h.height,
+        });
+      }
+      setRenderEpoch((n) => n + 1);
+    }
+    log?.append({
+      severity: "error",
+      message: `${what} couldn't reach the backend — the change was `
+        + "rolled back locally so the canvas still matches what Save "
+        + "will write. Check the sidecar and try again.",
+      detail: e instanceof Error ? e.message : String(e),
+    });
   }
 
   /** Sync both history depths from the renderer. Called after every stroke
@@ -2784,6 +3633,9 @@ function MapForgeSectorInner() {
     if (ghostActive) { clearGhost(); return; }   // same behavior as undo()
     const entry = renderer.popRedo();
     if (!entry) return;
+    // Review finding #3 — see undo()'s matching comment.
+    setSelection([]);
+    setSpriteHit(null);
     setEditsInFlight((n) => n + 1);
     try {
       const edits: SessionEdit[] = [];
@@ -2809,8 +3661,9 @@ function MapForgeSectorInner() {
         setSession(res.session);
       }
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn("redo backend sync failed", e);
+      // Symmetric with undo(): popUndo returns the pre-redo capture
+      // and restores the entry to the redo stack.
+      rollbackHistorySync(renderer.popUndo(), "Redo", e);
     } finally {
       setEditsInFlight((n) => Math.max(0, n - 1));
     }
@@ -2872,6 +3725,17 @@ function MapForgeSectorInner() {
       if (placementStampBusy) return;
       const tile = hovered ?? pixelToTile(e);
       if (!tile) return;
+      // Fence line-drag: a fence-armed
+      // single item anchors a line instead of placing immediately — the
+      // drag is finished (committed or falls back to a single place) on
+      // mouseup. Shift is NOT consulted for STARTING a line — a fence
+      // line is never queueable and always commits as its own stroke —
+      // so Shift held here just falls through to the normal `run()`
+      // below, which is the plain-place/enqueue decision.
+      if (fenceArmed && !e.shiftKey) {
+        setLineAnchor(tile);
+        return;
+      }
       // The placement sprite ghost lives on its own overlay canvas (it
       // never touches the parsed dict), so the stamp's snapshots always
       // capture the real pre-stamp tiles — no ghost clearing needed.
@@ -2892,8 +3756,28 @@ function MapForgeSectorInner() {
     // the click landed near a diamond edge. "What you see is what you get."
     const tile = hovered ?? pixelToTile(e, { logToConsole: true });
     if (!tile) return;
+    // Shift+drag a SPRITE = grab-and-move; the drop happens in
+    // onCanvasMouseUp. Plain mousedown stays a maybe-pan (wrapper) and a
+    // clean click pins/selects (onCanvasClick). Lives on `inspectLike`
+    // (inspect tool, or mode-less select with nothing armed) rather than
+    // inside the `tool === "inspect"` branch of the chain below, so it
+    // fires in the mode-less "nothing armed" state too — but it's a
+    // stand-alone pre-check (not folded into the tool switch) so a
+    // grab-and-move `return` can't shadow `assertNever(tool)`'s
+    // exhaustiveness check on `tool`, and so a shift-drag that misses a
+    // sprite still falls through to the select tool's normal marquee.
+    if (inspectLike && e.shiftKey && renderer && renderMeta && !session?.read_only) {
+      const p = eventToCanvasPixel(e);
+      const hit = p ? renderer.pickSpriteAt(p.px, p.py, renderMeta) : null;
+      if (hit) {
+        e.stopPropagation();        // the wrapper must not arm a pan
+        moveRef.current = { hit };
+        setMoving(true);
+        return;
+      }
+    }
     if (tool === "inspect") {
-      // Inspect pins on click (onCanvasClick) — nothing to do on mousedown.
+      // Click-to-pin handled in onCanvasClick — nothing to do on mousedown.
     } else if (tool === "pencil") {
       // The pencil applies the active PAYLOAD over its brush-radius tiles.
       strokeRef.current = new Set();
@@ -2928,7 +3812,10 @@ function MapForgeSectorInner() {
     } else if (tool === "shape") {
       // Flood fill is a click action (not a bbox drag) — fill from the
       // clicked seed immediately and bail (no anchor / drag preview).
-      if (shapeKind === "flood") {
+      // `oneShotShape` overrides `shapeKind` when a command-card verb
+      // armed a one-shot (a later phase wires the card; the fallback
+      // to `shapeKind` alone is what P1 exercises today).
+      if ((oneShotShape ?? shapeKind) === "flood") {
         if (payload === "tiles" && !activeBrush) return;
         doFloodFill(tile);
         return;
@@ -2956,6 +3843,11 @@ function MapForgeSectorInner() {
   }
 
   function onCanvasClick(e: React.MouseEvent<HTMLCanvasElement>) {
+    // A plain-left drag that PANNED must not pin on release.
+    if (panConsumedClickRef.current) {
+      panConsumedClickRef.current = false;
+      return;
+    }
     // A region pick just completed on mouseup — swallow the click that
     // follows it so it can't pin the inspector / start a tool action.
     if (pickSuppressClickRef.current) {
@@ -2986,11 +3878,41 @@ function MapForgeSectorInner() {
     if (placingBuilding) return;
     // Ghost preview live — block tool actions (see onCanvasMouseDown).
     if (ghostActive) return;
-    // Inspect mode only. Pencil + shape act via mousedown/move/up above;
-    // their click event fires AFTER mouseup and must not pin a tile.
-    if (tool !== "inspect") return;
+    // Inspect (or mode-less select, nothing armed). Pencil + shape act
+    // via mousedown/move/up above; their click event fires AFTER mouseup
+    // and must not pin a tile.
+    if (!inspectLike) return;
     const tile = pixelToTile(e, { logToConsole: true });
     if (!tile) return;
+    // Sprite-aware pick: clicking a big sprite (cooling tower, wreck)
+    // pins the tile that OWNS it, not whatever ground tile happens to
+    // sit under the cursor. Ctrl+click bypasses for a raw tile pick.
+    if (!e.ctrlKey && renderer && renderMeta) {
+      const p = eventToCanvasPixel(e);
+      const hit = p ? renderer.pickSpriteAt(p.px, p.py, renderMeta) : null;
+      // Mode-less sprite selection, with nothing armed: a
+      // plain click selects just this sprite; Shift+click toggles it
+      // in/out of a multi-sprite selection; a click on empty ground
+      // clears the selection (Shift+click on empty ground leaves it).
+      if (modeless) {
+        if (hit) {
+          const ref: SpriteRef = { x: hit.x, y: hit.y, layer: hit.layer, slot: hit.slot, sub: hit.sub };
+          setSelection((prev) => e.shiftKey
+            ? (prev.some((r) => refKey(r) === refKey(ref)) ? prev.filter((r) => refKey(r) !== refKey(ref)) : [...prev, ref])
+            : [ref]);
+        } else if (!e.shiftKey) {
+          setSelection([]);
+        }
+      }
+      if (hit) {
+        setPinned({ x: hit.x, y: hit.y });
+        // Remember WHICH entry was picked so the Delete hotkey removes
+        // exactly the sprite the user clicked, not a random co-tenant.
+        pinnedPickRef.current = { layer: hit.layer, slot: hit.slot, sub: hit.sub };
+        return;
+      }
+    }
+    pinnedPickRef.current = null;
     setPinned(tile);
   }
 
@@ -3002,6 +3924,35 @@ function MapForgeSectorInner() {
     setHovered((prev) =>
       prev && tile && prev.x === tile.x && prev.y === tile.y ? prev : tile,
     );
+    // Fence line-drag: the line itself is a derived memo off
+    // (lineAnchor, hovered) — set just above — so mousemove needs no
+    // extra work to grow/shrink the preview. Just guard against a stray
+    // anchor if the button was released somewhere the canvas never saw
+    // a mouseup for (the wrapper's onMouseUpDrag also clears it, but a
+    // re-entering drag with the button already up should not resume one).
+    if (lineAnchor && e.buttons !== 1) setLineAnchor(null);
+    // Sprite-aware hover (inspect, or mode-less select with nothing
+    // armed): when the hovered TILE changes, probe which drawn sprite
+    // the cursor is on and outline it + its anchor tile. Throttled to
+    // tile changes so the ~ms pick cost never runs per-mousemove. Skipped
+    // entirely while a ghost is armed (`placingBuilding`) — the outline is
+    // hidden then anyway (see the `spriteHit` prop on IsoOverlay), so the
+    // probe would just be paying its cost for nothing.
+    if (inspectLike && !placingBuilding && renderer && renderMeta && tile) {
+      const prev = spriteProbeTileRef.current;
+      if (!prev || prev.x !== tile.x || prev.y !== tile.y) {
+        spriteProbeTileRef.current = tile;
+        const p = eventToCanvasPixel(e);
+        const hit = p ? renderer.pickSpriteAt(p.px, p.py, renderMeta) : null;
+        setSpriteHit((old) =>
+          old && hit && old.x === hit.x && old.y === hit.y
+            && old.slot === hit.slot && old.sub === hit.sub ? old : hit,
+        );
+      }
+    } else if (spriteHit && !inspectLike) {
+      setSpriteHit(null);
+      spriteProbeTileRef.current = null;
+    }
     // Drag-paint: if pencil + brush + left button held + stroke active.
     // Inherit the Shift state from the live mousemove so the user can
     // toggle stamp/manual mid-drag if they want to (rare but coherent).
@@ -3025,7 +3976,429 @@ function MapForgeSectorInner() {
     }
   }
 
+  /** Grab-and-move: relocate ONE picked entry (layer/slot/sub) from its
+   * tile to `to` as a single undo stroke (remove + place). An explicit
+   * same-tile shadow (slot+1, same sub — the Estoni 75/77/79 pairs, which
+   * the engine does not auto-shadow) rides along. Multi-tile JSD
+   * footprints follow their single anchor entry. */
+  async function moveEntry(hit: SpriteHit, to: { x: number; y: number }) {
+    if (!session || !renderer || session.read_only) return;
+    const parsed = renderer.getParsed();
+    const from = { x: hit.x, y: hit.y };
+    const gn = from.y * parsed.cols + from.x;
+    const entries = parsed[hit.layer][gn] ?? [];
+    let idx = -1;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const en = entries[i];
+      if (en && en[0] === hit.slot && en[1] === hit.sub) { idx = i; break; }
+    }
+    if (idx < 0) return;
+    let shadowIdx = -1;
+    if (hit.layer === "structs") {
+      const sh = parsed.shadows[gn] ?? [];
+      for (let i = sh.length - 1; i >= 0; i--) {
+        const en = sh[i];
+        if (en && en[0] === hit.slot + 1 && en[1] === hit.sub) { shadowIdx = i; break; }
+      }
+    }
+    renderer.beginStroke(`Move s${hit.slot}/${hit.sub} (${from.x},${from.y})→(${to.x},${to.y})`);
+    renderer.recordSnapshot(from.x, from.y, hit.layer);
+    renderer.recordSnapshot(to.x, to.y, hit.layer);
+    if (shadowIdx >= 0) {
+      renderer.recordSnapshot(from.x, from.y, "shadows");
+      renderer.recordSnapshot(to.x, to.y, "shadows");
+    }
+    renderer.applyLocalEdit({ x: from.x, y: from.y, op: "remove", layer: hit.layer, entryIndex: idx });
+    renderer.applyLocalEdit({ x: to.x, y: to.y, op: "place", layer: hit.layer, slot: hit.slot, sub: hit.sub });
+    const edits: SessionEdit[] = [
+      { x: from.x, y: from.y, op: "remove", layer: hit.layer, entry_index: idx },
+      { x: to.x, y: to.y, op: "place", layer: hit.layer, slot: hit.slot, sub: hit.sub },
+    ];
+    if (shadowIdx >= 0) {
+      renderer.applyLocalEdit({ x: from.x, y: from.y, op: "remove", layer: "shadows", entryIndex: shadowIdx });
+      renderer.applyLocalEdit({ x: to.x, y: to.y, op: "place", layer: "shadows", slot: hit.slot + 1, sub: hit.sub });
+      edits.push(
+        { x: from.x, y: from.y, op: "remove", layer: "shadows", entry_index: shadowIdx },
+        { x: to.x, y: to.y, op: "place", layer: "shadows", slot: hit.slot + 1, sub: hit.sub },
+      );
+    }
+    renderer.endStroke();
+    bumpHistory();
+    setRenderEpoch((e) => e + 1);
+    setSpriteHit(null);
+    setPinned(to);
+    pinnedPickRef.current = { layer: hit.layer, slot: hit.slot, sub: hit.sub };
+    setEditsInFlight((n) => n + 1);
+    try {
+      const res = await applyEdits(session.session_id, edits);
+      setSession(res.session);
+    } catch (err) {
+      // Backend rejected — revert the optimistic local edits and discard
+      // the stroke so Ctrl+Y can't replay it (deletePinnedEntry's pattern).
+      const entry = renderer.discardLastUndo();
+      if (entry) {
+        for (const sn of entry.snapshots) {
+          renderer.applyLocalEdit({
+            x: sn.x, y: sn.y, op: "set_entries", layer: sn.layer, entries: sn.entries,
+          });
+        }
+      }
+      setRenderEpoch((e) => e + 1);
+      log?.append({
+        severity: "error",
+        message: "Move rejected by the backend",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
+  /** Mirror-then-persist helper shared by place/delete/nudge/cycle: on
+   * backend rejection pop the stroke and restore its snapshots
+   * (moveEntry's pattern above). */
+  async function sendEdits(edits: SessionEdit[], failMsg: string): Promise<boolean> {
+    if (!session || !renderer) return false;
+    setEditsInFlight((n) => n + 1);
+    try {
+      const res = await applyEdits(session.session_id, edits);
+      setSession(res.session);
+      return true;
+    } catch (err) {
+      const entry = renderer.discardLastUndo();
+      if (entry) for (const sn of entry.snapshots) renderer.applyLocalEdit({ x: sn.x, y: sn.y, op: "set_entries", layer: sn.layer, entries: sn.entries });
+      setRenderEpoch((e) => e + 1);
+      log?.append({ severity: "error", message: failMsg, detail: err instanceof Error ? err.message : String(err) });
+      return false;
+    } finally {
+      setEditsInFlight((n) => Math.max(0, n - 1));
+    }
+  }
+
+  /** Shared snapshot/apply/send dance for place/delete/nudge/cycle — ONE
+   * undo stroke, then persist (review findings #4/#11 — this replaces
+   * four near-identical copies). `nextSelection` replaces the sprite
+   * selection right after the local edits land (before the backend
+   * round-trip resolves); pass `null` to leave selection untouched
+   * (callers that manage it themselves, e.g. clearing pinned alongside).
+   * On backend rejection, `sendEdits` already rolls the RENDERER back;
+   * this also rolls `selection` back to what it was before the call. */
+  async function applyStroke(
+    label: string,
+    edits: SessionEdit[],
+    touched: { x: number; y: number; layer: LayerName }[],
+    nextSelection: SpriteRef[] | null,
+    failMsg: string,
+  ): Promise<boolean> {
+    if (!session || session.read_only || !renderer) return false;
+    const prevSelection = selectionRef.current;
+    renderer.beginStroke(label);
+    for (const t of touched) renderer.recordSnapshot(t.x, t.y, t.layer);
+    for (const ed of edits) {
+      renderer.applyLocalEdit(ed.op === "remove"
+        ? { x: ed.x, y: ed.y, op: "remove", layer: ed.layer, entryIndex: ed.entry_index }
+        : { x: ed.x, y: ed.y, op: "place", layer: ed.layer, slot: ed.slot, sub: ed.sub });
+    }
+    renderer.endStroke();
+    bumpHistory(); setRenderEpoch((e) => e + 1);
+    if (nextSelection !== null) setSelection(nextSelection);
+    const ok = await sendEdits(edits, failMsg);
+    if (!ok) setSelection(prevSelection);
+    return ok;
+  }
+
+  /** Combined queue-so-far + this-candidate verdicts:
+   * a FRESH local batch check across the whole queue — "re-checked
+   * against the live state, and `localCheck`'s own batch rule
+   * makes an earlier queued ghost count as occupied for a later one —
+   * unioned with the CURRENT group's already-computed local+oracle merge
+   * (`verdictsRef`; empty for a hover-less hotkey placement, the same
+   * edge case the old single-ghost `placeGroupAt` guarded). A plain union
+   * is exactly right for a `worstOf(...) === "blocking"` read: a local
+   * BLOCKING always wins over an oracle verdict (`mergeVerdicts`'s own
+   * rule), so nothing here can downgrade a real block either way. */
+  function queueVerdicts(fullQueue: QueuedGhost[]): TileVerdict[] {
+    if (!renderer) return [];
+    const full = localCheck(renderer.getParsed(), placementTables, occupancy,
+      fullQueue.flatMap((q) => groupRefsAt(q.group, q.anchor)), (s) => renderer.getFootprint(s));
+    return verdictsRef.current.length > 0 ? [...full, ...verdictsRef.current] : full;
+  }
+
+  /** Shift+click while a ghost is armed: stack `group`
+   * at `anchor` into the placement queue instead of placing it — refused
+   * (logged) when the merged queue-so-far verdict is blocking. The ghost
+   * stays armed either way; `armGroup`'s `run` never disarms on this path. */
+  function enqueueGroup(anchor: Tile, group: SpriteGroup): void {
+    if (!renderer) return;
+    const fullQueue: QueuedGhost[] = [...queueRef.current, { anchor, group }];
+    const v = queueVerdicts(fullQueue);
+    if (worstOf(v) === "blocking") {
+      const why = v.find((t) => t.tier === "blocking");
+      log?.append({ severity: "warn", message: `Can't queue here — ${why?.detail ?? why?.test ?? "blocked"}.` });
+      return;
+    }
+    const render = renderer.renderRegionToCanvas(groupToRegionTiles(group, (s) => renderer.getFootprint(s)), 0.5);
+    setQueue((q) => [...q, { anchor, group, render }]);
+  }
+
+  /** Commit the WHOLE placement queue plus `group` at `anchor` as ONE undo
+   * stroke — a plain click commits the queue plus the current placement —
+   * `queueCommitEdits` degenerates to a single-entry commit when the
+   * queue is empty, so this also replaces the old single-group
+   * `placeGroupAt` for that case. Returns false (and logs the reason)
+   * when the combined verdict is blocking; clears the queue on success. */
+  async function commitQueueAndPlace(anchor: Tile, group: SpriteGroup): Promise<boolean> {
+    if (!session || session.read_only || !renderer) return false;
+    const fullQueue: QueuedGhost[] = [...queueRef.current, { anchor, group }];
+    const v = queueVerdicts(fullQueue);
+    if (worstOf(v) === "blocking") {
+      const why = v.find((t) => t.tier === "blocking");
+      log?.append({ severity: "warn", message: `Can't place here — ${why?.detail ?? why?.test ?? "blocked"}.` });
+      return false;
+    }
+    const parsed = renderer.getParsed();
+    const { edits, placed, dropped } = queueCommitEdits(fullQueue, parsed.cols, parsed.rows);
+    if (edits.length === 0) { log?.append({ severity: "warn", message: "Nothing placed — off the map." }); return false; }
+    if (dropped) log?.append({ severity: "warn", message: `${dropped} sprite(s) fell off the map and were skipped.` });
+    const label = queueRef.current.length > 0
+      ? `Place ${queueRef.current.length} queued + 1`
+      : `Place ${group.items.length === 1 ? `s${group.items[0]!.slot}.${group.items[0]!.sub}` : `${group.items.length} sprites`} @ (${anchor.x},${anchor.y})`;
+    const touched = edits.map((ed) => ({ x: ed.x, y: ed.y, layer: ed.layer! }));
+    const ok = await applyStroke(label, edits, touched, placed, "Place rejected by the backend");
+    if (ok) setQueue([]);
+    return ok;
+  }
+  // Stale-closure guard: `armGroup`'s `run` closure is created once per
+  // arm and must call the LATEST `enqueueGroup`/`commitQueueAndPlace`
+  // (which themselves read `queueRef`/`verdictsRef`/`session`/`renderer`
+  // fresh), not whichever versions existed at arm time.
+  const enqueueGroupRef = useRef(enqueueGroup);
+  enqueueGroupRef.current = enqueueGroup;
+  const commitQueueAndPlaceRef = useRef(commitQueueAndPlace);
+  commitQueueAndPlaceRef.current = commitQueueAndPlace;
+
+  async function deleteSelection() {
+    const sel = selectionRef.current;
+    if (!session || session.read_only || !renderer || sel.length === 0) return;
+    const parsed = renderer.getParsed();
+    const { edits, touched } = deleteEdits(parsed, sel, isShadowOnlySlot);
+    if (edits.length === 0) {
+      log?.append({ severity: "warn", message: "Selection is stale (already removed) — cleared." });
+      setSelection([]);
+      return;
+    }
+    setSpriteHit(null);
+    // Review finding #5: also clear the legacy tile pin, or a second
+    // Delete right after this one falls through to deletePinnedEntry
+    // and removes whatever's topmost on the now-stale pinned tile.
+    setPinned(null);
+    pinnedPickRef.current = null;
+    await applyStroke(`Delete ${sel.length} sprite${sel.length === 1 ? "" : "s"}`, edits, touched, [], "Delete rejected by the backend");
+  }
+
+  async function nudgeSelection(dx: number, dy: number) {
+    const sel = selectionRef.current;
+    if (!session || session.read_only || !renderer || sel.length === 0) return;
+    const parsed = renderer.getParsed();
+    // Review finding #3: a selection can go stale (e.g. Ctrl+Z removed
+    // the selected sprite) — deleteEdits finding nothing means moveEdits
+    // would still emit an unconditional `place` at the destination,
+    // landing a phantom sprite. Bail and clear instead of moving a
+    // ghost of nothing.
+    if (deleteEdits(parsed, sel).edits.length === 0) {
+      log?.append({ severity: "warn", message: "Selection is stale (already removed) — cleared." });
+      setSelection([]);
+      return;
+    }
+    const moved = sel.map((r) => ({ ...r, x: r.x + dx, y: r.y + dy }));
+    // occupancyRef (not the `occupancy` closure) — review finding #10b:
+    // this function is called from the hotkey dispatcher's closure,
+    // which only re-binds on its own deps; the ref is always current.
+    const v = localCheck(parsed, placementTables, occupancyRef.current, moved, (s) => renderer.getFootprint(s),
+      new Set(sel.map(refKey)));
+    if (worstOf(v) === "blocking") {
+      const why = v.find((t) => t.tier === "blocking");
+      log?.append({ severity: "warn", message: `Can't move there — ${why?.detail ?? why?.test}.` });
+      return;
+    }
+    const { edits, moved: placed, touched, dropped } = moveEdits(parsed, sel, dx, dy, isShadowOnlySlot);
+    if (dropped > 0) {
+      // moveEdits is all-or-nothing: any destination off-map refuses the
+      // whole nudge (edits is already empty) rather than partially moving.
+      log?.append({ severity: "warn", message: "Can't nudge — the destination is off the map." });
+      return;
+    }
+    await applyStroke(`Nudge ${sel.length} sprite${sel.length === 1 ? "" : "s"} (${dx},${dy})`, edits, touched, placed, "Nudge rejected by the backend");
+  }
+
+  function copySelection(): SpriteGroup | null {
+    const sel = selectionRef.current;
+    if (!renderer || sel.length === 0) return null;
+    const name = datPath.split(/[\\/]/).pop() ?? "sector";
+    const grp = sliceGroup(renderer.getParsed(), sel, tileset, name, isShadowOnlySlot);
+    if (!grp) { log?.append({ severity: "warn", message: "Nothing copyable in the selection." }); return null; }
+    setSpriteClipboard(grp);
+    log?.append({ severity: "info", message: `Copied ${grp.items.length} sprite(s) (${grp.w}×${grp.h}).` });
+    return grp;
+  }
+  async function cutSelection() { if (copySelection()) await deleteSelection(); }
+  function pasteClipboard() {
+    if (!spriteClipboard) { log?.append({ severity: "warn", message: "Sprite clipboard is empty — select sprites and Ctrl+C first." }); return; }
+    if (spriteClipboard.sourceTileset !== tileset) { log?.append({ severity: "error", message: `Cross-tileset paste isn't supported (clipboard tileset ${spriteClipboard.sourceTileset} → ${tileset}).` }); return; }
+    armGroup(spriteClipboard, `${spriteClipboard.items.length} sprites (paste)`);
+  }
+  /** N: recall a control group — arm its brush or sprite group; an empty
+   * slot just tells the user how to fill it. */
+  function recallGroup(i: number) {
+    const g = controlGroupsRef.current[i];
+    if (!g) {
+      log?.append({ severity: "warn", message: `Group ${i + 1} is empty — Ctrl+${i + 1} saves.` });
+      return;
+    }
+    if (g.kind === "brush") armBrush(g.brush);
+    else armGroup(g.group, `group ${i + 1}`);
+  }
+  /** Ctrl+N: save whatever is armed (brush, then ghost), else the current
+   * selection sliced fresh, into that control group slot. */
+  function saveGroup(i: number) {
+    if (activeBrush) {
+      setControlGroup(i, { kind: "brush", brush: activeBrush });
+      log?.append({ severity: "info", message: `Group ${i + 1} saved (brush).` });
+      return;
+    }
+    if (placingBuilding?.group) {
+      setControlGroup(i, { kind: "group", group: placingBuilding.group });
+      log?.append({ severity: "info", message: `Group ${i + 1} saved (${placingBuilding.group.items.length} sprites).` });
+      return;
+    }
+    const sel = selectionRef.current;
+    if (sel.length > 0 && renderer) {
+      const name = datPath.split(/[\\/]/).pop() ?? "sector";
+      const grp = sliceGroup(renderer.getParsed(), sel, tileset, name, isShadowOnlySlot);
+      if (grp) {
+        setControlGroup(i, { kind: "group", group: grp });
+        log?.append({ severity: "info", message: `Group ${i + 1} saved (${grp.items.length} sprites).` });
+        return;
+      }
+    }
+    log?.append({ severity: "warn", message: "Nothing to save — arm a brush/ghost or select sprites first." });
+  }
+  /** Esc / right-click: queue → line-drag → paste-mode → armed ghost →
+   * brush/payload → selection (one level per press). */
+  function cancelOneLevel() {
+    // The placement queue drops FIRST — it's the most
+    // transient in-flight state, and Esc must never disarm the whole
+    // ghost (losing the queue with it) while it's mid-build.
+    if (queue.length > 0) { setQueue([]); return; }
+    // Cancel just the in-progress LINE, not the fence ghost it
+    // belongs to — one more Esc then drops the ghost via the level below.
+    if (lineAnchor) { setLineAnchor(null); return; }
+    // Fix-round-1b finding: region paste IS reachable in mode-less (via
+    // the SelectOptions strip whenever a marquee exists), so Escape must
+    // still cancel it — before the ghost level.
+    if (pasteMode) { setPasteMode(false); return; }
+    if (placingBuilding) { setPlacingBuilding(null); return; }
+    if (activeBrush || payload !== "tiles" || oneShotShape) { setActiveBrush(null); setPayload("tiles"); setOneShotShape(null); return; }
+    if (selectionRef.current.length > 0) { setSelection([]); return; }
+  }
+  /** R / Shift+R: cycle the armed single-sprite ghost's sub, else the single selected sprite's sub (a move-in-place edit). */
+  async function cycleArmedOrSelected(dir: 1 | -1) {
+    if (!renderer) return;
+    if (placingBuilding?.group && placingBuilding.group.items.length === 1) {
+      const it = placingBuilding.group.items[0]!;
+      // Review finding #2: getSlotInfo().subCount is a dense MAX — a
+      // slot can have gaps (sub 2 missing between 1 and 3). Step through
+      // listValidSubs (sparse-aware) so a cycle never lands on a hole.
+      const subs = renderer.listValidSubs(it.slot);
+      armGroup({ ...placingBuilding.group, items: [{ ...it, sub: stepValidSub(subs, it.sub, dir) }] }, placingBuilding.label);
+      return;
+    }
+    const sel = selectionRef.current;
+    if (sel.length !== 1 || !session || session.read_only) return;
+    const r = sel[0]!;
+    const parsed = renderer.getParsed();
+    const del = deleteEdits(parsed, [r]);
+    if (del.edits.length === 0) {
+      // Review finding #3: stale selection (already removed by an undo).
+      log?.append({ severity: "warn", message: "Selection is stale (already removed) — cleared." });
+      setSelection([]);
+      return;
+    }
+    const subs = renderer.listValidSubs(r.slot);
+    const next = { ...r, sub: stepValidSub(subs, r.sub, dir) };
+    const edits: SessionEdit[] = [...del.edits, { x: r.x, y: r.y, op: "place", layer: r.layer, slot: r.slot, sub: next.sub }];
+    // The explicit-shadow sub rides along only if the shadow was carried
+    // by deleteEdits (Estoni-style slot+1 shadow on the same tile).
+    if (del.edits.some((e) => e.layer === "shadows")) {
+      edits.push({ x: r.x, y: r.y, op: "place", layer: "shadows", slot: r.slot + 1, sub: next.sub });
+    }
+    await applyStroke(`Cycle s${r.slot}.${r.sub}→${next.sub}`, edits, del.touched, [next], "Cycle rejected by the backend");
+  }
+
   function onCanvasMouseUp() {
+    // Fence line-drag commit — checked
+    // FIRST since a fence line and a grabbed-sprite move (below) can
+    // never both be in flight. `lineDrag` is null exactly when the drag
+    // never moved off its anchor tile (or `hovered` went null) — that
+    // degenerates to the normal single-place `run()`, same as a plain
+    // click on a non-fence ghost. Always clears the anchor, win or lose.
+    if (lineAnchor) {
+      const anchor = lineAnchor;
+      const drag = lineDrag;
+      setLineAnchor(null);
+      if (drag && placingBuilding && renderer) {
+        if (worstOf(lineVerdicts) === "blocking") {
+          const why = lineVerdicts.find((t) => t.tier === "blocking");
+          log?.append({ severity: "warn", message: `Can't place fence line — ${why?.detail ?? why?.test ?? "blocked"}.` });
+          return;
+        }
+        const parsed = renderer.getParsed();
+        const { edits, placed, dropped } = groupPasteEdits(drag.group, drag.anchor, parsed.cols, parsed.rows);
+        if (edits.length === 0) { log?.append({ severity: "warn", message: "Nothing placed — off the map." }); return; }
+        if (dropped) log?.append({ severity: "warn", message: `${dropped} fence tile(s) fell off the map and were skipped.` });
+        const touched = edits.map((ed) => ({ x: ed.x, y: ed.y, layer: ed.layer! }));
+        // Busy-gate like the normal stamp path: hides the single-tile
+        // ghost that would otherwise reappear at the line's end tile
+        // (now `hovered`) and double-draw over the just-committed fence
+        // for the round-trip window.
+        setPlacementStampBusy(true);
+        void applyStroke(`Fence line (${placed.length} tiles)`, edits, touched, placed, "Fence line rejected by the backend")
+          .finally(() => setPlacementStampBusy(false));
+      } else if (placingBuilding) {
+        const r = placingBuilding.run(anchor.x, anchor.y);
+        if (r instanceof Promise) {
+          setPlacementStampBusy(true);
+          void r.finally(() => setPlacementStampBusy(false));
+        }
+      }
+      return;
+    }
+    // Drop a grabbed sprite (Shift+drag from inspect). Releasing on the
+    // source tile is a no-op cancel.
+    if (moveRef.current) {
+      const { hit } = moveRef.current;
+      moveRef.current = null;
+      setMoving(false);
+      const to = hovered;
+      if (to && (to.x !== hit.x || to.y !== hit.y)) {
+        // Shift+drag move is validity-
+        // checked too, same as the keyboard nudge. `moveEntry`'s own
+        // body is the co-tenant lane's code and stays untouched — the
+        // check lives here, at the drop, gating whether it gets called.
+        if (modeless && renderer) {
+          const moved = { ...hit, x: to.x, y: to.y };
+          const v = localCheck(renderer.getParsed(), placementTables, occupancy,
+            [moved], (s) => renderer.getFootprint(s), new Set([refKey(hit)]));
+          if (worstOf(v) === "blocking") {
+            const why = v.find((t) => t.tier === "blocking");
+            log?.append({ severity: "warn", message: `Can't move there — ${why?.detail ?? why?.test ?? "blocked"}.` });
+            return;
+          }
+        }
+        void moveEntry(hit, to);
+      }
+      return;
+    }
     // Region pick: releasing a drag over a DIFFERENT tile completes the
     // region. Releasing on the anchor tile keeps the picker armed, so
     // click-then-click still works for precision picks.
@@ -3056,9 +4429,43 @@ function MapForgeSectorInner() {
     }
     // Finalize a selection drag released over the canvas → committed rect
     // (the Copy button slices this). Releases off-canvas are cancelled by
-    // onMouseUpDrag below.
+    // onMouseUpDrag below. Mode-less additionally does the sprite marquee.
     if (tool === "select" && selectAnchor) {
-      setSelectRect({ a: selectAnchor, b: selectCursor ?? selectAnchor });
+      const b = selectCursor ?? selectAnchor;
+      const dragged = b.x !== selectAnchor.x || b.y !== selectAnchor.y;
+      if (modeless) {
+        if (dragged && renderer && renderMeta) {
+          // Marquee over sprites: the screen-space bbox of an iso tile
+          // rect is bounded by all FOUR corner tiles, not just the two
+          // drag endpoints (e.g. dragging north→south the screen-LEFT
+          // extreme is the rect's (x0,y1) tile, owned by neither
+          // endpoint) — union all four corner tiles' diamond corners.
+          const x0 = Math.min(selectAnchor.x, b.x); const x1 = Math.max(selectAnchor.x, b.x);
+          const y0 = Math.min(selectAnchor.y, b.y); const y1 = Math.max(selectAnchor.y, b.y);
+          const corners = [
+            ...tileDiamondCorners(x0, y0, renderMeta),
+            ...tileDiamondCorners(x1, y0, renderMeta),
+            ...tileDiamondCorners(x0, y1, renderMeta),
+            ...tileDiamondCorners(x1, y1, renderMeta),
+          ];
+          const xs = corners.map((c) => c[0]); const ys = corners.map((c) => c[1]);
+          const rect = { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+          // The rect is the axis-aligned canvas bbox of the tile rect —
+          // roughly 2× the drawn iso parallelogram — so spritesInRect
+          // over-selects. Filter to hits whose ANCHOR tile actually
+          // falls inside the dragged tile rect (review finding #1).
+          const hits = renderer.spritesInRect(rect, renderMeta)
+            .filter((h) => h.x >= x0 && h.x <= x1 && h.y >= y0 && h.y <= y1);
+          setSelection(hits.map((h) => ({ x: h.x, y: h.y, layer: h.layer, slot: h.slot, sub: h.sub })));
+          setSelectRect({ a: selectAnchor, b });      // region tools (terrain Copy) still work
+        }
+        // A clean click (no drag) is handled entirely by onCanvasClick's
+        // sprite pick — no selectRect / selection change here. A one-tile
+        // mouse jitter on what the user meant as a click still counts as
+        // `dragged` and yields a spurious 2-tile marquee; acceptable.
+      } else {
+        setSelectRect({ a: selectAnchor, b });
+      }
       setSelectAnchor(null);
       setSelectCursor(null);
     }
@@ -3070,26 +4477,35 @@ function MapForgeSectorInner() {
    * applyTileEdits wrapped in begin/endStroke so Ctrl+Z reverts the whole
    * shape. (applyTileEdits' snapshot+local work is synchronous, so calling
    * endStroke right after — without awaiting the backend — is safe.) */
-  function commitShape(anchor: Tile, cursor: Tile) {
+  async function commitShape(anchor: Tile, cursor: Tile) {
     if (!session || session.read_only || !renderer) return;
+    // Consume the one-shot arm the moment a commit is attempted (spec
+    // D8's command-card verbs — wired in a later phase; `oneShotShape`
+    // is always null in P1, so this is a no-op today).
+    setOneShotShape(null);
+    const effectiveShape = oneShotShape ?? shapeKind;
     const cols = info.data?.cols ?? 0;
     const rows = info.data?.rows ?? 0;
-    const tiles = shapeTiles(shapeKind, anchor, cursor).filter(
+    const tiles = shapeTiles(effectiveShape, anchor, cursor).filter(
       (t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows,
     );
     if (tiles.length === 0) return;
     // Soft guard for huge fills — one cheap confirm, not a hard block.
     if (
       tiles.length > 2000
-      && !window.confirm(`This shape covers ${tiles.length} tiles. Apply?`)
+      && !(await confirm({
+        title: "Apply large shape?",
+        body: `This shape covers ${tiles.length} tiles. Apply?`,
+        confirmLabel: "Apply",
+      }))
     ) {
       return;
     }
     // The shape kind picked the REGION; the active payload decides what to
     // do with it (place / erase / height / room).
-    const region = shapeKind === "line"
+    const region = effectiveShape === "line"
       ? "Line"
-      : shapeKind === "rect-outline"
+      : effectiveShape === "rect-outline"
         ? "Outline"
         : "Fill";
     applyPayloadBatch(tiles, region);
@@ -3173,10 +4589,13 @@ function MapForgeSectorInner() {
       // replaces every layer of every target tile).
       if (
         targetTiles > 500
-        && !window.confirm(
-          `Paste over ${targetTiles} tiles? This replaces their current `
-          + `terrain, objects, structures, rooms and heights.`,
-        )
+        && !(await confirm({
+          title: "Paste over tiles?",
+          body: `Paste over ${targetTiles} tiles? This replaces their current `
+            + `terrain, objects, structures, rooms and heights.`,
+          confirmLabel: "Paste",
+          destructive: true,
+        }))
       ) {
         return;
       }
@@ -3306,10 +4725,13 @@ function MapForgeSectorInner() {
     const nTiles = (x1 - x0 + 1) * (y1 - y0 + 1);
     if (
       nTiles > 500
-      && !window.confirm(
-        `Clear ${nTiles} tiles? This removes their terrain, objects, `
-        + "structures, rooms and heights.",
-      )
+      && !(await confirm({
+        title: "Clear tiles?",
+        body: `Clear ${nTiles} tiles? This removes their terrain, objects, `
+          + "structures, rooms and heights.",
+        confirmLabel: "Clear",
+        destructive: true,
+      }))
     ) return;
     const edits: SessionEdit[] = [];
     for (let y = y0; y <= y1; y++) {
@@ -3384,7 +4806,7 @@ function MapForgeSectorInner() {
    * same-top-slot tiles on the brush's target layer, and fill them all with
    * the active brush (same `place` op as rect-fill) in ONE undoable stroke.
    * Capped for safety; confirms on big fills. */
-  function doFloodFill(seed: Tile) {
+  async function doFloodFill(seed: Tile) {
     if (!session || session.read_only || !renderer) return;
     if (payload === "tiles" && !activeBrush) return;
     const parsed = renderer.getParsed();
@@ -3424,7 +4846,11 @@ function MapForgeSectorInner() {
     if (region.length === 0) return;
     if (
       region.length > 2000
-      && !window.confirm(`Flood-fill ${region.length} tiles?`)
+      && !(await confirm({
+        title: "Flood-fill?",
+        body: `Flood-fill ${region.length} tiles?`,
+        confirmLabel: "Fill",
+      }))
     ) return;
     applyPayloadBatch(region, "Fill");
     log?.append({ severity: "info", message: `Flood-filled ${region.length} tiles.` });
@@ -3502,6 +4928,16 @@ function MapForgeSectorInner() {
    */
   function onCanvasContextMenu(e: React.MouseEvent<HTMLCanvasElement>) {
     e.preventDefault();
+    // Mode-less: right-click cancels/disarms whatever's armed
+    // (ghost / brush / payload / one-shot shape) instead of eyedropping.
+    // Plain right-click with NOTHING armed still falls through to the
+    // eyedropper below, unchanged. `!e.altKey` keeps this from shadowing
+    // Alt+right-click's sub-cycle just below — cancel must not win over
+    // cycling the very brush it would otherwise disarm.
+    if (modeless && !e.altKey && (placingBuilding || activeBrush || payload !== "tiles" || oneShotShape)) {
+      cancelOneLevel();
+      return;
+    }
     // Alt+right-click cycles the active brush's sub-frame (Shift+Alt
     // reverses). Per SUBFRAME_SWITCH_UX option E.
     // CRITICAL: branch on altKey BEFORE anything else so plain right-
@@ -3575,28 +5011,18 @@ function MapForgeSectorInner() {
   }
 
   // ─── Save action (used by hotkey + the SaveButton) ─────────────────
-  // SaveButton owns its own state (busy spinner, last-saved info) so
-  // we duplicate the bare-minimum save call here for the hotkey.
-  // Both go through the same backend POST + atlas-reload-isn't-needed
-  // path.
+  // Both go through saveSessionWithExternalRetry (the single owner of
+  // the 409 EXTERNAL_MODIFICATION retry contract); the hotkey only adds
+  // its own dirty-tracking updates on success.
+  const externalOverrideRef = useRef(false);
   const saveFromHotkey = async () => {
     if (!session || session.read_only || !localDirty) return;
-    try {
-      const res = await saveSession(session.session_id);
-      setSession(res.session);
+    const out = await saveSessionWithExternalRetry(
+      session.session_id, externalOverrideRef, log);
+    if (out.ok) {
+      setSession(out.res.session);
       setSavedAtDepth(undoDepth);
       setSavedAtGen(renderer ? renderer.generation() : histGen);
-      log?.append({
-        severity: "success",
-        message: `Saved ${(res.bytes_written / 1024).toFixed(1)} KB to disk`,
-        detail: res.backup_path ? `backup: ${res.backup_path}` : undefined,
-      });
-    } catch (e) {
-      log?.append({
-        severity: "error",
-        message: "Save failed",
-        detail: e instanceof Error ? e.message : String(e),
-      });
     }
   };
 
@@ -3616,22 +5042,29 @@ function MapForgeSectorInner() {
   // path collision unless the user confirms an overwrite.
   const createNewSector = async () => {
     if (localDirty) {
-      const ok = window.confirm(
-        "You have unsaved edits in this sector. Creating a new sector "
-        + "navigates away and discards them.\n\n"
-        + "OK = discard + create. Cancel = stay so you can Save first.",
-      );
+      const ok = await confirm({
+        title: "Discard unsaved edits?",
+        body: "You have unsaved edits in this sector. Creating a new sector "
+          + "navigates away and discards them. Save first if you want to keep them.",
+        confirmLabel: "Discard and create",
+        cancelLabel: "Cancel",
+        destructive: true,
+      });
       if (!ok) return;
     }
-    const dest = window.prompt(
-      "New sector — full path for the new .dat file:",
-      siblingDatPath("NEW.dat"),
-    );
+    const dest = await prompt({
+      title: "New sector",
+      label: "Full path for the new .dat file:",
+      defaultValue: siblingDatPath("NEW.dat"),
+    });
     if (!dest) return;
-    const tsRaw = window.prompt(
-      "Tileset index for the new sector (number):",
-      String(tileset || 0),
-    );
+    const tsRaw = await prompt({
+      title: "New sector",
+      label: "Tileset index for the new sector (number):",
+      defaultValue: String(tileset || 0),
+      validate: (s) => (Number.isFinite(parseInt(s, 10)) && parseInt(s, 10) >= 0
+        ? null : "Enter a non-negative tileset number."),
+    });
     if (tsRaw === null) return;
     const ts = parseInt(tsRaw, 10);
     if (Number.isNaN(ts) || ts < 0) {
@@ -3654,10 +5087,13 @@ function MapForgeSectorInner() {
       // The backend signals a collision with a 409 FILE_EXISTS — offer
       // an explicit overwrite confirmation rather than silently clobbering.
       if (msg.includes("FILE_EXISTS")) {
-        const ok = window.confirm(
-          `${dest} already exists. Overwrite it with a fresh empty sector? `
-          + "This destroys the existing map.",
-        );
+        const ok = await confirm({
+          title: "Overwrite existing map?",
+          body: `${dest} already exists. Overwrite it with a fresh empty sector? `
+            + "This destroys the existing map.",
+          confirmLabel: "Overwrite",
+          destructive: true,
+        });
         if (!ok) return;
         try {
           await newSector(dest, ts, { overwrite: true });
@@ -3688,10 +5124,11 @@ function MapForgeSectorInner() {
       log?.append({ severity: "warn", message: "No session open." });
       return;
     }
-    const dest = window.prompt(
-      "Save a copy as — full path for the new .dat file:",
-      siblingDatPath(`${(datPath.split(/[\\/]/).pop() ?? "sector").replace(/\.dat$/i, "")}_copy.dat`),
-    );
+    const dest = await prompt({
+      title: "Save a copy as",
+      label: "Full path for the new .dat file:",
+      defaultValue: siblingDatPath(`${(datPath.split(/[\\/]/).pop() ?? "sector").replace(/\.dat$/i, "")}_copy.dat`),
+    });
     if (!dest) return;
     const doCopy = async (overwrite: boolean) => {
       const res = await saveCopyAs(session.session_id, dest, { overwrite });
@@ -3705,7 +5142,12 @@ function MapForgeSectorInner() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("FILE_EXISTS")) {
-        const ok = window.confirm(`${dest} already exists. Overwrite it?`);
+        const ok = await confirm({
+          title: "Overwrite existing file?",
+          body: `${dest} already exists. Overwrite it?`,
+          confirmLabel: "Overwrite",
+          destructive: true,
+        });
         if (!ok) return;
         try {
           await doCopy(true);
@@ -3948,16 +5390,52 @@ function MapForgeSectorInner() {
         setShowHelp((h) => !h);
         return;
       }
-      // Number keys 1-9 arm the matching Favorites brush (Brush Box
-      // favorites row). Special-cased here rather than as 9 rebindable
-      // registry actions; skipped with any modifier so Ctrl+1 etc. stay
-      // free for the browser. 0 is left to the reset-view binding.
-      if (/^[1-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        const fav = favoritesRef.current[Number(e.key) - 1];
-        if (fav) {
-          e.preventDefault();
-          armBrush(fav);
+      // Skip every remaining shortcut — including the digit-based
+      // control-group blocks below — while a dialog is open (Settings, a
+      // confirm modal, …). Moved ahead of those blocks (was originally
+      // only checked after the combo/actionForBinding lookup further
+      // down): a plain "1" or "Ctrl+1" used to recall/save a control
+      // group right through an open dialog since neither block ever
+      // reached the old, later check.
+      if (document.querySelector("[data-app-dialog]")) return;
+      // WASD pans the map (camera scroll). Plain keys only — no modifier —
+      // so Ctrl/Shift/Alt combos stay free; the input/textarea/select and
+      // dialog guards above already exclude typing contexts. Held keys
+      // repeat via OS key-repeat → continuous scroll. `a` intentionally
+      // shadows the asset-browser hotkey (WASD was the explicit ask); the
+      // asset browser stays reachable from its toolbar button.
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const PAN_STEP = 64;
+        let dx = 0, dy = 0;
+        switch (e.key.toLowerCase()) {
+          case "w": dy = PAN_STEP; break;   // reveal content above
+          case "s": dy = -PAN_STEP; break;  // reveal content below
+          case "a": dx = PAN_STEP; break;   // reveal content left
+          case "d": dx = -PAN_STEP; break;  // reveal content right
         }
+        if (dx || dy) {
+          e.preventDefault();
+          setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
+          return;
+        }
+      }
+      // Number keys 1-9 recall a control group (a StarCraft-style brush
+      // or sprite-group slot). Special-cased here rather
+      // than as 9 rebindable registry actions; skipped with any modifier
+      // so Ctrl+1 etc. stay free for Ctrl+N save below. 0 is left to the
+      // reset-view binding.
+      if (/^[1-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        recallGroup(Number(e.key) - 1);
+        return;
+      }
+      // Ctrl+1-9 saves the armed brush/ghost, or the current selection,
+      // into that control group slot. Checked BEFORE the combo lookup so
+      // preventDefault fires before the browser's own Ctrl+<digit> tab
+      // switch ever sees the key.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && /^[1-9]$/.test(e.key)) {
+        e.preventDefault();
+        saveGroup(Number(e.key) - 1);
         return;
       }
       // Encode the event into our canonical combo format + look up.
@@ -3973,6 +5451,38 @@ function MapForgeSectorInner() {
       })();
       const action: MapForgeActionId | undefined = actionForBinding(settings, combo);
       if (!action) return;
+      // Mode-less-only actions: NEVER swallow their
+      // key (no preventDefault, no dispatch) when settings.legacyTools is
+      // on — otherwise Ctrl+C/X/V, Delete, arrows and Escape would eat
+      // the user's normal page behaviour for actions that can't fire.
+      if (!modelessRef.current && MODELESS_ONLY_ACTIONS.has(action)) return;
+      // Within mode-less, a no-op for the current state is also NOT
+      // claimed — don't swallow a key for an action that can't act.
+      // Ghost-anchor nudging is deferred (arrows only ever nudge a
+      // SELECTION today), so the nudge guard no longer exempts an armed
+      // ghost (review finding #8).
+      if (action.startsWith("nudge-") && selectionRef.current.length === 0) return;
+      if (action === "sel-delete" && selectionRef.current.length === 0) return;
+      if ((action === "sel-copy" || action === "sel-cut") && selectionRef.current.length === 0) return;
+      if (action === "sel-paste" && !spriteClipboard) return;
+      // Nothing for `cancel` to actually do (mirrors cancelOneLevel's own
+      // checks) — don't swallow the keystroke's default behaviour for a no-op.
+      if (
+        action === "cancel"
+        && queue.length === 0 && !lineAnchor && !pasteMode && !placingBuilding
+        && !activeBrush && payload === "tiles" && !oneShotShape
+        && selectionRef.current.length === 0
+      ) return;
+      // R/Shift+R only ever act on a single-item ghost or a single selected
+      // sprite with an editable session (cycleArmedOrSelected's own no-op
+      // conditions: no renderer at all is an unconditional no-op; absent
+      // a single-item ghost, a single selection still needs a live,
+      // writable session before the cycle can do anything).
+      if (action === "sel-cycle-next" || action === "sel-cycle-prev") {
+        const singleGhost = !!(placingBuilding?.group && placingBuilding.group.items.length === 1);
+        const singleSelUsable = selectionRef.current.length === 1 && !!session && !session.read_only;
+        if (!renderer || (!singleGhost && !singleSelUsable)) return;
+      }
       e.preventDefault();
       switch (action) {
         case "undo":
@@ -3989,16 +5499,20 @@ function MapForgeSectorInner() {
           saveFromHotkey();
           break;
         case "tool-pencil":
-          if (activeBrush) setTool("pencil");
+          // Review finding #9: setTool still mutates `toolState`, which
+          // the placingBuilding-reset effect watches — an invisible
+          // (mode-less ignores toolState) mutation would silently
+          // cancel an armed ghost. No-op while mode-less.
+          if (!modelessRef.current && activeBrush) setTool("pencil");
           break;
         case "tool-inspect":
-          setTool("inspect");
+          if (!modelessRef.current) setTool("inspect");
           break;
         case "zoom-in":
           setZoom((z) => Math.min(8, z * 1.15));
           break;
         case "zoom-out":
-          setZoom((z) => Math.max(0.25, z / 1.15));
+          setZoom((z) => Math.max(minZoomRef.current, z / 1.15));
           break;
         case "reset-view":
           setZoom(1);
@@ -4027,16 +5541,91 @@ function MapForgeSectorInner() {
           // ref so this global listener needn't re-bind.
           toggleBrowseAssetsRef.current();
           break;
+        // ─── Mode-less sprite selection / clipboard / ghost ────────────
+        // Gated above (MODELESS_ONLY_ACTIONS) so these never reach here
+        // with legacyTools on.
+        case "sel-copy":
+          copySelection();
+          break;
+        case "sel-cut":
+          void cutSelection();
+          break;
+        case "sel-paste":
+          pasteClipboard();
+          break;
+        case "sel-delete":
+          void deleteSelection();
+          break;
+        case "sel-cycle-next":
+          void cycleArmedOrSelected(1);
+          break;
+        case "sel-cycle-prev":
+          void cycleArmedOrSelected(-1);
+          break;
+        case "nudge-left":
+          void nudgeSelection(-1, 0);
+          break;
+        case "nudge-right":
+          void nudgeSelection(1, 0);
+          break;
+        case "nudge-up":
+          void nudgeSelection(0, -1);
+          break;
+        case "nudge-down":
+          void nudgeSelection(0, 1);
+          break;
+        case "cancel":
+          cancelOneLevel();
+          break;
+        // ─── Payload / shape verbs (command card) — work in
+        // BOTH models: mode-less arms a payload/one-shot shape (`tool`
+        // derives to pencil/shape automatically); legacy also has to
+        // flip the explicit tool since nothing derives it there.
+        case "payload-room":
+          setPayload("room");
+          if (!modelessRef.current) setTool("pencil");
+          break;
+        case "payload-height":
+          setPayload("height");
+          if (!modelessRef.current) setTool("pencil");
+          break;
+        case "payload-erase":
+          setPayload("erase");
+          if (!modelessRef.current) setTool("pencil");
+          break;
+        case "shape-rect":
+          if (modelessRef.current) setOneShotShape("rect-fill");
+          else { setShapeKind("rect-fill"); setTool("shape"); }
+          break;
+        case "shape-line":
+          if (modelessRef.current) setOneShotShape("line");
+          else { setShapeKind("line"); setTool("shape"); }
+          break;
+        case "shape-flood":
+          if (modelessRef.current) setOneShotShape("flood");
+          else { setShapeKind("flood"); setTool("shape"); }
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // Captured-by-closure deps: settings + the various setters and
     // session state. eslint can't see the switch statement's deps
-    // statically; we list the load-bearing ones explicitly.
+    // statically; we list the load-bearing ones explicitly. `occupancy`
+    // is deliberately NOT here — nudgeSelection reads occupancyRef
+    // instead (review finding #10b), so this effect doesn't need to
+    // re-bind the whole keydown listener on every edit just to keep one
+    // number fresh. `queue`/`lineAnchor`/`pasteMode` ARE listed (alongside
+    // the already-present `oneShotShape`) — `cancelOneLevel` (bound as
+    // `onKey`'s `cancel` case, and read by the `cancel` no-op guard above)
+    // checks all of them, and a stale closure over `queue` here was
+    // letting Escape disarm the whole ghost right after a Shift+click
+    // queue instead of dropping just the queue first, as documented.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, renderer, session?.session_id, session?.read_only,
-      activeBrush, undoDepth, localDirty]);
+      activeBrush, undoDepth, localDirty,
+      selection, spriteClipboard, placingBuilding, payload, oneShotShape,
+      queue, lineAnchor, pasteMode]);
 
   // ESC cancels the rectangle corner picker. Separate from the main
   // shortcut effect so it can react instantly when the picker mounts
@@ -4069,6 +5658,10 @@ function MapForgeSectorInner() {
   // Cycle the active tool inspect → pencil → shape (wraps). Driven by the
   // bindable "wheel-cycle-tool" gesture (default = plain scroll).
   function cycleTool(dir: 1 | -1) {
+    // Review finding #9 — see the dispatcher's tool-pencil/tool-inspect
+    // cases: mutating toolState while mode-less is invisible but still
+    // trips the placingBuilding-reset effect, cancelling an armed ghost.
+    if (modelessRef.current) return;
     const order: Tool[] = ["inspect", "pencil", "shape"];
     setTool((t) => {
       const i = order.indexOf(t);
@@ -4096,7 +5689,7 @@ function MapForgeSectorInner() {
     const cx = e.clientX - container.left - container.width / 2;
     const cy = e.clientY - container.top - container.height / 2;
     setZoom((z) => {
-      const next = Math.max(0.25, Math.min(8, z * delta));
+      const next = Math.max(minZoomRef.current, Math.min(8, z * delta));
       const scale = next / z;
       setPan((p) => ({
         x: p.x + (cx - p.x) * (1 - scale),
@@ -4113,7 +5706,16 @@ function MapForgeSectorInner() {
       e.preventDefault();
       dragRef.current = {
         startX: e.clientX, startY: e.clientY,
-        panX: pan.x, panY: pan.y,
+        panX: pan.x, panY: pan.y, moved: true,
+      };
+    } else if (e.button === 0 && tool === "inspect") {
+      // Plain left-drag pans in inspect (no Alt needed). Armed as a
+      // MAYBE-pan: only becomes a pan after a 4px move threshold, so a
+      // clean click still pins the inspector (see onCanvasClick).
+      panConsumedClickRef.current = false;
+      dragRef.current = {
+        startX: e.clientX, startY: e.clientY,
+        panX: pan.x, panY: pan.y, moved: false,
       };
     }
   }
@@ -4121,6 +5723,11 @@ function MapForgeSectorInner() {
     if (!dragRef.current) return;
     const dx = e.clientX - dragRef.current.startX;
     const dy = e.clientY - dragRef.current.startY;
+    if (!dragRef.current.moved) {
+      if (Math.abs(dx) + Math.abs(dy) < 4) return;   // click jitter, not a pan yet
+      dragRef.current.moved = true;
+      panConsumedClickRef.current = true;            // suppress the pin on mouseup
+    }
     setPan({ x: dragRef.current.panX + dx, y: dragRef.current.panY + dy });
   }
   function onMouseUpDrag() {
@@ -4139,6 +5746,15 @@ function MapForgeSectorInner() {
     if (selectAnchor !== null) {
       setSelectAnchor(null);
       setSelectCursor(null);
+    }
+    // Same off-canvas-release safety net for a fence line-drag:
+    // a release outside the inner canvas element never reaches
+    // onCanvasMouseUp, so the anchor would otherwise stick armed with no
+    // way to finish the drag. DROPS the line without committing (mirrors
+    // Escape) — a release the user can already see landed off the grid
+    // isn't a tile the line should try to write to anyway.
+    if (lineAnchor !== null) {
+      setLineAnchor(null);
     }
   }
 
@@ -4206,14 +5822,18 @@ function MapForgeSectorInner() {
     }
     if (tool !== "shape" || !shapeAnchor) return null;
     const cursor = shapeCursor ?? shapeAnchor;
-    let tiles = shapeTiles(shapeKind, shapeAnchor, cursor);
+    // A command-card shape verb (Rect/Line/Flood) arms `oneShotShape`,
+    // which overrides `shapeKind` for that one drag (commitShape already
+    // honours this).
+    const effectiveShape = oneShotShape ?? shapeKind;
+    let tiles = shapeTiles(effectiveShape, shapeAnchor, cursor);
     if (tiles.length > 6000) {
       tiles = shapeTiles("rect-outline", shapeAnchor, cursor);
     }
     return tiles.filter(
       (t) => t.x >= 0 && t.y >= 0 && t.x < cols && t.y < rows,
     );
-  }, [tool, shapeAnchor, shapeCursor, shapeKind, info.data,
+  }, [tool, shapeAnchor, shapeCursor, shapeKind, oneShotShape, info.data,
       selectAnchor, selectCursor, selectRect, pasteMode, clipboard, hovered,
       pickingRect, placingBuilding]);
 
@@ -4252,22 +5872,85 @@ function MapForgeSectorInner() {
     }
     if (tool !== "shape" || !shapeAnchor) return null;
     const cursor = shapeCursor ?? shapeAnchor;
+    // See previewTiles above — a card-armed one-shot shape overrides
+    // `shapeKind` for the readout too.
+    const effectiveShape = oneShotShape ?? shapeKind;
     const w = Math.abs(cursor.x - shapeAnchor.x) + 1;
     const h = Math.abs(cursor.y - shapeAnchor.y) + 1;
     let count: number;
-    if (shapeKind === "line") count = Math.max(w, h);
-    else if (shapeKind === "rect-outline") {
+    if (effectiveShape === "line") count = Math.max(w, h);
+    else if (effectiveShape === "rect-outline") {
       count = w === 1 || h === 1 ? w * h : 2 * (w + h) - 4;
-    } else if (shapeKind === "rect-fill") {
+    } else if (effectiveShape === "rect-fill") {
       count = w * h;
     } else {
       // diamond / cross / triangle / hexagon — exact count from the geometry
-      count = shapeTiles(shapeKind, shapeAnchor, cursor).length;
+      count = shapeTiles(effectiveShape, shapeAnchor, cursor).length;
     }
     return { w, h, count, label: "Shape" };
-  }, [tool, shapeAnchor, shapeCursor, shapeKind,
+  }, [tool, shapeAnchor, shapeCursor, shapeKind, oneShotShape,
       selectAnchor, selectCursor, selectRect, pasteMode, clipboard,
       pickingRect, hovered, placingBuilding]);
+
+  // ─── Command card ────────────────────────────────────────────────────
+  // Cells for the current mode-less state (ghost > brush > selection >
+  // nothing — cardCellsFor's own precedence). Handlers are the SAME
+  // functions the hotkey dispatcher above calls, so click and keypress
+  // are one code path (mounted below, in renderCanvasPanel).
+  const cardCells = useMemo(
+    () => cardCellsFor(
+      {
+        selectionCount: selection.length,
+        ghost: !!placingBuilding?.group,
+        brush: !!activeBrush,
+        payload,
+        clipboard: !!spriteClipboard,
+        readOnly: session?.read_only ?? false,
+      },
+      (id) => bindingFor(settings, id),
+      {
+        "sel-copy": () => { copySelection(); },
+        "sel-cut": () => { void cutSelection(); },
+        "sel-delete": () => { void deleteSelection(); },
+        "sel-cycle-next": () => { void cycleArmedOrSelected(1); },
+        "sel-paste": pasteClipboard,
+        cancel: cancelOneLevel,
+        "payload-room": () => setPayload("room"),
+        "payload-height": () => setPayload("height"),
+        "payload-erase": () => setPayload("erase"),
+        "shape-rect": () => setOneShotShape("rect-fill"),
+        "shape-line": () => setOneShotShape("line"),
+        "shape-flood": () => setOneShotShape("flood"),
+        place: () => log?.append({ severity: "info", message: "Click the map to place." }),
+        queue: () => log?.append({ severity: "info", message: "Shift+click a tile to queue it; plain click builds the queue." }),
+        radius: () => log?.append({
+          severity: "info",
+          message: `Radius ${brushRadius} — ${bindingFor(settings, "brush-size-up")} grow · `
+                  + `${bindingFor(settings, "brush-size-down")} shrink.`,
+        }),
+        "nudge-help": () => log?.append({ severity: "info", message: "Arrow keys nudge the selection 1 tile." }),
+        "save-group-help": () => log?.append({
+          severity: "info",
+          message: "Ctrl+1..9 saves the armed brush/ghost, or the selection, to that group.",
+        }),
+      },
+    ),
+    // Handler closures (copySelection etc.) are plain `function`s re-
+    // created every render, not useCallback, so listing every one of
+    // them would make this memo recompute every render anyway — same
+    // tradeoff the keydown dispatcher effect above accepts. `renderer`
+    // and `session?.session_id` ARE listed despite that, because they're
+    // exactly what those closures capture that no ref mirrors (a stale
+    // one would point deleteSelection/copySelection/pasteClipboard at a
+    // dead session after a reopen) — same two the dispatcher effect
+    // lists for the same reason. `queue`/`lineAnchor`/`pasteMode`/
+    // `oneShotShape` are listed too — `cancelOneLevel` (the `cancel`
+    // cell) reads all four.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selection.length, placingBuilding, activeBrush, payload, spriteClipboard,
+     session?.read_only, session?.session_id, renderer, settings, brushRadius,
+     queue, lineAnchor, pasteMode, oneShotShape],
+  );
 
   // ─── Height overlay ─────────────────────────────────────────────────
   // Per-tile heights are invisible in the iso render (neither renderer
@@ -4306,7 +5989,7 @@ function MapForgeSectorInner() {
   // Each returns the content for one dockview panel (via MapForgeDock),
   // closing over editor state so no props/context-shape threading is
   // needed. These are COPIES of the fixed-layout JSX (the fixed grid
-  // below is left untouched as the safe fallback); Phase 3 will retire
+  // below is left untouched as the safe fallback); a later change retires
   // the fixed layout and dedupe. The canvas copy fills its panel
   // (h-full) instead of the fixed layout's 70vh.
   // Brush Box (dock panel "assets") = the consolidated picker (R3): the
@@ -4327,7 +6010,8 @@ function MapForgeSectorInner() {
             activeBrush={activeBrush}
             recentBrushes={recentBrushes}
             recentAdditions={recentAdditions}
-            favorites={favorites}
+            controlGroups={controlGroups}
+            onRecallGroup={recallGroup}
             onToggleFavorite={toggleFavorite}
             onPick={(b) => {
               armBrush(b);
@@ -4351,13 +6035,15 @@ function MapForgeSectorInner() {
                        + `· slot ${a.slot} sub 0 (just-added)`,
               });
             }}
-            onOpenInTilesetEditor={(a) => {
+            onOpenInTilesetEditor={async (a) => {
               if (localDirty) {
-                const ok = window.confirm(
-                  "You have unsaved edits in this sector. Open Tileset "
-                  + "Editor anyway and discard them?\n\n"
-                  + "OK = discard + go. Cancel = stay here so you can Save first."
-                );
+                const ok = await confirm({
+                  title: "Discard unsaved edits?",
+                  body: "You have unsaved edits in this sector. Open the Tileset "
+                    + "Editor anyway and discard them? Save first if you want to keep them.",
+                  confirmLabel: "Discard and go",
+                  destructive: true,
+                });
                 if (!ok) return;
               }
               navigate(`/tileset-editor/${a.tileset}?slot=${a.slot}`);
@@ -4447,9 +6133,19 @@ function MapForgeSectorInner() {
       {!pickingRect && !pickingPoint && placingBuilding && (
         <div className="absolute inset-x-0 top-0 z-30 flex items-center justify-between bg-sky-800/95 text-sky-50 px-3 py-2 text-sm border-b border-sky-500 shadow-md pointer-events-none">
           <span>
-            Placing {placingBuilding.w}×{placingBuilding.h} building
-            ({placingBuilding.label}) — click to stamp, click again for
-            another (each gets its own room)
+            {placingBuilding.group ? (
+              <>
+                Placing {placingBuilding.label} — click = place · Shift+click = queue
+                · R = cycle · Esc/RMB = cancel
+                {queue.length > 0 ? ` · ${queue.length} queued` : ""}
+              </>
+            ) : (
+              <>
+                Placing {placingBuilding.w}×{placingBuilding.h} building
+                ({placingBuilding.label}) — click to stamp, click again for
+                another (each gets its own room)
+              </>
+            )}
           </span>
           <span className="text-xs text-sky-200">ESC to cancel</span>
         </div>
@@ -4512,7 +6208,30 @@ function MapForgeSectorInner() {
             cursor: dragRef.current ? "grabbing" : "default",
           }}
         >
-          <div className="relative" style={{ width: renderMeta.canvasW, height: renderMeta.canvasH }}>
+          <div
+            className="relative"
+            style={{
+              // Frame keeps FULL-map dims even in detail mode so the
+              // transform's -50% centering + pan math never shift when
+              // the region canvas swaps in.
+              width: (selectedRoom === null && detailBbox && fullMetaRef.current ? fullMetaRef.current : renderMeta).canvasW,
+              height: (selectedRoom === null && detailBbox && fullMetaRef.current ? fullMetaRef.current : renderMeta).canvasH,
+            }}
+          >
+          <div
+            className="absolute"
+            style={{
+              // Detail mode: place the region canvas where the full map
+              // would have put those tiles (meta origins differ by the
+              // region's iso offset). Full mode: (0,0), full size.
+              left: selectedRoom === null && detailBbox && fullMetaRef.current
+                ? renderMeta.ixMin - fullMetaRef.current.ixMin : 0,
+              top: selectedRoom === null && detailBbox && fullMetaRef.current
+                ? renderMeta.iyMin - fullMetaRef.current.iyMin : 0,
+              width: renderMeta.canvasW,
+              height: renderMeta.canvasH,
+            }}
+          >
             {/* Stacking inside this wrapper (explicit z-indexes):
                   z-0  main canvas (sector render)
                   z-10 SVG overlay (grid / footprint outline / markers)
@@ -4521,9 +6240,22 @@ function MapForgeSectorInner() {
                 All three share the wrapper's CSS pan/zoom transform. */}
             <canvas
               ref={canvasRef}
-              className="relative z-0 block cursor-crosshair select-none"
+              className={"relative z-0 block select-none " + (moving ? "cursor-grabbing" : "cursor-crosshair")}
               style={{
-                imageRendering: "pixelated",
+                // Bigmaps rasterize into a DOWNSCALED GL buffer (Chrome's
+                // ~2^25-px drawing-buffer clamp — see IsoRendererGL). CSS
+                // then stretches it back up; nearest-neighbor upscaling of
+                // an already-downscaled raster turns fine art (chainlink,
+                // thin props) into blocky checker garbage. Use smooth
+                // interpolation whenever the buffer is below logical size;
+                // keep crisp pixelated scaling for maps that fit 1:1.
+                // Pixelated only when the buffer is 1:1 AND we are
+                // magnifying: nearest-neighbor DOWNscaling (zoom < 1) is
+                // the same wire-dropping artifact at the CSS layer.
+                imageRendering:
+                  renderMeta.canvasW * renderMeta.canvasH > 32 * 1024 * 1024
+                    || zoom < 1
+                    ? "auto" : "pixelated",
                 width: renderMeta.canvasW,
                 height: renderMeta.canvasH,
               }}
@@ -4531,7 +6263,11 @@ function MapForgeSectorInner() {
               onClick={onCanvasClick}
               onMouseMove={onCanvasMove}
               onMouseUp={onCanvasMouseUp}
-              onMouseLeave={() => setHovered(null)}
+              onMouseLeave={() => {
+                setHovered(null);
+                setSpriteHit(null);
+                spriteProbeTileRef.current = null;
+              }}
               onContextMenu={onCanvasContextMenu}
             />
             <IsoOverlay
@@ -4540,6 +6276,14 @@ function MapForgeSectorInner() {
               selectedRoom={selectedRoom}
               hovered={hovered}
               pinned={pinned}
+              spriteHit={inspectLike && !placingBuilding ? spriteHit : null}
+              spriteHitLabel={spriteHit ? propFrameLabel(
+                spriteHit.slot, spriteHit.sub, propSlots.get(spriteHit.slot),
+                renderer?.getSlotInfo(spriteHit.slot).filename,
+              ) : null}
+              verdictTiles={lineDrag ? lineVerdicts : verdicts}
+              selectionHits={selection}
+              queuedTiles={queuedTiles}
               previewTiles={previewTiles}
               showGrid={showGridForThisView}
               showRoomLabels={showRoomLabels}
@@ -4627,6 +6371,15 @@ function MapForgeSectorInner() {
               className="pointer-events-none absolute left-0 top-0 z-20"
               style={{ imageRendering: "pixelated", display: "none" }}
             />
+            {/* Placement queue overlay — every queued
+                ghost redrawn at its own anchor; unlike the single ghost
+                above this spans the whole canvas (no CSS transform, it
+                positions each entry itself). */}
+            <canvas
+              ref={queueCanvasRef}
+              className="pointer-events-none absolute left-0 top-0 z-20"
+              style={{ imageRendering: "pixelated", display: "none" }}
+            />
             {/* Brush hover ghost (R3) — the armed brush sprite at the
                 cursor; same z / pointer rules as the placement ghost. */}
             <canvas
@@ -4634,6 +6387,26 @@ function MapForgeSectorInner() {
               className="pointer-events-none absolute left-0 top-0 z-20"
               style={{ imageRendering: "pixelated", display: "none" }}
             />
+            {/* Grab-and-move ghost — the grabbed sprite at the cursor
+                while a Shift+click move is in flight; same z / pointer
+                rules as the brush hover ghost. */}
+            <canvas
+              ref={moveGhostCanvasRef}
+              className="pointer-events-none absolute left-0 top-0 z-20"
+              style={{ imageRendering: "pixelated", display: "none" }}
+            />
+            {/* Sprite-selection outline — the selected
+                sprites re-drawn full-alpha with a CSS glow filter. */}
+            <canvas
+              ref={selectionCanvasRef}
+              className="pointer-events-none absolute left-0 top-0 z-20"
+              style={{
+                imageRendering: "pixelated",
+                display: "none",
+                filter: "drop-shadow(0 0 1px rgb(80,255,120)) drop-shadow(0 0 1px rgb(80,255,120))",
+              }}
+            />
+          </div>
           </div>
         </div>
       )}
@@ -4648,6 +6421,31 @@ function MapForgeSectorInner() {
               · {previewDims.label}: {previewDims.w}×{previewDims.h} = {previewDims.count} tile{previewDims.count === 1 ? "" : "s"}
             </span>
           )}
+          {modeless && (placingBuilding || selection.length > 0) && (
+            <span className="ml-2 text-emerald-300" data-status="placement">
+              · {oracleOffline && "oracle offline · "}
+              {placingBuilding
+                ? (lineDrag
+                    ? (!lineDrag.hasTable
+                        ? "no fence topology table for this slot — straight subs"
+                        : worstOf(lineVerdicts) === "blocking"
+                          ? `✕ ${lineVerdicts.find((t) => t.tier === "blocking")?.detail ?? lineVerdicts.find((t) => t.tier === "blocking")?.test ?? "blocked"}`
+                          : `${lineDrag.lineTiles.length}-tile fence line — release to place`)
+                    : queue.length > 0
+                      ? `${queue.length} queued · click = build all · Esc = drop`
+                      : (worstOf(verdicts) === "blocking"
+                          ? `✕ ${verdicts.find((t) => t.tier === "blocking")?.detail ?? verdicts.find((t) => t.tier === "blocking")?.test ?? "blocked"}`
+                          : worstOf(verdicts) === "advisory"
+                            ? `⚠ ${verdicts.find((t) => t.tier === "advisory")?.detail ?? verdicts.find((t) => t.tier === "advisory")?.test ?? "advisory"}`
+                            : `✓ place · Shift = queue · Esc/RMB = cancel${
+                                hovered && oraclePendingAnchor
+                                  && oraclePendingAnchor.x === hovered.x && oraclePendingAnchor.y === hovered.y
+                                  && worstOf(localVerdicts) === "ok"
+                                  ? " …" : ""
+                              }`))
+                : `${selection.length} selected · C copy · X cut · Del · ←↑→↓ nudge · R cycle`}
+            </span>
+          )}
           {showGrid && !showGridForThisView && (
             <span className="ml-2 text-amber-400">
               · grid hidden ({"too many tiles for this view"})
@@ -4655,19 +6453,27 @@ function MapForgeSectorInner() {
           )}
         </span>
         <span className="text-gray-500">
-          Zoom {zoom.toFixed(2)}× · {bindingFor(settings, "wheel-cycle-tool") || "—"} = tool · {bindingFor(settings, "wheel-zoom") || "—"} = zoom · Alt+drag or middle-drag = pan
+          Zoom {zoom.toFixed(2)}× · {bindingFor(settings, "wheel-cycle-tool") || "—"} = tool · {bindingFor(settings, "wheel-zoom") || "—"} = zoom · Alt+drag or middle-drag = pan · Shift+drag sprite = move
         </span>
       </div>
+      {/* Command card — mode-less only; hidden in legacy since
+          its verbs (payload/shape arms, groups) rebind the same actions
+          the SelectOptions strip + tool bar already cover there. */}
+      {modeless && cardCells.length > 0 && (
+        <div className="absolute bottom-2 right-2 z-30">
+          <CommandCard cells={cardCells} />
+        </div>
+      )}
     </div>
   );
 
   const renderInspectorPanel = () => (
     <TileInspectorPanel
-      datPath={datPath}
       xmlPath={xmlPath}
       tileset={tileset}
       session={session}
       renderer={renderer}
+      propSlots={propSlots}
       renderEpoch={renderEpoch}
       isSlfBundled={isSlfBundled}
       cols={info.data?.cols ?? 160}
@@ -4791,14 +6597,16 @@ function MapForgeSectorInner() {
             <a
               href="/mapforge"
               className="text-sm text-blue-400 hover:underline"
-              onClick={(e) => {
+              onClick={async (e) => {
                 e.preventDefault();
                 if (localDirty) {
-                  const ok = window.confirm(
-                    "You have unsaved edits in this sector. Leave anyway "
-                    + "and discard them?\n\n"
-                    + "OK = discard + go. Cancel = stay so you can Save first."
-                  );
+                  const ok = await confirm({
+                    title: "Discard unsaved edits?",
+                    body: "You have unsaved edits in this sector. Leave anyway "
+                      + "and discard them? Save first if you want to keep them.",
+                    confirmLabel: "Discard and leave",
+                    destructive: true,
+                  });
                   if (!ok) return;
                 }
                 navigate("/mapforge");
@@ -4834,14 +6642,16 @@ function MapForgeSectorInner() {
             <a
               href="/mapforge"
               className="text-sm text-blue-400 hover:underline"
-              onClick={(e) => {
+              onClick={async (e) => {
                 e.preventDefault();
                 if (localDirty) {
-                  const ok = window.confirm(
-                    "You have unsaved edits in this sector. Leave anyway "
-                    + "and discard them?\n\n"
-                    + "OK = discard + go. Cancel = stay so you can Save first."
-                  );
+                  const ok = await confirm({
+                    title: "Discard unsaved edits?",
+                    body: "You have unsaved edits in this sector. Leave anyway "
+                      + "and discard them? Save first if you want to keep them.",
+                    confirmLabel: "Discard and leave",
+                    destructive: true,
+                  });
                   if (!ok) return;
                 }
                 navigate("/mapforge");
@@ -5076,16 +6886,19 @@ function MapForgeSectorInner() {
               ToolSelector │ BrushChip │ per-tool options │ spacer │
               layer visibility │ Grid · R# · Reset view. */}
           <div className="mb-1 flex flex-wrap items-end gap-3">
-            <ToolSelector
-              tool={tool} setTool={setTool}
-              hasBrush={activeBrush !== null}
-              payload={payload}
-            />
+            {!modeless && (
+              <ToolSelector
+                tool={tool} setTool={setTool}
+                hasBrush={activeBrush !== null}
+                payload={payload}
+              />
+            )}
             <PayloadSelector
               tool={tool}
               payload={payload}
               setPayload={setPayload}
               hasBrush={activeBrush !== null}
+              modelessNoGhost={modeless && !placingBuilding}
             />
             <BrushChip
               brush={activeBrush}
@@ -5094,6 +6907,7 @@ function MapForgeSectorInner() {
                 setActiveBrush(null);
                 log?.append({ severity: "info", message: "Brush cleared." });
               }}
+              ghostLabel={placingBuilding?.group ? placingBuilding.label : null}
             />
             <BrushOptions
               tool={tool}
@@ -5112,21 +6926,23 @@ function MapForgeSectorInner() {
               paintLayer={paintLayer}
               setPaintLayer={setPaintLayer}
             />
-            <SelectOptions
-              tool={tool}
-              hasSelection={selectRect !== null}
-              clipboard={clipboard}
-              pasteMode={pasteMode}
-              readOnly={session?.read_only ?? false}
-              activeTileset={tileset}
-              busy={editsInFlight > 0}
-              onCopy={() => void doCopy()}
-              onCut={() => void doCut()}
-              onDelete={() => void doDeleteSelection()}
-              onMove={() => void doMove()}
-              onArmPaste={() => setPasteMode(true)}
-              onCancelPaste={() => setPasteMode(false)}
-            />
+            {(!modeless || selectRect !== null) && (
+              <SelectOptions
+                tool={tool}
+                hasSelection={selectRect !== null}
+                clipboard={clipboard}
+                pasteMode={pasteMode}
+                readOnly={session?.read_only ?? false}
+                activeTileset={tileset}
+                busy={editsInFlight > 0}
+                onCopy={() => void doCopy()}
+                onCut={() => void doCut()}
+                onDelete={() => void doDeleteSelection()}
+                onMove={() => void doMove()}
+                onArmPaste={() => setPasteMode(true)}
+                onCancelPaste={() => setPasteMode(false)}
+              />
+            )}
             <HeightOptions
               payload={payload}
               heightMode={heightMode}
@@ -5140,7 +6956,10 @@ function MapForgeSectorInner() {
               setRoomId={setRoomId}
               rooms={info.data?.rooms ?? []}
               suggestedRoomId={
-                (info.data?.rooms.reduce((m, r) => Math.max(m, r.room_id), 0) ?? 0) + 1
+                Math.max(
+                  info.data?.rooms.reduce((m, r) => Math.max(m, r.room_id), 0) ?? 0,
+                  maxPaintedRoomId,
+                ) + 1
               }
             />
             <span className="flex-1" />
@@ -5285,6 +7104,70 @@ function MapForgeSectorInner() {
         }}
       />
 
+      {/* Crash-recovery offer — an autosave snapshot from a previous
+          sidecar process exists for this map. Restore swaps it into the
+          session (nothing hits disk until the user saves); discard
+          deletes the snapshot. */}
+      <ConfirmModal
+        open={recoveryOffer !== null}
+        title="Recover unsaved edits?"
+        body={
+          <>
+            A previous editing session ended without saving —
+            an automatic recovery snapshot with{" "}
+            <strong>
+              {recoveryOffer?.edit_count ?? 0} edit
+              {(recoveryOffer?.edit_count ?? 0) === 1 ? "" : "s"}
+            </strong>{" "}
+            was kept
+            {recoveryOffer
+              ? ` (${new Date(recoveryOffer.saved_at * 1000).toLocaleString()})`
+              : ""}.
+            <br /><br />
+            Restore loads those edits into this session; the file on disk
+            stays untouched until you save. Discard deletes the snapshot.
+          </>
+        }
+        confirmLabel="Restore edits"
+        cancelLabel="Discard snapshot"
+        onCancel={() => {
+          setRecoveryOffer(null);
+          if (session) {
+            sessionRecovery(session.session_id, "discard").catch(() => {});
+          }
+        }}
+        onConfirm={async () => {
+          setRecoveryOffer(null);
+          if (!session) return;
+          try {
+            const info = await sessionRecovery(session.session_id, "restore");
+            setSession(info);
+            // Full canvas resync — same kitchen-sink path as a
+            // generator run: server-side parsed changed wholesale.
+            if (renderer) {
+              const parsed = await getSessionParsed(info.session_id);
+              renderer.setParsed(parsed);
+              setRenderEpoch((e) => e + 1);
+              bumpHistory();
+            }
+            log?.append({
+              severity: "success",
+              message: `Restored ${info.edit_count} autosaved edit`
+                + `${info.edit_count === 1 ? "" : "s"} from the recovery `
+                + "snapshot.",
+              detail: "The session is now dirty — save to write the "
+                + "recovered state to disk.",
+            });
+          } catch (e) {
+            log?.append({
+              severity: "error",
+              message: "Recovery restore failed",
+              detail: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }}
+      />
+
       {/* `?` shortcut cheatsheet — reachable from the Help button in
           the command bar and the `?` key. */}
       <MapForgeHelpOverlay
@@ -5333,6 +7216,11 @@ function IsoOverlay({
   selectedRoom,
   hovered,
   pinned,
+  spriteHit,
+  spriteHitLabel,
+  verdictTiles,
+  selectionHits,
+  queuedTiles,
   previewTiles,
   showGrid,
   showRoomLabels,
@@ -5357,6 +7245,23 @@ function IsoOverlay({
   selectedRoom: number | null;
   hovered: { x: number; y: number } | null;
   pinned: { x: number; y: number } | null;
+  /** Sprite under the cursor (inspect tool): outline its full drawn
+   * rect + highlight the OWNING anchor tile, so multi-tile-looking
+   * objects (cooling towers etc.) are selectable at a glance. */
+  spriteHit: SpriteHit | null;
+  spriteHitLabel: PropFrameLabel | null;
+  /** Per-footprint-tile local+oracle merged verdicts for the armed
+   * placement ghost — colours the ghost's footprint
+   * green/yellow/red. Empty when nothing is armed. */
+  verdictTiles: TileVerdict[];
+  /** The current sprite selection — outlined as footprint
+   * diamonds, tinted green. Empty when nothing is selected. */
+  selectionHits: SpriteRef[];
+  /** Full footprint tiles of every placement-queue entry
+   * — drawn as dashed-stroke diamonds (the queued ghosts themselves
+   * are drawn by the separate `queueCanvasRef` overlay canvas). Empty
+   * when the queue is empty. */
+  queuedTiles: Array<{ x: number; y: number }>;
   /** Tiles the in-progress shape drag would write — drawn as one tinted
    * fill path. Null when no shape drag is active. */
   previewTiles: Tile[] | null;
@@ -5445,6 +7350,32 @@ function IsoOverlay({
     return parts.join("");
   }, [previewTiles, meta]);
 
+  // Placement-ghost validity tint: one filled path per
+  // tier, keyed by tile so a footprint of N tiles draws N diamonds each
+  // coloured by ITS OWN verdict (a truck's front bumper can be red while
+  // its cab is green).
+  const verdictPaths = useMemo(() => {
+    const by: Record<"ok" | "advisory" | "blocking", string[]> = { ok: [], advisory: [], blocking: [] };
+    for (const v of verdictTiles) {
+      const c = tileDiamondCorners(v.x, v.y, meta);
+      const d = `M${c[0][0]} ${c[0][1]}L${c[1][0]} ${c[1][1]}L${c[2][0]} ${c[2][1]}L${c[3][0]} ${c[3][1]}Z`;
+      by[v.tier === "blocking" ? "blocking" : v.tier === "advisory" ? "advisory" : "ok"].push(d);
+    }
+    return by;
+  }, [verdictTiles, meta]);
+  // Sprite-selection outline diamonds.
+  const selectionPath = useMemo(() => selectionHits.map((h) => {
+    const c = tileDiamondCorners(h.x, h.y, meta);
+    return `M${c[0][0]} ${c[0][1]}L${c[1][0]} ${c[1][1]}L${c[2][0]} ${c[2][1]}L${c[3][0]} ${c[3][1]}Z`;
+  }).join(""), [selectionHits, meta]);
+  // Placement-queue footprint diamonds — dashed
+  // stroke, no fill (the queued sprites themselves are already drawn by
+  // the queue overlay canvas; this is just their footprint outline).
+  const queuedPath = useMemo(() => queuedTiles.map((t) => {
+    const c = tileDiamondCorners(t.x, t.y, meta);
+    return `M${c[0][0]} ${c[0][1]}L${c[1][0]} ${c[1][1]}L${c[2][0]} ${c[2][1]}L${c[3][0]} ${c[3][1]}Z`;
+  }).join(""), [queuedTiles, meta]);
+
   // Playable-area outline — the iso "playable diamond" the engine renders
   // inside the 160×160 square (everything outside is off-map border). The
   // four extreme tiles of the inscribed diamond project to the four
@@ -5523,6 +7454,29 @@ function IsoOverlay({
           strokeWidth={1}
           vectorEffect="non-scaling-stroke"
         />
+      )}
+
+      {/* Placement-ghost validity tint — green/yellow/red
+          per footprint tile, keyed by the local (+ later, oracle) check.
+          data-verdict is what the Playwright agenda reads. */}
+      {verdictPaths.ok.length > 0 && (
+        <path d={verdictPaths.ok.join("")} fill="rgba(80,255,120,0.35)" stroke="rgb(80,255,120)" strokeWidth={1} vectorEffect="non-scaling-stroke" data-verdict="ok" />
+      )}
+      {verdictPaths.advisory.length > 0 && (
+        <path d={verdictPaths.advisory.join("")} fill="rgba(255,220,80,0.4)" stroke="rgb(255,220,80)" strokeWidth={1} vectorEffect="non-scaling-stroke" data-verdict="advisory" />
+      )}
+      {verdictPaths.blocking.length > 0 && (
+        <path d={verdictPaths.blocking.join("")} fill="rgba(255,70,70,0.45)" stroke="rgb(255,70,70)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" data-verdict="blocking" />
+      )}
+      {/* Sprite-selection footprint diamonds. */}
+      {selectionPath && (
+        <path d={selectionPath} fill="rgba(80,255,120,0.18)" stroke="rgb(80,255,120)" strokeWidth={1} vectorEffect="non-scaling-stroke" data-selection="tiles" />
+      )}
+
+      {/* Placement-queue footprint diamonds — dashed
+          outline only; the queued ghosts' sprites are the queue canvas. */}
+      {queuedPath && (
+        <path d={queuedPath} fill="none" stroke="rgb(120,180,255)" strokeWidth={1} strokeDasharray="4 3" vectorEffect="non-scaling-stroke" data-queued="tiles" />
       )}
 
       {/* Height overlay — only while the height brush is active. Tint each
@@ -5673,6 +7627,39 @@ function IsoOverlay({
       {hovered && (
         <TileMarker tile={hovered} meta={meta}
           fill="rgba(120,220,255,0.22)" stroke="rgba(120,220,255,0.85)" />
+      )}
+      {/* Sprite-aware hover: outline the full drawn sprite under the
+          cursor and mark its OWNING anchor tile in green — clicking
+          anywhere inside the outline pins that anchor. This is the
+          "which square is the cooling tower" affordance. */}
+      {spriteHit && (
+        <g>
+          <rect
+            x={spriteHit.rect.x} y={spriteHit.rect.y}
+            width={spriteHit.rect.w} height={spriteHit.rect.h}
+            fill="rgba(140,255,160,0.05)"
+            stroke="rgba(140,255,160,0.95)"
+            strokeWidth={2}
+            strokeDasharray="6 3"
+            vectorEffect="non-scaling-stroke"
+          />
+          <TileMarker tile={{ x: spriteHit.x, y: spriteHit.y }} meta={meta}
+            fill="rgba(140,255,160,0.35)" stroke="rgba(140,255,160,1)"
+            strokeWidth={2} />
+          <text
+            x={spriteHit.rect.x + 4}
+            y={Math.max(24, spriteHit.rect.y - 18)}
+            fill="rgba(140,255,160,0.95)"
+            fontSize={12}
+            style={{ paintOrder: "stroke", stroke: "rgba(0,0,0,0.75)", strokeWidth: 3 }}
+          >
+            <title>{`${spriteHitLabel?.primary ?? "Sprite"}\n${spriteHitLabel?.filename ?? "Unknown file"}`}</title>
+            <tspan x={spriteHit.rect.x + 4}>{spriteHitLabel?.primary ?? "Sprite"}</tspan>
+            <tspan x={spriteHit.rect.x + 4} dy={13} fontSize={10}>
+              {`s${spriteHit.slot}.${spriteHit.sub} @ (${spriteHit.x},${spriteHit.y})`}
+            </tspan>
+          </text>
+        </g>
       )}
       {/* Brush-radius footprint preview — green for tiles inside the
           sector, red for tiles that would be clipped. Drawn UNDER the
@@ -6286,14 +8273,25 @@ const SHAPE_HINTS: Record<ShapeKind, string> = {
  * brush, erase the non-ground layers, set height, or write a room id).
  * Shown for the pencil + shape tools. */
 function PayloadSelector({
-  tool, payload, setPayload, hasBrush,
+  tool, payload, setPayload, hasBrush, modelessNoGhost,
 }: {
   tool: Tool;
   payload: Payload;
   setPayload: (p: Payload) => void;
   hasBrush: boolean;
+  /** `modeless && !placingBuilding` — a brush/payload already being
+   * armed doesn't need this flag (`tool` is already "pencil"/"shape",
+   * short-circuiting the check below); it only matters when `tool`
+   * derives to "select" (nothing, or only a ghost, armed), where it
+   * still shows this strip so Erase/Height/Room are reachable AT ALL —
+   * they're the only way to ARM those payloads (which then flips the
+   * derived tool to "pencil") until the command card (a later
+   * phase) offers them as one-key verbs. False while a ghost is armed —
+   * setting a payload there wouldn't do anything visible until the
+   * ghost is placed/cancelled anyway. */
+  modelessNoGhost: boolean;
 }) {
-  if (tool !== "pencil" && tool !== "shape") return null;
+  if (tool !== "pencil" && tool !== "shape" && !modelessNoGhost) return null;
   const items: Array<{ id: Payload; label: string; title: string }> = [
     { id: "tiles", label: "🖌 Tiles", title: "Place the active brush" + (hasBrush ? "" : " — pick a tile first") },
     { id: "erase", label: "🧽 Erase", title: "Clear objects / structures / roofs — keeps the floor" },
@@ -6328,7 +8326,7 @@ function PayloadSelector({
   );
 }
 
-/** R4 Room-payload controls — the room id written by pencil/shape strokes
+/** Room-payload controls — the room id written by pencil/shape strokes
  * when the Room payload is active. */
 function RoomOptions({
   payload, roomId, setRoomId, rooms, suggestedRoomId,
@@ -6560,7 +8558,7 @@ function ShapeOptions({
 /** Select-mode-only controls: Copy the marquee selection into the
  * clipboard, then arm Paste (click-to-place). Hidden in other tools so
  * the toolbar width stays stable. Mirrors ShapeOptions. Same-tileset
- * only for now — a clipboard from a different tileset disables Paste
+ * only — a clipboard from a different tileset disables Paste
  * (cross-tileset slot remap is deferred). */
 function SelectOptions({
   tool, hasSelection, clipboard, pasteMode, readOnly, activeTileset, busy,
@@ -6834,13 +8832,31 @@ function RedoButton({
 // am I holding right now" indicator that stays visible while the user
 // hunts down the right tile to paint.
 function BrushChip({
-  brush, renderer, onClear,
+  brush, renderer, onClear, ghostLabel = null,
 }: {
   brush: ActiveBrush | null;
   renderer: IsoRenderer | null;
   onClear: () => void;
+  /** Fix-round-1b: mode-less sprite-group ghost has no `activeBrush`
+   * (that's how the derived `tool` tells a ghost apart from a brush) —
+   * without this the chip went blank while a ghost was armed. */
+  ghostLabel?: string | null;
 }) {
   if (!brush) {
+    if (ghostLabel) {
+      return (
+        <div
+          className="flex flex-col items-start gap-0.5"
+          title={`Armed ghost: ${ghostLabel}\nClick the map to place it.`}
+        >
+          <span className="block text-xs text-gray-400">Brush</span>
+          <div className="flex items-center gap-1.5 rounded border border-sky-700 bg-sky-950/40 px-2 py-1 text-[10px] text-sky-200">
+            <span className="inline-flex h-7 w-7 items-center justify-center rounded bg-sky-900 text-sm">▦</span>
+            <span className="truncate font-mono" style={{ maxWidth: "9rem" }}>{ghostLabel}</span>
+          </div>
+        </div>
+      );
+    }
     return (
       <div
         className="flex flex-col items-start gap-0.5"
@@ -7093,6 +9109,49 @@ function TilesetSelect({
 }
 
 // ─── Save button ──────────────────────────────────────────────────────
+// Shared save-with-external-retry — the single owner of the 409
+// EXTERNAL_MODIFICATION contract (was copy-pasted verbatim between the
+// save hotkey and the SaveButton). The sidecar 409s when the .dat
+// changed on disk under the session; the first save surfaces that in
+// the log and arms `overrideRef`, so the NEXT explicit save passes
+// force=true and overwrites (the sidecar keeps a rolling backup of the
+// external version). The ref resets on success so force never lingers.
+async function saveSessionWithExternalRetry(
+  sessionId: string,
+  overrideRef: { current: boolean },
+  log: ReturnType<typeof useMapForgeLog>,
+): Promise<
+  | { ok: true; res: Awaited<ReturnType<typeof saveSession>> }
+  | { ok: false; message: string }
+> {
+  try {
+    const res = await saveSession(sessionId, { force: overrideRef.current });
+    overrideRef.current = false;
+    log?.append({
+      severity: "success",
+      message: `Saved ${(res.bytes_written / 1024).toFixed(1)} KB to disk`,
+      detail: res.backup_path ? `backup: ${res.backup_path}` : undefined,
+    });
+    return { ok: true, res };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("EXTERNAL_MODIFICATION")) {
+      overrideRef.current = true;
+      log?.append({
+        severity: "error",
+        message: "Save blocked — the .dat changed on disk since this "
+          + "session opened it. Save again to overwrite the external "
+          + "version (a rolling backup of it is kept), or reopen the "
+          + "sector to load it and discard this session's edits.",
+        detail: msg,
+      });
+    } else {
+      log?.append({ severity: "error", message: "Save failed", detail: msg });
+    }
+    return { ok: false, message: msg };
+  }
+}
+
 function SaveButton({
   session, localDirty, undoDepth, savedAtDepth, onSaved,
 }: {
@@ -7114,29 +9173,25 @@ function SaveButton({
   const [lastSaved, setLastSaved] = useState<{
     bytes: number; backup: string | null; at: number;
   } | null>(null);
+  // Retry-once force after a 409 EXTERNAL_MODIFICATION — contract owned
+  // by saveSessionWithExternalRetry.
+  const overrideRef = useRef(false);
 
   async function save() {
     setBusy(true); setErr(null);
-    try {
-      const res = await saveSession(session.session_id);
+    const out = await saveSessionWithExternalRetry(
+      session.session_id, overrideRef, log);
+    if (out.ok) {
       setLastSaved({
-        bytes: res.bytes_written,
-        backup: res.backup_path,
+        bytes: out.res.bytes_written,
+        backup: out.res.backup_path,
         at: Date.now(),
       });
-      onSaved(res.session);
-      log?.append({
-        severity: "success",
-        message: `Saved ${(res.bytes_written / 1024).toFixed(1)} KB to disk`,
-        detail: res.backup_path ? `backup: ${res.backup_path}` : undefined,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setErr(msg);
-      log?.append({ severity: "error", message: "Save failed", detail: msg });
-    } finally {
-      setBusy(false);
+      onSaved(out.res.session);
+    } else {
+      setErr(out.message);
     }
+    setBusy(false);
   }
 
   // Net strokes since last save — positive when painted forward,
@@ -7186,638 +9241,3 @@ function SaveButton({
 }
 
 // ─── Inspector ─────────────────────────────────────────────────────────
-function TileInspectorPanel({
-  xmlPath, tileset, session, renderer, renderEpoch, isSlfBundled,
-  cols, rows, pinned, onPin, onEditApplied, onPickAsBrush,
-}: {
-  datPath: string;
-  xmlPath: string;
-  tileset: number;
-  session: SessionInfo | null;
-  renderer: IsoRenderer | null;
-  renderEpoch: number;
-  isSlfBundled: boolean;
-  cols: number;
-  rows: number;
-  pinned: { x: number; y: number } | null;
-  onPin: (p: { x: number; y: number } | null) => void;
-  onEditApplied: (updatedSession: SessionInfo) => void;
-  /** Click on an entry's thumbnail to load it as the active brush.
-   * Lets the user pick a specific layer's entry from a multi-layer
-   * tile — the right-click eyedropper only picks the topmost.
-   */
-  onPickAsBrush: (slot: number, sub: number, layer: LayerName, sti_filename: string) => void;
-}) {
-  const [x, setX] = useState(0);
-  const [y, setY] = useState(0);
-  useEffect(() => {
-    if (pinned) { setX(pinned.x); setY(pinned.y); }
-  }, [pinned]);
-
-  // Local inspect — reads straight from the renderer's parsed dict so
-  // uncommitted edits show up immediately. `renderEpoch` is in the
-  // dependency list so a paint stroke that touches the pinned tile
-  // refreshes the inspector without an HTTP fetch.
-  const inspectionData: TileInspection | null = useMemo(() => {
-    if (!pinned || !renderer) return null;
-    return renderer.inspectTile(pinned.x, pinned.y);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinned?.x, pinned?.y, renderer, renderEpoch]);
-
-  return (
-    <div className="rounded border border-gray-700 bg-gray-950 p-3">
-      <h2 className="mb-2 text-sm font-semibold text-gray-300">Tile Inspector</h2>
-      <form
-        className="mb-1 flex items-end gap-2"
-        onSubmit={(e) => { e.preventDefault(); onPin({ x, y }); }}
-      >
-        <div>
-          <label className="block text-xs text-gray-400">X (0–{cols - 1})</label>
-          <input
-            type="number" min={0} max={cols - 1} value={x}
-            onChange={(e) => setX(parseInt(e.target.value, 10) || 0)}
-            className="w-20 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-sm"
-          />
-        </div>
-        <div>
-          <label className="block text-xs text-gray-400">Y (0–{rows - 1})</label>
-          <input
-            type="number" min={0} max={rows - 1} value={y}
-            onChange={(e) => setY(parseInt(e.target.value, 10) || 0)}
-            className="w-20 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-sm"
-          />
-        </div>
-      </form>
-      <p className="mb-3 text-[10px] text-gray-500">
-        Click any tile on the render — or type X/Y and press Enter.
-      </p>
-
-      {/* Pre-#bug-review: a persistent amber "This sector lives inside an
-          SLF archive — editing is disabled" banner sat here. Removed
-          per user feedback — every other MapForge status message
-          routes through the log panel; the inspector banner ate space
-          on every load. The same advisory is now logged on sector open
-          (see the isSlfBundled useEffect upstream); the actionable
-          "Extract to loose" button still floats over the top-left of
-          the canvas. */}
-
-      {pinned && !inspectionData && (
-        <p className="text-xs text-gray-400">Loading...</p>
-      )}
-      {inspectionData && (
-        <TileInspectionView
-          t={inspectionData}
-          xmlPath={xmlPath}
-          tileset={tileset}
-          session={session}
-          renderer={renderer}
-          editable={
-            !isSlfBundled
-            && session !== null
-            && !session.read_only
-            && renderer !== null
-          }
-          onEdited={onEditApplied}
-          onPickAsBrush={onPickAsBrush}
-        />
-      )}
-    </div>
-  );
-}
-
-function TileInspectionView({
-  t, xmlPath, tileset, session, renderer, editable, onEdited, onPickAsBrush,
-}: {
-  t: TileInspection;
-  xmlPath: string;
-  tileset: number;
-  session: SessionInfo | null;
-  renderer: IsoRenderer | null;
-  editable: boolean;
-  onEdited: (updated: SessionInfo) => void;
-  onPickAsBrush: (slot: number, sub: number, layer: LayerName, sti_filename: string) => void;
-}) {
-  // Composite key = "layer:index" of the entry currently being edited
-  // (so only one inline form is open at a time).
-  const [editingKey, setEditingKey] = useState<string | null>(null);
-  const [editError, setEditError] = useState<string | null>(null);
-  const [editBusy, setEditBusy] = useState(false);
-  // When set, opens the JSD viewer modal for that slot. JSD data is
-  // small (~100 bytes) and fetched on demand.
-  const [jsdSlot, setJsdSlot] = useState<number | null>(null);
-
-  // When the inspected tile changes (parent reuses this component with
-  // new props rather than remounting), the local view-state above is
-  // stale — the JSD panel would still show the previous tile's slot,
-  // the inline edit form would still be open against an entry index
-  // that no longer matches. Reset on every tile change.
-  useEffect(() => {
-    setJsdSlot(null);
-    setEditingKey(null);
-    setEditError(null);
-  }, [t.x, t.y]);
-
-  async function applyEdit(
-    op: "replace" | "remove",
-    layer: LayerName,
-    entryIdx: number,
-    slot?: number,
-    sub?: number,
-  ) {
-    if (!session || !renderer) return;
-    setEditBusy(true); setEditError(null);
-    // Mirror the paintBrush flow: mutate local first for instant
-    // canvas feedback, then send to backend. Routed through the stroke
-    // machinery so inspector edits are (a) undoable, (b) invalidate the
-    // redo timeline like every other mutation, and (c) count toward
-    // dirty tracking — previously an inspector-only session showed
-    // "Saved" and refused Ctrl+S, losing the edits on close.
-    renderer.beginStroke(`Edit ${layer}[${entryIdx}] (${t.x},${t.y})`);
-    renderer.recordSnapshot(t.x, t.y, layer);
-    renderer.applyLocalEdit({
-      x: t.x, y: t.y, op,
-      layer, slot, sub, entryIndex: entryIdx,
-    });
-    renderer.endStroke();
-    try {
-      const edit: SessionEdit = {
-        x: t.x, y: t.y, op, layer,
-        entry_index: entryIdx, slot, sub,
-      };
-      const res = await applyEdits(session.session_id, [edit]);
-      setEditingKey(null);
-      onEdited(res.session);
-    } catch (e) {
-      // Backend rejected — the server session is untouched, so revert
-      // the optimistic local mirror and DISCARD the stroke (no redo
-      // mirror: Ctrl+Y must not replay a rejected edit).
-      const entry = renderer.discardLastUndo();
-      if (entry) {
-        for (const s of entry.snapshots) {
-          renderer.applyLocalEdit({
-            x: s.x, y: s.y, op: "set_entries", layer: s.layer, entries: s.entries,
-          });
-        }
-      }
-      // Same-session callback so the parent repaints + resyncs the
-      // history/dirty UI after the revert.
-      onEdited(session);
-      setEditError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setEditBusy(false);
-    }
-  }
-
-  // Per-layer entry counts — used for the layer-filter dropdown labels
-  // ("structs (3)") and to show the user which layers have any data
-  // on this tile without expanding.
-
-  return (
-    <div className="space-y-3 text-xs">
-      <div className="rounded bg-gray-900 p-2 font-mono">
-        ({t.x},{t.y}) g={t.gridno} room={t.room_id} height={t.height} flags={t.world_flags}
-      </div>
-
-      {/* "Saved" feedback now lives on the top-bar Save button —
-          edits go to memory until the user explicitly saves. */}
-      {editError && (
-        <div className="rounded bg-red-950 px-2 py-1 text-[10px] text-red-300">
-          {editError}
-        </div>
-      )}
-
-      {(["land", "objs", "shadows", "structs", "roofs", "onroofs"] as const).map(
-        (layer) => {
-          const entries = t.layers[layer] ?? [];
-          if (entries.length === 0) return null;
-          return (
-            <div key={layer}>
-              <div className="mb-1 text-xs font-semibold uppercase text-gray-400">
-                {layer} ({entries.length})
-              </div>
-              <ul className="space-y-1">
-                {entries.map((e, i) => {
-                  const key = `${layer}:${i}`;
-                  const editing = editingKey === key;
-                  return (
-                    <li key={i} className="rounded bg-gray-900 px-2 py-1 font-mono text-xs">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex min-w-0 items-center gap-2">
-                          {/* Atlas-backed preview — instant, no HTTP.
-                              CLICK to load this entry as the active
-                              brush (lets the user pick a specific
-                              layer from a multi-layer tile — the
-                              right-click eyedropper only grabs the
-                              topmost). */}
-                          <button
-                            type="button"
-                            onClick={() => onPickAsBrush(
-                              e.slot, e.sub, layer,
-                              e.sti_filename ?? `slot ${e.slot}`,
-                            )}
-                            title={
-                              `Load slot ${e.slot} sub ${e.sub} (${e.sti_filename ?? "?"}) `
-                              + `as the active brush, painting onto layer ${layer}. `
-                              + `Switches the tool to Pencil.`
-                            }
-                            className="rounded ring-0 hover:ring-2 hover:ring-emerald-500/60 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                          >
-                            <AtlasFrameThumb
-                              renderer={renderer}
-                              slot={e.slot} sub={e.sub} size={40}
-                            />
-                          </button>
-                          <span className="min-w-0 truncate">
-                            <span className="text-blue-300">slot {e.slot}</span>{" "}
-                            <span className="text-amber-300">sub {e.sub}</span>{" "}
-                            <span className="text-gray-500">→ frame[{e.sti_frame_index_0based}]</span>
-                            <br/>
-                            <span className="text-gray-300">{e.sti_filename ?? "?"}</span>
-                          </span>
-                        </div>
-                        <span className="flex shrink-0 gap-1">
-                          {/* JSD viewer button — shown only when the
-                              slot's STI has a sibling .jsd. The
-                              has_jsd flag is populated from the atlas
-                              manifest's slot_has_jsd map. */}
-                          {e.has_jsd && (
-                            <button
-                              type="button"
-                              title={`View .jsd (multi-tile footprint, passability, PROFILE voxel grid)`}
-                              onClick={() => setJsdSlot(e.slot)}
-                              className="rounded border border-amber-700 bg-amber-950/40 px-1.5 py-0.5 text-[10px] text-amber-300 hover:border-amber-500 hover:bg-amber-900/50"
-                            >
-                              JSD
-                            </button>
-                          )}
-                          {editable && !editing && (
-                            <>
-                              <button
-                                type="button"
-                                title="Edit slot/sub"
-                                disabled={editBusy}
-                                onClick={() => { setEditingKey(key); setEditError(null); }}
-                                className="rounded border border-gray-700 px-1.5 py-0.5 text-[10px] text-gray-300 hover:border-blue-500 hover:text-blue-300 disabled:opacity-50"
-                              >
-                                ✎
-                              </button>
-                              <button
-                                type="button"
-                                title="Remove this entry"
-                                disabled={editBusy}
-                                onClick={() => {
-                                  if (confirm(`Remove ${layer}[${i}] = slot ${e.slot} sub ${e.sub}?`)) {
-                                    applyEdit("remove", layer, i);
-                                  }
-                                }}
-                                className="rounded border border-gray-700 px-1.5 py-0.5 text-[10px] text-gray-300 hover:border-red-500 hover:text-red-300 disabled:opacity-50"
-                              >
-                                ✕
-                              </button>
-                            </>
-                          )}
-                        </span>
-                      </div>
-                      {editing && (
-                        <EditRow
-                          xmlPath={xmlPath} tileset={tileset}
-                          renderer={renderer}
-                          initialSlot={e.slot}
-                          initialSub={e.sub}
-                          busy={editBusy}
-                          onCancel={() => setEditingKey(null)}
-                          onApply={(slot, sub) => applyEdit("replace", layer, i, slot, sub)}
-                        />
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          );
-        }
-      )}
-
-      {jsdSlot !== null && (
-        <JsdViewer
-          xmlPath={xmlPath}
-          tileset={tileset}
-          slot={jsdSlot}
-          onClose={() => setJsdSlot(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ─── JSD viewer ───────────────────────────────────────────────────────
-// Renders a parsed .jsd: header (flag names + HP/armour/density) +
-// per-footprint-tile PROFILE 5x5 voxel grids. Used by the tile
-// inspector when the user clicks the "JSD" button on a struct entry.
-function JsdViewer({
-  xmlPath, tileset, slot, onClose,
-}: {
-  xmlPath: string;
-  tileset: number;
-  slot: number;
-  onClose: () => void;
-}) {
-  const jsd = useQuery({
-    queryKey: ["mapforge", "jsd", xmlPath, tileset, slot],
-    queryFn: () => getStiJsd(xmlPath, tileset, slot),
-    staleTime: 5 * 60 * 1000,
-    retry: false,
-  });
-  return (
-    <div className="rounded border border-amber-700 bg-amber-950/30 p-2 text-[10px]">
-      <div className="mb-1 flex items-center justify-between">
-        <span className="font-mono text-amber-300">
-          JSD · slot {slot}
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-amber-400 hover:text-amber-200"
-          title="Close JSD view"
-        >✕</button>
-      </div>
-      {jsd.isLoading && <p className="text-gray-500">Reading .jsd…</p>}
-      {jsd.error && (
-        <p className="text-red-400">
-          {jsd.error instanceof Error ? jsd.error.message : String(jsd.error)}
-        </p>
-      )}
-      {jsd.data && (() => {
-        const d = jsd.data;
-        return (
-          <div className="space-y-1.5 font-mono">
-            <div className="text-amber-200">
-              {d.sti_filename} <span className="text-amber-500">·</span>
-              {" "}{d.size_bytes} B
-              {" "}<span className="text-amber-500">·</span>{" "}
-              <span className="text-amber-400">{d.szId}</span>
-            </div>
-            <div title="Bitmask of structural behavior flags the engine checks at render + interaction time. Hover each chip for the per-flag meaning.">
-              <span className="text-gray-500">flags 0x{d.flags_int.toString(16).padStart(4, "0")}:</span>{" "}
-              {d.flag_names.length === 0 ? (
-                <span className="text-gray-600">(none)</span>
-              ) : (
-                d.flag_names.map((f) => (
-                  <span
-                    key={f}
-                    className="mr-1 inline-block rounded bg-amber-900/60 px-1 text-amber-200"
-                    title={_jsdFlagTooltip(f)}
-                  >
-                    {f}
-                  </span>
-                ))
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-1 text-gray-300">
-              <div title="Hit points — how much damage the struct absorbs before destruction. 0 = indestructible. Engine field ubHitPoints.">
-                HP: <span className="text-amber-200">{d.ubHP}</span>
-              </div>
-              <div title="Damage resistance against bullets/explosives. Higher = takes less damage per hit. Engine field ubArmour.">
-                armour: <span className="text-amber-200">{d.ubArmour}</span>
-              </div>
-              <div title="Visual + AI density on a 0–100 scale. Influences merc cover bonus + line-of-sight blocking. Engine field ubDensity.">
-                density: <span className="text-amber-200">{d.ubDensity}</span>
-              </div>
-              <div title="Number of grid cells this struct occupies. >1 means it's a multi-tile footprint (cars, big trees, walls).">
-                tiles: <span className="text-amber-200">{d.ubNumberOfTiles}</span>
-              </div>
-              <div title="Z-offset X — horizontal shift applied to the sprite at render time. Used by struct-shadow pairs and tall sprites that need to lift off their anchor.">
-                zOff X: <span className="text-amber-200">{d.bZTileOffsetX}</span>
-              </div>
-              <div title="Z-offset Y — vertical shift applied to the sprite at render time. Negative = lifted up; positive = pushed down. Walls/roofs use this so they sit on the right floor row.">
-                zOff Y: <span className="text-amber-200">{d.bZTileOffsetY}</span>
-              </div>
-            </div>
-            {d.tiles.length > 0 && (
-              <div className="mt-2 space-y-2">
-                <div className="text-gray-500" title="Per-tile Z-occupancy profiles. Each cell of the 5×5 grid is a hex byte where bits represent which Z-slabs (height layers) of that cell are blocked. Used by the engine for cover, LOS, and collision.">
-                  Footprint ({d.tiles.length} tile{d.tiles.length === 1 ? "" : "s"}):
-                </div>
-                {d.tiles.map((tt, i) => (
-                  <ProfileGrid key={i} index={i} tile={tt} />
-                ))}
-              </div>
-            )}
-            <details className="mt-1 text-gray-500">
-              <summary className="cursor-pointer hover:text-gray-300">
-                source
-              </summary>
-              <div className="mt-0.5 max-w-full truncate text-[9px]" title={d.jsd_path}>
-                {d.jsd_path}
-              </div>
-            </details>
-          </div>
-        );
-      })()}
-    </div>
-  );
-}
-
-/** One footprint tile's 5×5 PROFILE — each cell's byte is a Z-occupancy
- * mask (which Z-slabs of the cell are blocked). The grid shows the
- * mask in hex; non-zero cells are tinted amber so you can see the
- * shape at a glance. */
-function ProfileGrid({ index, tile }: {
-  index: number;
-  tile: import("../lib/mapforge").JsdProfileTile;
-}) {
-  return (
-    <div className="rounded border border-amber-900/50 bg-gray-950/60 p-1.5">
-      <div className="mb-1 text-gray-400">
-        tile[{index}] bX={tile.bXPos} bY={tile.bYPos}
-        {" "}<span className="text-gray-600">(sPos={tile.sPosRelToBase})</span>
-      </div>
-      <div className="inline-grid gap-px"
-        style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
-        {tile.profile.map((row, y) => row.map((v, x) => (
-          <div
-            key={`${y}-${x}`}
-            className="flex h-5 w-6 items-center justify-center font-mono text-[8px]"
-            style={{
-              backgroundColor: v === 0
-                ? "rgb(20, 20, 20)"
-                : `rgba(255, 200, 100, ${Math.min(1, v / 255 + 0.2)})`,
-              color: v === 0 ? "rgb(80, 80, 80)" : "rgb(20, 20, 20)",
-            }}
-            title={`(${x},${y}) = 0x${v.toString(16).padStart(2, "0")} = ${v}`}
-          >
-            {v === 0 ? "·" : v.toString(16)}
-          </div>
-        )))}
-      </div>
-    </div>
-  );
-}
-
-/** Live preview thumb for the inline EditRow form. Prefers
- * AtlasFrameThumb (zero HTTP, instant per keystroke) and falls back
- * to StiFrameImage (HTTP fetch) only when the slot/sub the user is
- * typing isn't in the loaded atlas. Most edits land in the atlas
- * since the entry the user is editing came from the current
- * tileset; the fallback is for cases like typing a slot number
- * that exists in the XML but whose sub hasn't been loaded yet. */
-function EditRowPreview({
-  renderer, xmlPath, tileset, slot, sub,
-}: {
-  renderer: IsoRenderer | null;
-  xmlPath: string;
-  tileset: number;
-  slot: number;
-  sub: number;
-}) {
-  // Detect atlas presence by attempting to draw into a hidden 1x1
-  // canvas — if drawCellInto returns false the (slot, sub) isn't in
-  // the cellMap. We use a sentinel ref + effect to track.
-  const [missing, setMissing] = useState(false);
-  // The check fires when renderer / slot / sub change. We don't
-  // actually draw here (the visible thumb's own effect handles
-  // drawing); this effect only sets `missing` so we know whether to
-  // show the AtlasFrameThumb or the HTTP-fallback StiFrameImage.
-  useEffect(() => {
-    if (!renderer) { setMissing(true); return; }
-    // Use a temp canvas just for the presence check.
-    const tmp = document.createElement("canvas");
-    tmp.width = 1; tmp.height = 1;
-    const ctx = tmp.getContext("2d");
-    if (!ctx) { setMissing(true); return; }
-    const ok = renderer.drawCellInto(ctx, slot, sub, 1, 1);
-    setMissing(!ok);
-  }, [renderer, slot, sub]);
-
-  if (renderer && !missing) {
-    return (
-      <AtlasFrameThumb
-        renderer={renderer} slot={slot} sub={sub} size={56}
-        className="rounded border border-emerald-700"
-      />
-    );
-  }
-  return (
-    <StiFrameImage
-      xmlPath={xmlPath} tileset={tileset}
-      slot={slot} sub={sub} maxSize={56}
-      className="rounded border border-emerald-700"
-    />
-  );
-}
-
-
-function EditRow({
-  xmlPath, tileset, renderer, initialSlot, initialSub, busy, onCancel, onApply,
-}: {
-  xmlPath: string;
-  tileset: number;
-  /** Renderer for the live preview's atlas lookup. When the typed
-   * (slot, sub) is in the cellMap we render from the atlas (instant);
-   * otherwise we fall back to the HTTP path so the user still sees
-   * something — e.g., typing a slot that exists in the tileset XML
-   * but whose sub they haven't picked yet. */
-  renderer: IsoRenderer | null;
-  initialSlot: number;
-  initialSub: number;
-  busy: boolean;
-  onCancel: () => void;
-  onApply: (slot: number, sub: number) => void;
-}) {
-  const [slot, setSlot] = useState(initialSlot);
-  const [sub, setSub] = useState(initialSub);
-  return (
-    <form
-      className="mt-2 flex items-end gap-2"
-      onSubmit={(e) => { e.preventDefault(); onApply(slot, sub); }}
-    >
-      {/* Live preview of the chosen (slot, sub). Updates instantly
-          via atlas lookup; falls back to HTTP for slots/subs not in
-          the current cellMap. */}
-      <div className="flex flex-col items-center gap-0.5">
-        <span className="text-[9px] text-gray-500">preview</span>
-        <EditRowPreview
-          renderer={renderer}
-          xmlPath={xmlPath}
-          tileset={tileset}
-          slot={slot}
-          sub={sub}
-        />
-      </div>
-      <div>
-        <label className="block text-[9px] text-gray-500">slot</label>
-        <input
-          type="number" min={0} max={255}
-          value={slot}
-          onChange={(e) => setSlot(parseInt(e.target.value, 10) || 0)}
-          className="w-16 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[11px]"
-        />
-      </div>
-      <div>
-        <label className="block text-[9px] text-gray-500">sub</label>
-        <input
-          type="number" min={1} max={65535}
-          value={sub}
-          onChange={(e) => setSub(parseInt(e.target.value, 10) || 1)}
-          className="w-16 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[11px]"
-        />
-      </div>
-      <button
-        type="submit" disabled={busy}
-        title="Replace this entry with the typed slot/sub (preserves layer + entry position)"
-        className="rounded border border-emerald-700 bg-emerald-900 px-2 py-0.5 text-[10px] text-emerald-100 hover:bg-emerald-800 disabled:opacity-50"
-      >
-        {busy ? "…" : "Apply"}
-      </button>
-      <button
-        type="button" disabled={busy} onClick={onCancel}
-        title="Discard pending changes and close the edit form"
-        className="rounded border border-gray-700 bg-gray-900 px-2 py-0.5 text-[10px] text-gray-300 hover:bg-gray-800 disabled:opacity-50"
-      >
-        Cancel
-      </button>
-    </form>
-  );
-}
-
-// ─── Load progress bar ────────────────────────────────────────────────
-// Replaces the old indeterminate "Loading tileset atlas…" spinner with
-// a real percent bar driven by IsoRenderer.create's onProgress callback.
-// Atlas fetch reports bytes-loaded, decode + bake report sub-phase
-// percents, manifest + parsed are short fixed-weight slots.
-function LoadProgressBar({
-  phase, phasePct, overallPct,
-}: {
-  phase: ProgressPhase;
-  phasePct: number;
-  overallPct: number;
-}) {
-  return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center bg-gray-950/70 backdrop-blur-sm">
-      <div className="w-80 rounded-lg border border-blue-800 bg-gray-900 p-4 shadow-lg">
-        <div className="mb-2 flex items-center justify-between text-xs">
-          <span className="text-blue-200">
-            {PROGRESS_PHASE_LABELS[phase]}…
-          </span>
-          <span className="font-mono text-blue-300">{overallPct}%</span>
-        </div>
-        {/* Outer bar: overall progress across all phases. */}
-        <div className="relative h-2 overflow-hidden rounded bg-gray-800">
-          <div
-            className="h-full bg-blue-500 transition-[width] duration-100 ease-linear"
-            style={{ width: `${overallPct}%` }}
-          />
-        </div>
-        {/* Inner bar: current phase sub-progress. Useful when the atlas
-            fetch is slow — the inner bar shows the download is
-            actually moving, not just the phase label flipping. */}
-        <div className="mt-2 h-1 overflow-hidden rounded bg-gray-800">
-          <div
-            className="h-full bg-blue-400/60 transition-[width] duration-75 ease-linear"
-            style={{ width: `${phasePct}%` }}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}

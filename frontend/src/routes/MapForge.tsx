@@ -2,7 +2,7 @@
  * MapForge hub — lists .dat sector files in the active install. Click a
  * sector to open it in the viewer/inspector.
  *
- * Phase 0 (read-only): no edit ops yet. This is the entry point for the
+ * Read-only: no edit ops yet. This is the entry point for the
  * editor-module-to-be.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";

@@ -106,7 +106,7 @@ export interface EffectiveValue {
   source: "data_user" | "data_113" | "ja2_ini" | "none";
 }
 
-// ---- Presets (v1.8 — Phase B) ----
+// ---- Presets (v1.8) ----
 
 export interface PresetChange {
   ini_file: string;

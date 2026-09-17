@@ -12,7 +12,7 @@ corresponding gear in-game, the engine's bounds check fails:
     SGP_THROW_IFFALSE(hSrcVObject->usNumberOfObjects > usIndex, ...);
 
 The exception propagates to `_FailMessage` → ERROR_SCREEN → `exit(0)`.
-Verified 2026-05-16 in source.
+Verified in source.
 
 This module:
   - detect_facegear_capacities(ctx) — enumerate Face_*.sti + frame count
@@ -130,7 +130,7 @@ def detect_facegear_capacities(
     Returns one entry per file (including the `_IMP` variants — each pair
     must independently cover the merc's face index or the engine crashes).
 
-    Phase 2.4: STI load failures used to be silently swallowed via
+    STI load failures used to be silently swallowed via
     `except Exception: continue` — that hid corrupt files from the UI so
     the user thought the slot didn't exist. Now we narrow the except to
     the documented raise types for `load_8bit_sti` and optionally
@@ -202,43 +202,11 @@ def crash_risk(infos: list[FaceGearInfo], face_index: int) -> list[FaceGearInfo]
 
 
 def _atomic_save_sti(images: "Images8Bit", sti_path: Path) -> None:
-    """Atomic STI write: serialize to a tempfile in the same directory,
-    then os.replace() onto the target path.
-
-    Without this, a crash or process kill mid-save leaves the STI half-
-    written; the next load_8bit_sti() raises a struct error and the
-    user loses the gear/face. Mirrors the pattern in
-    `mercwizard_core/inject/_atomic_xml.py::save_atomic` so both code
-    paths have the same crash-safety guarantee.
-
-    The tempfile lives in the same directory as the final path so the
-    os.replace() is a same-volume rename (atomic on Windows AND POSIX).
-    A cross-volume replace would degrade to copy+unlink and lose the
-    atomicity property.
-    """
-    import os
-    import tempfile
-
-    sti_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path_str = tempfile.mkstemp(
-        prefix=f".{sti_path.stem}.",
-        suffix=".sti.tmp",
-        dir=str(sti_path.parent),
-    )
-    tmp_path = Path(tmp_path_str)
-    try:
-        # Close fd; ja2py's save_8bit_sti opens its own file handle.
-        os.close(fd)
-        with open(tmp_path, "wb") as f:
-            save_8bit_sti(images, f)
-        os.replace(tmp_path_str, str(sti_path))
-    except Exception:
-        # Clean up tempfile if anything went wrong before the replace.
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
-        raise
+    """Atomic STI write — delegates to the shared implementation in
+    `sti_decode.atomic_save_sti` (also used by portrait/sti.py) so every
+    STI writer carries the same crash-safety guarantee."""
+    from .sti_decode import atomic_save_sti
+    atomic_save_sti(images, sti_path)
 
 
 def _stem_without_imp(name: str) -> str:
@@ -336,7 +304,6 @@ def find_orphan_variants(
     # otherwise split into two buckets → both falsely reported as
     # orphans. The display_stem field preserves the as-on-disk
     # capitalization so the UI shows the user's actual filename.
-    # Bug-review finding A6.
     by_stem: dict[str, dict[str, FaceGearInfo]] = {}
     display_stems: dict[str, str] = {}
     for info in infos:
@@ -923,7 +890,7 @@ def _read_offset_from_png_metadata(png_bytes: bytes) -> Optional[tuple[int, int]
     """If the PNG carries `mw2_offset_x/y` tEXt metadata (from extract_overlay),
     return the decoded (x, y). Else None.
 
-    Phase 2.5: the previous bare `except Exception: pass` collapsed three
+    The previous bare `except Exception: pass` collapsed three
     distinct cases — (a) no chunk present (legitimate None), (b) chunk
     present but malformed (data lost), (c) Image.open failure on a
     corrupt PNG — into the same None return. The fix narrows the except

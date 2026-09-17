@@ -1,5 +1,5 @@
 /**
- * INI presets panel — body-swap view inside the INI editor (Phase 3,
+ * INI presets panel — body-swap view inside the INI editor (see
  * docs/INI_PRESETS_SPEC.md). Cross-file scope: lists builtin +
  * install-local presets, previews via server dry-run (current -> new),
  * applies through the locked/backed-up batch path.

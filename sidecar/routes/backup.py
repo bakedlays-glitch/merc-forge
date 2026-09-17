@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from mercwizard_core import backup as backup_mod
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 
 from .roster import _resolve_install
 from .state import get_state
@@ -42,7 +42,7 @@ def take_snapshot(payload: BackupReason, install_id: str | None = Query(default=
         ctx.aim_bios_edt_path(),
         ctx.merc_bios_edt_path(),
     ]
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         entry = backup_mod.snapshot(info.path, info.id, files, payload.reason)
     return entry.to_dict()
 
@@ -52,7 +52,7 @@ def restore(payload: RestorePayload, install_id: str | None = Query(default=None
     info = _resolve_install(install_id)
     state = get_state()
     try:
-        with cross_process_install_lock(info.id), state.write_lock:
+        with cross_process_install_root_lock(info.path), state.write_lock:
             count = backup_mod.restore(payload.backup_id, info.id, info.path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail={"error": "BACKUP_NOT_FOUND", "message": str(e)})

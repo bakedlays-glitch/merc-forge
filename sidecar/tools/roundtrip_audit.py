@@ -18,10 +18,10 @@ surface here as `appendix` divergences instead of staying masked.
 READ-ONLY: never writes to any install. Run on demand, e.g.::
 
     sidecar/.venv/Scripts/python.exe tools/roundtrip_audit.py \
-        "C:/Jagged Alliance 2/Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+        "<path to your JA2 1.13 install>"
 
     sidecar/.venv/Scripts/python.exe tools/roundtrip_audit.py \
-        --installs-dir "C:/Jagged Alliance 2"
+        --installs-dir "<dir holding your JA2 installs>"
 
 Exit code 0 iff every map round-trips byte-identically (the gate).
 """

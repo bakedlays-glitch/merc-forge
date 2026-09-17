@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from mercwizard_core import bundle as bundle_mod
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 
 from .roster import _resolve_install
 from .state import get_state
@@ -102,7 +102,7 @@ def import_bundle(payload: ImportWritePayload, install_id: str | None = Query(de
     info = _resolve_install(install_id)
     state = get_state()
     try:
-        with cross_process_install_lock(info.id), state.write_lock:
+        with cross_process_install_root_lock(info.path), state.write_lock:
             report = bundle_mod.deploy_import(
                 install_root=info.path,
                 bundle_path=Path(payload.bundle_path),

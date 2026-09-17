@@ -1,7 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
 import { listBackgrounds, type BackgroundModifier } from "../lib/api";
+import BackgroundLibraryBrowser from "./BackgroundLibraryBrowser";
 
 interface Props {
   value: number;
@@ -32,6 +34,8 @@ function formatModifier(m: BackgroundModifier): string {
  *  was a UINT8. The selected background's description + stat/AP bonuses are
  *  shown below the dropdown. */
 export default function BackgroundPicker({ value, onChange }: Props) {
+  const qc = useQueryClient();
+  const [libOpen, setLibOpen] = useState(false);
   const bgs = useQuery({
     queryKey: ["backgrounds"],
     queryFn: () => listBackgrounds(),
@@ -76,15 +80,25 @@ export default function BackgroundPicker({ value, onChange }: Props) {
   const mods = selected?.modifiers ?? [];
 
   return (
+    <>
     <label className="block">
       <span className="flex items-center justify-between">
         <span className="text-sm font-medium text-wasteland-100">Background</span>
-        <Link
-          to="/backgrounds"
-          className="text-xs text-wasteland-400 hover:text-rust-400 font-normal"
-        >
-          Manage…
-        </Link>
+        <span className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={(e) => { e.preventDefault(); setLibOpen(true); }}
+            className="text-xs text-wasteland-400 hover:text-rust-400 font-normal"
+          >
+            Browse library…
+          </button>
+          <Link
+            to="/backgrounds"
+            className="text-xs text-wasteland-400 hover:text-rust-400 font-normal"
+          >
+            Manage…
+          </Link>
+        </span>
       </span>
       <select
         className="input mt-1"
@@ -120,5 +134,35 @@ export default function BackgroundPicker({ value, onChange }: Props) {
         </p>
       )}
     </label>
+      {libOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={() => setLibOpen(false)}
+        >
+          <div
+            className="w-[72rem] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-lg border border-wasteland-700 bg-wasteland-900 p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-semibold">Background Library — pick one for this merc</h3>
+              <button type="button" className="btn-ghost text-sm" onClick={() => setLibOpen(false)}>
+                Close
+              </button>
+            </div>
+            <BackgroundLibraryBrowser
+              onAssigned={(id) => {
+                // The imported entry is now a real catalog row — refetch the
+                // dropdown so it appears, then select it on this merc.
+                qc.invalidateQueries({ queryKey: ["backgrounds"] });
+                onChange(id);
+                setLibOpen(false);
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </>
   );
 }

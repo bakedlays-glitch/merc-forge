@@ -5,13 +5,17 @@ outside the active install — the `_confine_install_path` guard on
 `_validate_path` / `new_sector` / `save_copy_as`, plus the VFS `resolve_*`
 path-join backstop (`VfsLayout._reject_unsafe_rel`).
 """
+import importlib
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
 import routes.mapforge as mf
 from routes.mapforge import (
+    ExtractSlfMapBody,
     NewSectorBody,
     _confine_install_path,
     _validate_path,
@@ -97,6 +101,49 @@ def test_validate_path_rejects_out_of_install(monkeypatch, tmp_path):
     with pytest.raises(HTTPException) as exc:
         _validate_path(str(outside), ".dat")
     assert exc.value.status_code == 403
+
+
+def test_slf_archive_outside_active_install_is_rejected(monkeypatch, tmp_path):
+    install = tmp_path / "install"
+    install.mkdir()
+    _active(monkeypatch, install)
+    outside = tmp_path / "outside.slf"
+    outside.write_bytes(b"not-an-slf")
+    with pytest.raises(HTTPException) as exc:
+        mf._resolve_slf_uri(f"slf://{outside}!/A1.dat")
+    assert exc.value.status_code == 403
+
+
+def test_extract_slf_endpoint_rejects_external_archive_before_opening_it(
+    monkeypatch, tmp_path,
+):
+    """The extraction endpoint must use the same SLF confinement guard."""
+    install = tmp_path / "install"
+    (install / "Data-1.13").mkdir(parents=True)
+    outside = tmp_path / "outside.slf"
+    outside.write_bytes(b"not-an-slf")
+    state = SimpleNamespace(
+        active=lambda: SimpleNamespace(id="active", path=str(install)),
+        write_lock=threading.RLock(),
+    )
+    opened = False
+
+    def fail_if_opened(_path):
+        nonlocal opened
+        opened = True
+        raise AssertionError("external SLF must not be opened")
+
+    slf_module = importlib.import_module("ja2py.fileformats.SlfFS")
+    monkeypatch.setattr(mf, "get_state", lambda: state)
+    monkeypatch.setattr(mf, "_iso_renderer_available", True)
+    monkeypatch.setattr(slf_module, "SlfFS", fail_if_opened)
+    with pytest.raises(HTTPException) as exc:
+        mf.extract_slf_to_loose(
+            ExtractSlfMapBody(slf_uri=f"slf://{outside}!/A1.dat"),
+        )
+    assert exc.value.status_code == 403
+    assert opened is False
+    assert not (install / "Data-1.13" / "Maps" / "A1.dat").exists()
 
 
 # ── VFS resolve_* path-join backstop ───────────────────────────────────────

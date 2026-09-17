@@ -4,6 +4,7 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import App from "./App";
+import { DialogProvider } from "./components/DialogProvider";
 import "./styles/globals.css";
 
 const queryClient = new QueryClient({
@@ -64,7 +65,9 @@ ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <App />
+        <DialogProvider>
+          <App />
+        </DialogProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </React.StrictMode>

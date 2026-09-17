@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Perf benchmark: roster load + portrait-sheet bake / on-disk cache.
 
-Locks in the 2026-05-31 perf fixes so a regression shows up as a budget
+Locks in the perf fixes so a regression shows up as a budget
 failure instead of a silent slowdown (per docs/TESTING_MATRIX.md rule
 "no perf change ships without before/after numbers"):
 

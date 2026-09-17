@@ -6,7 +6,7 @@
 // but NEVER in the running `mercwizard.exe`. Symptom is "I edited
 // frontend code, ran the launcher, and the change isn't there."
 //
-// Discovered 2026-05-26 while debugging the WebGL Z-buffer wall-clip
+// Discovered while debugging the WebGL Z-buffer wall-clip
 // fix: shell binary was from 18:20:50 while frontend dist was from
 // 19:30:09 — the launcher rebuilt the frontend bundle, but the
 // embedded frontend in the shell binary stayed stale.

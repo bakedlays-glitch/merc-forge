@@ -349,7 +349,7 @@ def test_repair_orphan_pair_refuses_to_overwrite_existing(tmp_path: Path) -> Non
     assert dst.read_bytes() == b"existing-target"
 
 
-# ── Nudge offset (bug-review #102) ─────────────────────────────────────
+# ── Nudge offset ─────────────────────────────────────
 
 
 def test_nudge_overlay_offset_shifts_signed_int16(tmp_path: Path) -> None:
@@ -793,3 +793,60 @@ def test_set_overlay_offset_rejects_out_of_range_frame(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=">= frame count"):
         set_overlay_offset(sti_path, face_index=10, offset_x=0, offset_y=0)
+
+
+# ─── route-level target resolution (multi-layer duplicates) ─────────────
+
+def _info(name: str, relative_path: str, frames: int = 5) -> FaceGearInfo:
+    return FaceGearInfo(
+        path=Path("C:/fake") / relative_path,
+        name=name,
+        relative_path=relative_path,
+        frame_count=frames,
+        canvas_size=(48, 43),
+        is_imp_variant=name.lower().endswith("_imp.sti"),
+    )
+
+
+def test_resolve_facegear_target_bare_name_takes_first_match() -> None:
+    """Bare sti_name = first enumerated match — the copy the UI displays."""
+    from routes.facegear import _resolve_facegear_target
+
+    infos = [
+        _info("Face_GasMask.sti", "Data/faces/FACESGEAR/Face_GasMask.sti", 255),
+        _info("Face_GasMask.sti", "Data-UB/faces/FACESGEAR/Face_GasMask.sti", 254),
+    ]
+    target = _resolve_facegear_target(infos, "Face_GasMask.sti")
+    assert target is not None
+    assert target.relative_path.startswith("Data/")
+
+
+def test_resolve_facegear_target_relative_path_pins_layer() -> None:
+    """relative_path pins the exact data-layer copy, slash/case-insensitive."""
+    from routes.facegear import _resolve_facegear_target
+
+    infos = [
+        _info("Face_GasMask.sti", "Data/faces/FACESGEAR/Face_GasMask.sti", 255),
+        _info("Face_GasMask.sti", "Data-UB/faces/FACESGEAR/Face_GasMask.sti", 254),
+    ]
+    target = _resolve_facegear_target(
+        infos, "Face_GasMask.sti",
+        relative_path=r"data-ub\faces\facesgear\face_gasmask.sti",
+    )
+    assert target is not None
+    assert target.frame_count == 254
+
+
+def test_resolve_facegear_target_stale_relative_path_returns_none() -> None:
+    """A relative_path that no longer resolves must NOT silently retarget
+    another layer's file — the route 404s instead."""
+    from routes.facegear import _resolve_facegear_target
+
+    infos = [
+        _info("Face_GasMask.sti", "Data/faces/FACESGEAR/Face_GasMask.sti", 255),
+    ]
+    target = _resolve_facegear_target(
+        infos, "Face_GasMask.sti",
+        relative_path="Data-UB/faces/FACESGEAR/Face_GasMask.sti",
+    )
+    assert target is None

@@ -199,8 +199,14 @@ def set_room_id(parsed: Dict[str, Any], gridno: int, room_id: int) -> int:
     world_max = parsed["rows"] * parsed["cols"]
     if not 0 <= gridno < world_max:
         raise EditOpError(f"gridno {gridno} out of range 0..{world_max - 1}")
-    if not 0 <= room_id <= 0xFFFF:
-        raise EditOpError(f"room_id {room_id} out of range 0..65535")
+    # Cap at 65529, not 0xFFFF: the engine indexes
+    # gubWorldRoomHidden[MAX_ROOMS] with MAX_ROOMS=65530 and no bounds
+    # check (see validate.py ROOM_ID_OVER_CAP) — 65530..65535 is an
+    # out-of-bounds array access in-game, and save doesn't block on
+    # validator errors, so refuse it at the edit boundary.
+    if not 0 <= room_id <= 65529:
+        raise EditOpError(f"room_id {room_id} out of range 0..65529 "
+                          f"(engine MAX_ROOMS=65530)")
     if parsed["room_bytes_per_tile"] == 1 and room_id > 0xFF:
         raise EditOpError(
             f"this map stores rooms as 1 byte/tile (minor<29); "

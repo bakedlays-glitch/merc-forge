@@ -1,4 +1,4 @@
-"""Tests for the JSD writer endpoint added 2026-05-24 as part of the
+"""Tests for the JSD writer endpoint added as part of the
 Tileset Editor / MapForge split. The writer patches specific byte spans
 in place — its load-bearing guarantee is that bytes OUTSIDE the patched
 spans stay byte-identical to the input. If that breaks, the JSD's

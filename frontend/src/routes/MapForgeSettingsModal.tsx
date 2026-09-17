@@ -15,6 +15,7 @@
  */
 import { useEffect, useState } from "react";
 
+import { useDialog } from "../components/DialogProvider";
 import {
   bindingFor,
   DEFAULT_SETTINGS,
@@ -38,18 +39,27 @@ export function MapForgeSettingsModal({
   onChange: (next: MapForgeSettings) => void;
   onClose: () => void;
 }) {
+  const { confirm } = useDialog();
   // ── Esc closes the modal (matches the rest of MapForge modals).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Don't close while a rebind capture is active — Esc cancels
-      // the capture instead. The capture component handles that.
-      if (e.key === "Escape" && !document.querySelector("[data-rebind-active]")) {
+      // Don't close while a rebind capture is active (Esc cancels the
+      // capture) or while an app dialog — e.g. the reset-all confirm — is
+      // stacked on top (Esc should dismiss that dialog, not this modal).
+      if (
+        e.key === "Escape"
+        && !document.querySelector("[data-rebind-active]")
+        && !document.querySelector("[data-app-dialog]")
+      ) {
         onClose();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Transient "your rebind stole a combo from action X" notice.
+  const [rebindNotice, setRebindNotice] = useState<string | null>(null);
 
   // Group actions by their declared group for visual sectioning.
   const groups = new Map<string, MapForgeAction[]>();
@@ -64,10 +74,22 @@ export function MapForgeSettingsModal({
     onChange(next);
   };
   const setBinding = (id: MapForgeActionId, binding: string) => {
-    update({
-      ...settings,
-      keybindings: { ...settings.keybindings, [id]: binding },
-    });
+    // A binding can only drive one action (actionForBinding returns the
+    // first declaration-order match, so a duplicate silently shadows the
+    // later action). Steal the combo: unbind the previous owner explicitly
+    // and say so, instead of leaving a dead-looking row.
+    const next = { ...settings.keybindings, [id]: binding };
+    let notice: string | null = null;
+    if (binding) {
+      for (const a of MAPFORGE_ACTIONS) {
+        if (a.id !== id && bindingFor(settings, a.id) === binding) {
+          next[a.id] = "";
+          notice = `${formatBinding(binding)} was bound to "${a.label}" — that action is now unbound.`;
+        }
+      }
+    }
+    update({ ...settings, keybindings: next });
+    setRebindNotice(notice);
   };
   const clearBinding = (id: MapForgeActionId) => setBinding(id, "");
   const resetBinding = (id: MapForgeActionId) => {
@@ -76,8 +98,13 @@ export function MapForgeSettingsModal({
     delete next[id];
     update({ ...settings, keybindings: next });
   };
-  const resetAllDefaults = () => {
-    if (confirm("Reset ALL MapForge settings to defaults? This clears your hotkey overrides + brush/tool defaults.")) {
+  const resetAllDefaults = async () => {
+    if (await confirm({
+      title: "Reset all settings?",
+      body: "Reset ALL MapForge settings to defaults? This clears your hotkey overrides + brush/tool defaults.",
+      confirmLabel: "Reset all",
+      destructive: true,
+    })) {
       saveSettings(DEFAULT_SETTINGS);
       onChange(DEFAULT_SETTINGS);
     }
@@ -125,6 +152,11 @@ export function MapForgeSettingsModal({
               that action. Press Esc to cancel a rebind in progress.
               "Default" reverts to the shipped binding.
             </p>
+            {rebindNotice && (
+              <p className="mb-2 rounded border border-amber-800 bg-amber-950/50 px-2 py-1 text-[10px] text-amber-300">
+                {rebindNotice}
+              </p>
+            )}
             {Array.from(groups.entries()).map(([group, actions]) => (
               <div key={group} className="mb-3">
                 <div className="mb-1 text-[10px] font-semibold uppercase text-gray-500">
@@ -156,7 +188,7 @@ export function MapForgeSettingsModal({
                 <div>
                   <div className="text-xs text-gray-300">Default tool</div>
                   <div className="text-[10px] text-gray-500">
-                    Selected when a sector first opens.
+                    Selected when the editor opens.
                   </div>
                 </div>
                 <select
@@ -177,7 +209,7 @@ export function MapForgeSettingsModal({
                     Default brush radius: <span className="font-mono text-gray-100">{settings.defaultBrushRadius}</span>
                   </div>
                   <div className="text-[10px] text-gray-500">
-                    Pencil brush starts this size on each new session.
+                    Pencil brush starts this size when the editor opens.
                   </div>
                 </div>
                 <input
@@ -217,6 +249,27 @@ export function MapForgeSettingsModal({
               </div>
               <div className="flex items-center justify-between rounded border border-gray-800 bg-gray-900 px-2 py-1.5">
                 <div className="flex-1 pr-2">
+                  <div className="text-xs text-gray-300">Legacy tools</div>
+                  <div className="text-[10px] text-gray-500">
+                    Show the Inspect / Pencil / Shape / Select bar and route
+                    input through the old per-tool branches, instead of the
+                    mode-less model (arm a sprite from the palette → a
+                    click-place ghost; drag a marquee to select sprites;
+                    Ctrl+C/X/V, Delete, arrows, R). Off by default.
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.legacyTools}
+                  onChange={(e) => update({
+                    ...settings,
+                    legacyTools: e.target.checked,
+                  })}
+                  className="h-4 w-4"
+                />
+              </div>
+              <div className="flex items-center justify-between rounded border border-gray-800 bg-gray-900 px-2 py-1.5">
+                <div className="flex-1 pr-2">
                   <div className="text-xs text-gray-300">Show shadow slots in palette</div>
                   <div className="text-[10px] text-gray-500">
                     Reveal the shadow-only slots (FIRSTSHADOW,
@@ -227,9 +280,13 @@ export function MapForgeSettingsModal({
                 </div>
                 <input
                   type="checkbox"
-                  checked={settings.showShadowSlots}
-                  disabled={!settings.autoPairShadows
-                            ? false : false /* always enabled */}
+                  // With auto-pair off the Sector forces shadow slots
+                  // visible regardless of this value, or the user would
+                  // have no way to paint a shadow at all. Show that:
+                  // checked and locked, rather than a box that unticks
+                  // and changes nothing.
+                  checked={settings.showShadowSlots || !settings.autoPairShadows}
+                  disabled={!settings.autoPairShadows}
                   onChange={(e) => update({
                     ...settings,
                     showShadowSlots: e.target.checked,

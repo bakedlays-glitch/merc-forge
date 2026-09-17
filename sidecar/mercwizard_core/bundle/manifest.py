@@ -69,7 +69,7 @@ class WmercManifest(BaseModel):
     Forward-compat policy: the root uses `extra="ignore"` so newer bundles
     with fields older binaries don't know about still parse (the unknown
     fields are dropped silently, but the known portion still binds the
-    merc). The Eskimo `merc_binding` regression on 2026-05-14 was caused
+    merc). The Eskimo `merc_binding` regression was caused
     by `extra="forbid"` here — every existing installer rejected the new
     field with `extra_forbidden`. Schema additions on the root remain
     safe to ship without forcing every installer to rebuild.
@@ -82,7 +82,7 @@ class WmercManifest(BaseModel):
 
     wmerc_version: int = 1
     tool: str = "MercWizard"
-    tool_version: str = "2.0.0"
+    tool_version: str = "1.0.0-beta.4"
     # Set explicitly by the export-side constructor (see export.py). A
     # default_factory here would re-fire at parse time too, overwriting
     # the source's timestamp when an older binary parses a newer bundle.

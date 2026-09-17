@@ -13,11 +13,13 @@ system except to optionally read other slots' state for cross-checks
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional, TYPE_CHECKING
+from typing import Mapping, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel
 
+from .edt_text import edt_safe
 from .models import AimBinding, Gear, GearKit, Merc
+from .body_types import BodyTypeDef, VANILLA_BODY_TYPES
 
 # `SlotInfo` is type-annotated only (signatures in audit_merc and
 # audit_full). With `from __future__ import annotations` enabled at the
@@ -27,40 +29,11 @@ from .models import AimBinding, Gear, GearKit, Merc
 # `from .audit import Severity` to slot_picker (a reasonable refactor
 # for shared error codes) won't crash startup with a circular import.
 # Mirrors the existing lazy-import pattern used inside audit_merc for
-# inject.edt.find_unencodable_chars. Bug-review finding C5.
+# inject.edt.find_unencodable_chars.
 if TYPE_CHECKING:
     from .slot_picker import SlotInfo
 
 
-# SoldierBodyTypes from Tactical/Animation Data.h:36-73. Closed enum —
-# adding a new ID requires recompile. Sprites for any value not in this
-# set don't exist, so the engine renders garbage or crashes.
-# (Values 4-41 + 49-58 + 62+ are unused / reserved / vehicle slots.)
-_HUMAN_BODY_TYPES = {
-    0: ("REGMALE", "male"),
-    1: ("BIGMALE", "male"),
-    2: ("STOCKYMALE", "male"),
-    3: ("REGFEMALE", "female"),
-}
-_MONSTER_BODY_TYPES = {
-    42: ("ADULTFEMALEMONSTER", "female"),
-    43: ("AM_MONSTER", "male"),
-    44: ("YAF_MONSTER", "female"),
-    45: ("YAM_MONSTER", "male"),
-    46: ("LARVAE_MONSTER", None),
-    47: ("INFANT_MONSTER", None),
-    48: ("QUEENMONSTER", "female"),
-}
-_ANIMAL_BODY_TYPES = {
-    59: ("BLOODCAT", None),
-    60: ("COW", None),
-    61: ("CROW", None),
-}
-KNOWN_BODY_TYPES: dict[int, tuple[str, Optional[str]]] = {
-    **_HUMAN_BODY_TYPES,
-    **_MONSTER_BODY_TYPES,
-    **_ANIMAL_BODY_TYPES,
-}
 VANILLA_RACE_MAX = 4  # 0-4 are vanilla; mods extend
 
 
@@ -116,7 +89,12 @@ def _is_merc_bound_fallback(slot: int) -> bool:
     return slot in _VANILLA_MERC_SCATTERED
 
 
-def audit_merc(merc: Merc, *, slot_info: Optional[SlotInfo] = None) -> list[Issue]:
+def audit_merc(
+    merc: Merc,
+    *,
+    slot_info: Optional[SlotInfo] = None,
+    body_types: Mapping[int, BodyTypeDef] | None = None,
+) -> list[Issue]:
     """Validate a Merc model against engine field caps and slot consistency.
 
     ``slot_info`` carries live AIM/MERC row data + engine-named-slot tier.
@@ -172,34 +150,24 @@ def audit_merc(merc: Merc, *, slot_info: Optional[SlotInfo] = None) -> list[Issu
             message=f"Additional info is {len(merc.additionalInfoText)} chars; max 160. Approaching limit.",
         ))
 
-    # Surrogate / supplementary-plane character guard. The EDT bio
-    # encoder is a 16-bit UTF-16 writer with no surrogate-pair handling
-    # — any codepoint above 0xFFFE gets clamped to 0xFFFE on save and
-    # renders as the `□` sentinel glyph in-game. This catches emoji,
-    # rare CJK, mathematical symbols, etc. before the user commits.
-    from .inject.edt import find_unencodable_chars
+    # Biography fields are normalized at the EDT encode boundary. Preview the
+    # exact value that will be written without applying EDT policy to XML-only
+    # names and nicknames.
     for field_name, text in (
         ("biographyText", merc.biographyText),
         ("additionalInfoText", merc.additionalInfoText),
-        ("zName", merc.zName),
-        ("zNickname", merc.zNickname),
     ):
-        bad = find_unencodable_chars(text)
-        if bad:
-            # Show up to 3 sample characters so the user can ctrl-F to
-            # them in the editor without us flooding the message.
-            sample = ", ".join(f"{c!r} at index {i}" for i, c in bad[:3])
-            more = f" (+{len(bad) - 3} more)" if len(bad) > 3 else ""
+        normalized = edt_safe(text) or ""
+        if normalized != text:
             issues.append(Issue(
-                severity=Severity.WARN,
+                severity=Severity.INFO,
                 field=field_name,
-                code="CONTAINS_UNENCODABLE",
+                code="NORMALIZED_FOR_EDT",
                 message=(
-                    f"{field_name} has {len(bad)} character(s) the engine's bio "
-                    f"reader can't represent ({sample}{more}). They'll render as "
-                    "the `□` placeholder glyph in-game — remove them or use a "
-                    "1-byte equivalent before saving."
+                    f"{field_name} will be normalized for the JA2 EDT font. "
+                    f"Preview: {normalized!r}"
                 ),
+                suggested_fix=normalized,
             ))
 
     # ubFaceIndex engine-cap guard. JA2 1.13 face STIs are LAZY-loaded
@@ -367,21 +335,22 @@ def audit_merc(merc: Merc, *, slot_info: Optional[SlotInfo] = None) -> list[Issu
     # ubBodyType must be a known SoldierBodyTypes enum value. Unknown
     # values index past the end of gAnimControl[] and crash on render
     # (engine invariant — see wasteland-engine-systems source notes).
-    if merc.ubBodyType not in KNOWN_BODY_TYPES:
+    valid_body_types = body_types if body_types is not None else VANILLA_BODY_TYPES
+    if merc.ubBodyType not in valid_body_types:
         issues.append(Issue(
             severity=Severity.ERROR,
             field="ubBodyType",
             code="BODY_TYPE_UNKNOWN",
             message=(
-                f"ubBodyType={merc.ubBodyType} is not a known SoldierBodyTypes "
-                "enum value. Valid: 0-3 (humans), 42-48 (monsters), 59-61 "
-                "(animals). Other values index past the engine's animation "
-                "surface array and crash on render."
+                f"ubBodyType={merc.ubBodyType} is not valid for the selected "
+                "target engine's SoldierBodyTypes registry. It may index past "
+                "the animation surface array and crash on render."
             ),
             suggested_fix="Set to 0 (REGMALE) for a default human male merc",
         ))
     else:
-        body_name, body_sex = KNOWN_BODY_TYPES[merc.ubBodyType]
+        body_type = valid_body_types[merc.ubBodyType]
+        body_name, body_sex = body_type.name, body_type.sex
         # Cross-check bSex when the body type implies one
         if body_sex is not None:
             merc_sex_label = "female" if merc.bSex == 1 else "male"
@@ -524,6 +493,7 @@ def audit_full(
     eye_spacing_px_at_48x43: Optional[float] = None,
     *,
     slot_info: Optional[SlotInfo] = None,
+    body_types: Mapping[int, BodyTypeDef] | None = None,
 ) -> list[Issue]:
     """Run every applicable check and aggregate issues.
 
@@ -531,7 +501,7 @@ def audit_full(
     live AIM/MERC row data. Without it, audit falls back to vanilla 1.13
     data conventions.
     """
-    issues = audit_merc(merc, slot_info=slot_info)
+    issues = audit_merc(merc, slot_info=slot_info, body_types=body_types)
     if gear is not None:
         issues.extend(audit_gear(gear, merc))
     if aim_binding is not None:

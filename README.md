@@ -3,7 +3,7 @@
 A standalone Windows tool for the Jagged Alliance 2 v1.13 community — vanilla, AIMNAS, Wildfire, The Wasteland, or anything else built on the 1.13 codebase. Two halves:
 
 - **Merc management** — create, edit, move, duplicate, delete, and share mercs across installs without hand-editing XML, hex-patching EDT files, or memorizing the documented AIMBIOS off-by-one bug.
-- **Map Forge** — open any 1.13 sector `.dat`, paint tiles with an iso-faithful client-side renderer, stamp multi-tile structs (helis, vehicles) in one click, and save back to disk with `.bak`. *(A built-in browser for picking stock-tileset art is on the way in a post-beta update.)*
+- **Map Forge** — open any 1.13 sector `.dat`, paint tiles with an iso-faithful client-side renderer, browse stock-tileset art, stamp multi-tile structs (helis, vehicles) in one click, and save back to disk with `.bak`.
 
 > **Beta.** This is an early public beta — expect rough edges, and please [report bugs](#reporting-bugs). Every operation backs up the files it touches before writing, so mistakes are one click away from being undone. The installer isn't code-signed yet, so Windows SmartScreen will warn "unknown publisher" — click **More info → Run anyway**. (Some antivirus may also flag the bundled Python sidecar — a known PyInstaller false-positive, not malware.)
 >
@@ -11,7 +11,7 @@ A standalone Windows tool for the Jagged Alliance 2 v1.13 community — vanilla,
 
 ## Quick install
 
-The download is a single Windows installer (`Merc Forge_1.0.0_x64-setup.exe`) that pulls the ~1.7 MB WebView2 bootstrapper from Microsoft at install time if WebView2 isn't already on the machine. On Windows 10 (1803+) and Windows 11 WebView2 is preinstalled, so this is usually a no-op and the install completes offline.
+The current local Windows installer is `Merc Forge_1.0.0-beta.4_x64-setup.exe`; public release filenames follow the release tag and may differ. The lite installer pulls the ~1.7 MB WebView2 bootstrapper from Microsoft at install time if WebView2 isn't already on the machine. On Windows 10 (1803+) and Windows 11 WebView2 is preinstalled, so this is usually a no-op and the install completes offline.
 
 Steps:
 
@@ -132,4 +132,4 @@ Merc Forge's own source is licensed under the MIT License — see [LICENSE](LICE
 
 ## For developers
 
-Source layout, build commands, and architecture notes live in [DEVELOPER.md](DEVELOPER.md). The Python sidecar at `sidecar/` has 500+ pytest tests covering audit rules, STI generation, EDT routing, bundle round-trip, cross-install move, security (path traversal), and the explicit-frames animation pipeline. The Tauri shell at `shell/` is a thin wrapper that picks the sidecar port, manages the watchdog, and ships the WebView2 bootstrapper.
+Source layout, build commands, and architecture notes live in [DEVELOPER.md](DEVELOPER.md). The Python sidecar at `sidecar/` has 1,000+ pytest tests covering audit rules, STI generation, EDT routing, bundle round-trip, cross-install move, security (path traversal), Map Forge, and the explicit-frames animation pipeline. The Tauri shell at `shell/` is a thin wrapper that picks the sidecar port, manages the watchdog, and ships the WebView2 bootstrapper.

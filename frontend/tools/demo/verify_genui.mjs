@@ -31,7 +31,7 @@ const base = flag("--base") ?? "http://localhost:1420";
 // 1.13 install (the folder holding Data-1.13); the placeholder default
 // just documents the shape — the rig won't run until it points at a real
 // install. The .dat is the in-repo scratch test copy (never a live map).
-const INSTALL = process.env.JA2_INSTALL || "C:/Jagged Alliance 2/<your-1.13-install>";
+const INSTALL = process.env.JA2_INSTALL || "C:/Games/Jagged Alliance 2/<your-1.13-install>";
 const params = new URLSearchParams({
   dat: path.join(REPO, "scratch", "clifftest", "A2.DAT"),
   xml: path.join(INSTALL, "Data-1.13", "Ja2Set.dat.xml"),

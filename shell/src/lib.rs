@@ -9,11 +9,207 @@
 //! - Kill the sidecar cleanly when the window closes (no orphan processes)
 //! - Expose a small set of Tauri commands the frontend invokes for port discovery + file dialogs
 
-mod sidecar;
 mod commands;
+mod sidecar;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+/// In-app route requested via `--route` on the command line, consumed once by
+/// the frontend (`take_initial_route`). Lets scripts open e.g. a MapForge
+/// sector directly: `mercwizard.exe --route "/mapforge/sector?dat=...&tileset=N"`.
+pub struct InitialRoute(pub std::sync::Mutex<Option<String>>);
+
+/// Accepts `--route=/path` and `--route /path`. Only in-app absolute paths —
+/// a leading `/` but not `//` (protocol-relative would escape the webview).
+fn route_from_argv(argv: &[String]) -> Option<String> {
+    let mut route: Option<String> = None;
+    let mut index = 0;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if arg == "--" {
+            break;
+        }
+        if let Some(v) = arg.strip_prefix("--route=") {
+            if route.is_some() {
+                return None;
+            }
+            route = Some(v.to_string());
+        } else if arg == "--route" {
+            if route.is_some() {
+                return None;
+            }
+            let value = argv.get(index + 1)?;
+            if value.starts_with("--") {
+                return None;
+            }
+            route = Some(value.to_string());
+            index += 1;
+        }
+        index += 1;
+    }
+    route.filter(|r| is_safe_internal_route(r))
+}
+
+/// Validates only the route pathname. Query and hash values remain opaque so
+/// callers may use them for Windows paths, while route separators cannot be
+/// smuggled in raw, percent-encoded, or double-percent-encoded form.
+fn is_safe_internal_route(route: &str) -> bool {
+    if !route.starts_with('/') {
+        return false;
+    }
+    let suffix_at = route.find(['?', '#']).unwrap_or(route.len());
+    let mut pathname = route[..suffix_at].to_string();
+
+    loop {
+        if pathname.starts_with("//") || pathname.contains('\\') {
+            return false;
+        }
+        let decoded = match decode_path_once(&pathname) {
+            Some(value) => value,
+            None => return false,
+        };
+        if decoded == pathname {
+            return true;
+        }
+        if decoded.contains('\\')
+            || decoded.contains("//")
+            || decoded.contains('?')
+            || decoded.contains('#')
+        {
+            return false;
+        }
+        pathname = decoded;
+    }
+}
+
+fn decode_path_once(pathname: &str) -> Option<String> {
+    let bytes = pathname.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = *bytes.get(index + 1)?;
+        let low = *bytes.get(index + 2)?;
+        let byte = (hex_value(high)? << 4) | hex_value(low)?;
+        // Reject encoded pathname separators at every decode level before they
+        // can affect routing. Raw separators are checked by the caller.
+        if byte == b'/' || byte == b'\\' || byte == b'?' || byte == b'#' {
+            return None;
+        }
+        decoded.push(byte);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn is_final_exit_event(event: &tauri::RunEvent) -> bool {
+    matches!(event, tauri::RunEvent::Exit)
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::route_from_argv;
+
+    #[test]
+    fn route_equals_form_accepts_safe_path_and_preserves_query_hash() {
+        assert_eq!(
+            route_from_argv(&["mercwizard.exe".into(), "--route=/hub?tab=1#top".into()]),
+            Some("/hub?tab=1#top".into())
+        );
+    }
+
+    #[test]
+    fn route_split_form_accepts_safe_path_and_preserves_query_hash() {
+        assert_eq!(
+            route_from_argv(&[
+                "mercwizard.exe".into(),
+                "--route".into(),
+                "/mapforge/sector?dat=A1.dat#inspect".into(),
+            ]),
+            Some("/mapforge/sector?dat=A1.dat#inspect".into())
+        );
+    }
+
+    #[test]
+    fn route_parser_rejects_encoded_or_backslash_path_separators() {
+        for value in [
+            "//outside.example",
+            "/mapforge\\sector",
+            "/%2foutside",
+            "/%5coutside",
+            "/%252foutside",
+            "/%25252Foutside",
+            "/%25%32%66outside",
+            "/%25%35%43outside",
+            "/mapforge%3F//outside",
+            "/mapforge%23//outside",
+            "/mapforge%2Fsector",
+            "/mapforge%5Csector",
+            "/bad%",
+        ] {
+            assert_eq!(
+                route_from_argv(&["mercwizard.exe".into(), format!("--route={value}")]),
+                None,
+                "{value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn route_parser_rejects_missing_flag_values_and_duplicates() {
+        for argv in [
+            vec!["mercwizard.exe", "--route"],
+            vec!["mercwizard.exe", "--route", "--other"],
+            vec!["mercwizard.exe", "--route", "--route=/hub"],
+            vec!["mercwizard.exe", "--route="],
+            vec!["mercwizard.exe", "--route=", "--route=/hub"],
+            vec!["mercwizard.exe", "--route=/hub", "--route", "/tools"],
+            vec!["mercwizard.exe", "--route=/hub", "--route=/tools"],
+        ] {
+            assert_eq!(
+                route_from_argv(&argv.into_iter().map(String::from).collect::<Vec<_>>()),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn route_parser_does_not_interpret_arguments_after_double_dash() {
+        assert_eq!(
+            route_from_argv(&["mercwizard.exe".into(), "--".into(), "--route=/hub".into(),]),
+            None
+        );
+    }
+
+    #[test]
+    fn route_parser_keeps_query_and_hash_values_opaque() {
+        let route = "/mapforge/sector?next=%2Fhub%3Ftab%3D1#return=%23top";
+        assert_eq!(
+            route_from_argv(&["mercwizard.exe".into(), format!("--route={route}")]),
+            Some(route.into())
+        );
+    }
+
+    #[test]
+    fn only_the_final_run_event_releases_the_sidecar_lifeline() {
+        assert!(super::is_final_exit_event(&tauri::RunEvent::Exit));
+        assert!(!super::is_final_exit_event(&tauri::RunEvent::Ready));
+    }
+}
 
 /// `%APPDATA%\MercWizard\logs\` on Windows; `~/.config/MercWizard/logs/` elsewhere.
 fn log_dir() -> std::path::PathBuf {
@@ -64,21 +260,20 @@ pub fn run() {
     // The handle must outlive the program — drop it and the logger goes idle.
     std::mem::forget(logger_handle);
 
-    // Install panic hook BEFORE building the app. Cargo.toml sets
-    // `panic = "abort"` in release, so any panic on any thread terminates
-    // the process — without this hook the sidecar would be orphaned.
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        log::error!("Shell panic — killing sidecar before abort: {}", info);
-        sidecar::kill_latest_sidecar_blocking();
-        default_panic(info);
-    }));
+    // Cargo.toml sets `panic = "abort"` in release.  The sidecar's own
+    // authenticated parent lifeline is already connected before startup is
+    // considered ready, so an abort closes the shell socket and the long-lived
+    // PyInstaller runtime exits without an unsafe later PID cleanup attempt.
 
     tauri::Builder::default()
-        // Single-instance MUST be first — if a second copy is launched, the
-        // plugin terminates this process before any further setup runs, so
-        // we don't kill the first instance's sidecar in our orphan sweep.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // Single-instance MUST be first so a second launch terminates before
+        // any startup work can compete with the live instance.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // A second launch with `--route` is a navigation request from a
+            // script — forward it to the live webview before focusing.
+            if let Some(route) = route_from_argv(&argv) {
+                let _ = app.emit("open-route", route);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
@@ -87,10 +282,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // We're the unique instance now (single-instance plugin guaranteed
-            // it). Any mercwizard_core.exe still running is an orphan from a
-            // crashed prior session — kill it before we spawn our own.
-            sidecar::kill_orphan_sidecars();
+            // Cold-start `--route`: stash it; the frontend pulls it via
+            // `take_initial_route` once mounted (an emit here would race the
+            // listener).
+            let args: Vec<String> = std::env::args().collect();
+            app.manage(InitialRoute(std::sync::Mutex::new(route_from_argv(&args))));
 
             let app_handle = app.handle().clone();
             // Spawn the sidecar and block until it reports its bound port.
@@ -162,31 +358,21 @@ pub fn run() {
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                // Kill the sidecar before allowing the window to close so we don't
-                // leave an orphan Python process running in the background.
-                let app = window.app_handle();
-                if let Some(state) = app.try_state::<sidecar::SidecarState>() {
-                    sidecar::kill_sidecar(&state);
-                }
-            }
-        })
         .invoke_handler(tauri::generate_handler![
             commands::get_server_port,
             commands::get_server_token,
+            commands::take_initial_route,
             commands::pick_directory,
             commands::pick_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            // RunEvent::Exit fires for every shutdown path that goes through
-            // tao's event loop — OS shutdown, last window closed, app exit.
-            // CloseRequested above covers the normal close-button path; this
-            // is the safety net. kill_sidecar is idempotent (state.process
-            // is taken and replaced with None on first call).
-            if let tauri::RunEvent::Exit = event {
+            // Only this final event releases the sidecar lifeline. A
+            // CloseRequested event is cancellable by the webview's unsaved
+            // edit guard; releasing it there would leave a still-visible app
+            // with a dead backend.
+            if is_final_exit_event(&event) {
                 if let Some(state) = app_handle.try_state::<sidecar::SidecarState>() {
                     sidecar::kill_sidecar(&state);
                 }

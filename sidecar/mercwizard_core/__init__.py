@@ -10,4 +10,4 @@ This package has no FastAPI dependency. It can be used as a CLI library or
 imported by the sidecar's HTTP routes layer.
 """
 
-__version__ = "2.0.0"
+__version__ = "1.0.0-beta.4"

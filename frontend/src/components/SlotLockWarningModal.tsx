@@ -6,7 +6,7 @@ interface Props {
   /** The lock info for the slot the user is about to write to. */
   lock: SlotLockInfo;
   /** The action the user is taking — used in the prompt copy. */
-  action: "create" | "import" | "move" | "duplicate";
+  action: "create" | "import" | "move" | "duplicate" | "delete";
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -16,6 +16,7 @@ const ACTION_VERB: Record<Props["action"], string> = {
   import: "import to",
   move: "move a merc to",
   duplicate: "duplicate a merc to",
+  delete: "delete the merc at",
 };
 
 /** Confirmation modal shown before writing to a slot that's named in engine

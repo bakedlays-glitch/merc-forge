@@ -6,7 +6,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core import backup
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.inject import starting_gear
 from mercwizard_core.models import Gear
 
@@ -59,7 +60,16 @@ def put_gear(slot: int, gear: Gear, install_id: str | None = Query(default=None)
         })
     from mercwizard_core.install_context import make_install_context
     gear_path = make_install_context(info.path).gear_xml_path(for_write=True)
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
+        # Snapshot before the write — every sibling destructive route
+        # (merc, backgrounds, items, facegear, ini) does; a bad loadout
+        # overwrite must be one click from restored on the Backups page.
+        backup.snapshot(
+            install_root=info.path,
+            install_id=info.id,
+            files_to_back_up=[gear_path],
+            reason=f"gear_edit_slot_{slot}",
+        )
         starting_gear.upsert(gear_path, gear)
     return {"ok": True, "slot": slot}
 
@@ -70,6 +80,12 @@ def delete_gear(slot: int, install_id: str | None = Query(default=None)) -> dict
     state = get_state()
     from mercwizard_core.install_context import make_install_context
     gear_path = make_install_context(info.path).gear_xml_path(for_write=True)
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
+        backup.snapshot(
+            install_root=info.path,
+            install_id=info.id,
+            files_to_back_up=[gear_path],
+            reason=f"gear_delete_slot_{slot}",
+        )
         removed = starting_gear.clear_slot(gear_path, slot)
     return {"ok": True, "removed": removed}

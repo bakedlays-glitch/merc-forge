@@ -42,7 +42,7 @@ _logger = logging.getLogger(__name__)
 # (dict lookup). Keyed by (resolved_path, mtime_ns) so an external
 # write to the SLF invalidates naturally on the next call.
 #
-# Lock added 2026-05-25: FastAPI runs handlers in a threadpool, so a
+# Lock added: FastAPI runs handlers in a threadpool, so a
 # burst of parallel roster-cell portrait requests (16+ at once on the
 # 16-column grid) can race here. Without the lock, two threads can
 # both miss the cache, both open a fresh SlfFS for the same path,
@@ -84,7 +84,7 @@ def _open_slf_cached(slf_path: Path):
         # Pre-fix this swallowed silently; a corrupt SLF (mid-write mod
         # update, malformed archive) returned None for every portrait
         # read with no breadcrumb. Log at WARNING so the user has
-        # something to chase. Bug-review finding D3.
+        # something to chase.
         _logger.warning(
             "SlfFS open failed for %s: %s: %s",
             slf_path, type(e).__name__, e,
@@ -216,7 +216,7 @@ class InstallContext:
         never None. For reads with no existing file, returns the
         would-be-created path; downstream parsers (`read_all`,
         `lookup_merc_bio_id`) detect "file missing" and return empty
-        results without exploding. Bug-review finding E5 noted that
+        results without exploding. Note that
         callers wrote `if merc_xml_path is not None` guards expecting
         None for missing files; those guards were dead code. Return
         type narrowed from `Optional[Path]` to `Path` so static
@@ -239,6 +239,33 @@ class InstallContext:
     def gear_xml_path(self, *, for_write: bool = False) -> Path:
         subdir = "Inventory/" if self.flavor.gear_subdir == "inventory" else ""
         rel = f"TableData/{subdir}MercStartingGear.xml"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
+    def rpc_faces_small_path(self, *, for_write: bool = False) -> Path:
+        """TableData/RPCFacesSmall.xml — optional per-RPC small-face coord override."""
+        rel = "TableData/RPCFacesSmall.xml"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
+    def game_init_lua_path(self, *, for_write: bool = False) -> Path:
+        """Scripts/GameInit.lua — holds InitNPCs(), where RPC placements live.
+
+        Returns a Path even when the file is absent (the RPC-placement upsert
+        can create InitNPCs() and the file). VFS-aware so writes land in the
+        mod-content layer the modded engine actually reads.
+        """
+        rel = "Scripts/GameInit.lua"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
+    def strategicmap_lua_path(self, *, for_write: bool = False) -> Path:
+        """Scripts/strategicmap.lua — holds HandleSectorTacticalEntry(), where
+        carried-item -> fact recruit triggers live."""
+        rel = "Scripts/strategicmap.lua"
         return self.layout.resolve_write(rel) if for_write else (
             self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
         )
@@ -297,6 +324,31 @@ class InstallContext:
             self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
         )
 
+    # ── RPC dialogue files (engine reads NPCDATA\ + MERCEDT\, zero-padded) ──
+    # Verified against Dialogue Control.cpp / TacticalAI/NPC.cpp:
+    #   .NPC quote records   -> NpcData\%03d.npc  by PROFILE id  (NPC.cpp:190)
+    #   pre-recruit dialogue -> NPCDATA\%03d.EDT  by usVoiceIndex (Dialogue Control 2395)
+    #   post-recruit barks   -> MERCEDT\%03d.EDT  by usVoiceIndex (Dialogue Control 2436)
+
+    def rpc_npc_records_path(self, profile: int, *, for_write: bool = False) -> Path:
+        rel = f"NpcData/{profile:03d}.NPC"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
+    def rpc_pre_edt_path(self, voice_index: int, *, for_write: bool = False) -> Path:
+        rel = f"NpcData/{voice_index:03d}.EDT"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
+    def rpc_post_edt_path(self, voice_index: int, *, for_write: bool = False) -> Path:
+        prefix = "" if self.flavor.merc_edt_root == "root" else "BinaryData/"
+        rel = f"{prefix}MercEdt/{voice_index:03d}.EDT"
+        return self.layout.resolve_write(rel) if for_write else (
+            self.layout.resolve_read(rel) or self.layout.resolve_write(rel)
+        )
+
     # ── Faces ────────────────────────────────────────────────────────────
 
     def faces_dir(self, *, for_write: bool = False) -> Path:
@@ -330,7 +382,6 @@ class InstallContext:
         wizard's other paths probed the lowercase variants and missed
         the write. On case-sensitive filesystems (Linux/macOS, WSL,
         case-sensitive Windows volumes) this silently lost the file.
-        Bug-review finding E8.
 
         NB: This method only checks LOOSE files. Vanilla portraits for
         face_index 0-159 live inside `Data/Faces.slf` and won't be found
@@ -364,6 +415,85 @@ class InstallContext:
         # No existing file — return the canonical lowercase read-target
         # path (the same path writes would use).
         return self.layout.mod_content_path(f"faces/{subdir}{face_index}.sti")
+
+    def rpc_talkface_path(self, face_index: int, *, for_write: bool = False) -> Path:
+        """The 90x100 on-map dialogue face, stored as ``faces/B<id>.sti``."""
+        # Faces.cpp formats all non-IMP big faces as b%02d below 100 and
+        # b%03d above it.  str() already gives the three+ digit spelling;
+        # the important compatibility edge is the leading zero for 0..9.
+        stem = f"{face_index:02d}" if face_index < 100 else str(face_index)
+        if for_write:
+            return self.layout.mod_content_path(f"faces/B{stem}.sti")
+        for face_base in ("faces", "Faces"):
+            for prefix in ("B", "b"):
+                for ext in ("sti", "STI"):
+                    rel = f"{face_base}/{prefix}{stem}.{ext}"
+                    existing = self.layout.resolve_read(rel)
+                    if existing is not None and existing.is_file():
+                        return existing
+        return self.layout.mod_content_path(f"faces/B{stem}.sti")
+
+    def rpc_talkface_bytes(self, face_index: int) -> Optional[tuple[bytes, str]]:
+        """Resolve the engine's B-prefixed dialogue face from loose data or SLF.
+
+        Unlike ``face_sti_bytes(..., size='bigface')``, this deliberately does
+        not accept ``BigFaces/<id>.sti``: that is the separate 106x122 static
+        portrait, not the 90x100 eight-frame dialogue face.
+        """
+        loose = self.rpc_talkface_path(face_index)
+        if loose.is_file():
+            try:
+                data = loose.read_bytes()
+                st = loose.stat()
+                return data, f"file:{st.st_mtime_ns}:{st.st_size}"
+            except OSError:
+                pass
+
+        stem = f"{face_index:02d}" if face_index < 100 else str(face_index)
+        candidates = [
+            f"/{prefix}{stem}.{ext}"
+            for prefix in ("B", "b")
+            for ext in ("STI", "sti")
+        ] + [
+            f"/Faces/{prefix}{stem}.{ext}"
+            for prefix in ("B", "b")
+            for ext in ("STI", "sti")
+        ]
+        seen_dirs: set[str] = set()
+        for profile in reversed(self.layout.profiles):
+            for loc in profile.locations:
+                if not loc.is_directory:
+                    continue
+                key = str(loc.path)
+                if key in seen_dirs:
+                    continue
+                seen_dirs.add(key)
+                try:
+                    slfs = sorted(loc.path.glob("*.slf")) + sorted(loc.path.glob("*.SLF"))
+                except OSError:
+                    continue
+                for slf_path in slfs:
+                    lname = slf_path.name.lower()
+                    if "face" not in lname and lname != "data.slf":
+                        continue
+                    slf = _open_slf_cached(slf_path)
+                    if slf is None:
+                        continue
+                    try:
+                        slf_mtime_ns = slf_path.stat().st_mtime_ns
+                    except OSError:
+                        slf_mtime_ns = 0
+                    for candidate in candidates:
+                        try:
+                            if slf.isfile(candidate):
+                                with slf.openbin(candidate, "r") as f:
+                                    return f.read(), f"slf:{slf_mtime_ns}:{candidate}"
+                        except Exception as e:  # noqa: BLE001
+                            _logger.warning(
+                                "RPC talk-face SLF read failed for %s in %s: %s: %s",
+                                candidate, slf_path, type(e).__name__, e,
+                            )
+        return None
 
     def face_sti_bytes(
         self, face_index: int, size: str = "smallface",
@@ -508,8 +638,7 @@ class InstallContext:
                             # Pre-fix this swallowed silently — a corrupt
                             # SLF made every roster portrait return None
                             # with no breadcrumb pointing at which SLF was
-                            # at fault. Log + continue. Bug-review
-                            # finding D6.
+                            # at fault. Log + continue.
                             _logger.warning(
                                 "SLF read failed for %s in %s: %s: %s",
                                 candidate, slf_path,
@@ -773,7 +902,7 @@ def make_install_context(install_root: Path) -> InstallContext:
     `relocator.move` / `duplicate`, `bundle.export_merc` / `deploy_import` /
     `move_between_installs`, `routes.merc` create/update/delete) build the
     context ONCE at their entry point and thread it through every downstream
-    call. Bug-review C4.
+    call.
     """
     install_root = Path(install_root)
     try:

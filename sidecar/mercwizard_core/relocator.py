@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from .inject import aim_availability, edt, merc_availability, profiles_xml, starting_gear
+from .body_types import BodyTypeWriteError, validate_body_type_write
 from .models import AimBinding, Gear, Merc, MercBinding
 from .roster import load_roster
 
@@ -51,6 +52,15 @@ class MoveReport:
 
 class MoveError(Exception):
     """Raised when a move can't even start (validation failure)."""
+
+
+class PreserveOnlyMoveError(MoveError):
+    """A move/duplicate would copy an unsafe body type into another slot."""
+
+    def __init__(self, error: BodyTypeWriteError) -> None:
+        self.code = error.code
+        self.body_type = error.body_type
+        super().__init__(str(error))
 
 
 def _read_source_merc(
@@ -119,7 +129,7 @@ def move(install_root: Path, source_slot: int, dest_slot: int) -> MoveReport:
     # Build the InstallContext once and thread it through `_read_source_merc`
     # and every edt.read_bio/clear_bio/write_bio call below. Pre-fix each of
     # those rebuilt the ctx (parse_vfs_config + detect_flavor, ~50-100 ms on
-    # a modded install) — 5-6 rebuilds per move. Bug-review finding C4.
+    # a modded install) — 5-6 rebuilds per move.
     from .install_context import make_install_context
     ctx = make_install_context(install_root)
 
@@ -139,6 +149,10 @@ def move(install_root: Path, source_slot: int, dest_slot: int) -> MoveReport:
     # stub <PROFILE> block with no zName/zNickname counts as empty).
     if profiles_xml.is_slot_occupied(profiles_path, dest_slot):
         raise MoveError(f"Destination slot {dest_slot} is occupied")
+    try:
+        validate_body_type_write(install_root, source_merc.ubBodyType)
+    except BodyTypeWriteError as error:
+        raise PreserveOnlyMoveError(error) from error
 
     # 2. Read source state (gear, AIM/MERC bindings, EDT bio)
     source_gear = starting_gear.read_slot(gear_path, source_slot)
@@ -280,7 +294,7 @@ def duplicate(install_root: Path, source_slot: int, dest_slot: int) -> MoveRepor
         raise MoveError("Source and destination slots are the same")
 
     # Build ctx once; thread through `_read_source_merc` + every edt call.
-    # See `move()` for rationale (bug-review C4).
+    # See `move()` for the rationale.
     from .install_context import make_install_context
     ctx = make_install_context(install_root)
 
@@ -297,6 +311,10 @@ def duplicate(install_root: Path, source_slot: int, dest_slot: int) -> MoveRepor
 
     if profiles_xml.is_slot_occupied(profiles_path, dest_slot):
         raise MoveError(f"Destination slot {dest_slot} is occupied")
+    try:
+        validate_body_type_write(install_root, source_merc.ubBodyType)
+    except BodyTypeWriteError as error:
+        raise PreserveOnlyMoveError(error) from error
 
     source_gear = starting_gear.read_slot(gear_path, source_slot)
     source_aim = aim_availability.lookup_aim_bio_id(aim_path, source_slot)

@@ -1,5 +1,5 @@
 /**
- * Phase 4 — inject-sub modal. Lets the user append a single sub-frame
+ * Inject-sub modal. Lets the user append a single sub-frame
  * from a library STI onto an existing tileset slot's STI binary.
  *
  * Wired via the rail's RecentAdditionCard "Inject" chip + a future
@@ -32,7 +32,7 @@ import {
 export function MapForgeInjectSubModal({
   srcSha256, srcFilename, tileset, onClose, onInjected,
 }: {
-  /** Catalog sha of the SOURCE STI — the one we'll pull a sub from. */
+  /** Catalog sha of the SOURCE STI — the one a sub is pulled from. */
   srcSha256: string;
   /** Just for the modal title — falls back to "library STI" if absent. */
   srcFilename?: string;

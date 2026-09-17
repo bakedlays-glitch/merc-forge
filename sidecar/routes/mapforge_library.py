@@ -20,15 +20,20 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sqlite3
 import xml.etree.ElementTree as ET
+from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
+
+from mercwizard_core.cross_lock import cross_process_install_root_lock
+from mercwizard_core.inject._atomic_xml import write_bytes_atomic
 
 from .state import get_state
 
@@ -41,8 +46,8 @@ from .state import get_state
 # default for a beta build), `_ASSET_BROWSER_ROOT` resolves to a path
 # that won't exist, so `_catalog()` / `library_health()` report the
 # library as "not installed" and every library endpoint degrades
-# gracefully instead of leaking a development path. No absolute
-# dev-machine path is baked into the shipped source.
+# gracefully instead of leaking a local path. No absolute path
+# outside the install is baked into the shipped source.
 _ASSET_BROWSER_ROOT = Path(
     os.environ.get("MERCWIZARD_ASSET_BROWSER_ROOT")
     or (Path(__file__).resolve().parent.parent / "asset_browser")
@@ -58,6 +63,98 @@ _SUBFRAMES_DIR = _ASSET_BROWSER_ROOT / "data" / "subframes"
 
 
 router = APIRouter(prefix="/mapforge/library")
+
+
+@dataclass(frozen=True)
+class _PhysicalInstallContext:
+    install_id: str
+    install_root: Path
+    xml_path: Path
+
+
+_PHYSICAL_INSTALL_CONTEXT: ContextVar[_PhysicalInstallContext | None] = ContextVar(
+    "mapforge_library_physical_install_context", default=None,
+)
+
+
+def _resolve_active_install_xml() -> tuple[object, _PhysicalInstallContext]:
+    """Resolve the active install root + its Ja2Set.dat.xml.
+
+    Raises 400 NO_ACTIVE_INSTALL / 404 JA2SET_XML_NOT_FOUND. Single
+    owner — this data-layer/filename-casing loop used to be copy-pasted
+    verbatim four times across the write paths; any fix (a new data
+    layer, another casing) lands exactly here.
+    """
+    state = get_state()
+    info = state.active()
+    if info is None:
+        raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL"})
+    install_root = Path(info.path).resolve()
+    for layer in ("Data-1.13", "Data-DMK", "Data"):
+        for name in ("Ja2Set.dat.xml", "JA2SET.DAT.XML", "ja2set.dat.xml"):
+            candidate = install_root / layer / name
+            if candidate.is_file():
+                return state, _PhysicalInstallContext(
+                    # Real InstallInfo always carries ``id``. The path
+                    # fallback keeps lightweight direct-call fixtures and
+                    # older embedders compatible while still rechecking the
+                    # captured identity at the transaction boundary.
+                    install_id=getattr(info, "id", str(install_root)),
+                    install_root=install_root,
+                    xml_path=candidate.resolve(),
+                )
+    raise HTTPException(404, {"error": "JA2SET_XML_NOT_FOUND"})
+
+
+def _active_install_xml() -> tuple[Path, Path]:
+    """Compatibility lookup for read-only callers and direct unit tests."""
+    _state, context = _resolve_active_install_xml()
+    return context.install_root, context.xml_path
+
+
+def _captured_install_xml() -> tuple[Path, Path]:
+    """Return the wrapper's captured paths without consulting active state."""
+    context = _PHYSICAL_INSTALL_CONTEXT.get()
+    if context is not None:
+        return context.install_root, context.xml_path
+    return _active_install_xml()
+
+
+_WriteResult = TypeVar("_WriteResult")
+
+
+def _physical_install_write(func: Callable[..., _WriteResult]) -> Callable[..., _WriteResult]:
+    """Serialize one library mutation at the physical-install boundary.
+
+    The active profile ID is metadata only: multiple VFS registrations can
+    point at the same install root. Resolve that root once, then hold the
+    cross-process and in-process locks around all destination reads,
+    validation, backups, and writes performed by the route. The shared
+    commit helper deliberately stays lock-free so callers cannot accidentally
+    nest the same physical lock.
+    """
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        state, context = _resolve_active_install_xml()
+        with cross_process_install_root_lock(context.install_root), state.write_lock:
+            current = state.active()
+            current_id = (
+                getattr(current, "id", str(Path(current.path).resolve()))
+                if current is not None else None
+            )
+            if current is None or current_id != context.install_id:
+                raise HTTPException(409, {
+                    "error": "ACTIVE_INSTALL_CHANGED",
+                    "message": "The active install changed before the library write.",
+                })
+            token = _PHYSICAL_INSTALL_CONTEXT.set(context)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _PHYSICAL_INSTALL_CONTEXT.reset(token)
+
+    return wrapped
+
 
 
 def _catalog() -> sqlite3.Connection:
@@ -206,7 +303,7 @@ class InjectSubBody(BaseModel):
         "It should also allow injecting a subframe into an existing
          slot that has space for it."
 
-    Constraints (see ASSET_BROWSER_PLAN.md §4):
+    Constraints:
       - Destination STI must be loose on disk (not SLF-resident).
       - Destination's 8-bit palette must match source's, unless
         `force=true`.
@@ -325,19 +422,19 @@ def _names_in_tileset(xml_path: Path, tileset: int) -> set[str]:
 
 
 def _next_free_slot(
-    xml_path: Path,
+    tree: "ET.ElementTree",
     tileset: int,
     engine_max_tile_slot: int = 150,
 ) -> int:
-    """Lowest slot index not used in `tileset`'s block. Includes
-    tile-0 inheritance so we don't pick a slot the engine considers
-    taken via the base tileset.
+    """Lowest slot index not used in `tileset`'s block of the parsed
+    Ja2Set.dat.xml `tree`. Includes tile-0 inheritance so we don't pick
+    a slot the engine considers taken via the base tileset.
 
     Search is bounded by `engine_max_tile_slot` (default 150 = stock
     ja2.exe NUMBEROFTILETYPES - 1). Previously this walked 0..255
     regardless of cap, which would silently park a freshly-added STI
     in a slot the engine could never address — sector load crash on
-    first reference. A user hit this 2026-05-24:
+    first reference. A user hit this:
 
         "the 150 slot warning, is this something we can adjust or
          would that have large impacts? if we cant adjust it why
@@ -349,10 +446,6 @@ def _next_free_slot(
     error code to decide between "raise cap in Settings" vs "pick a
     slot to overwrite" recovery CTAs.
     """
-    try:
-        tree = ET.parse(xml_path)
-    except (OSError, ET.ParseError):
-        return 1
     used: set[int] = set()
     for ts in tree.getroot().iter("Tileset"):
         ts_idx = int(ts.get("index", -1))
@@ -434,9 +527,19 @@ def _find_loose_tileset_stis(
     # Data), so loose tile dirs sit at <xml_parent>/Tilesets/<N>/.
     layer_dir = xml_path.parent
     tilesets_dir = layer_dir / "Tilesets" / str(tileset)
+    try:
+        install_root_resolved = install_root.resolve()
+        tilesets_root = tilesets_dir.resolve()
+        tilesets_root.relative_to(install_root_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return []
     out: list[LooseSlot] = []
     for slot, fname in sorted(slots.items()):
-        full = tilesets_dir / fname
+        try:
+            full = (tilesets_root / fname).resolve()
+            full.relative_to(tilesets_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
         if not full.is_file():
             continue
         # Best-effort frame count read for the UI. If ja2py refuses
@@ -477,7 +580,7 @@ def _extract_single_sub_bytes(source_sti_bytes: bytes, sub_idx: int) -> bytes:
     """Re-encode `source_sti_bytes` as a fresh single-frame STI that
     contains only frame `sub_idx` from the source. Used by
     add-to-tileset when the user picks a specific sub to import
-    (user request 2026-05-24: "import an indiviudal subframe").
+    (user request: "import an indiviudal subframe").
 
     Implementation: read the source STI via ja2py's load_8bit_sti,
     rebuild a one-element Images8Bit with the chosen frame, write
@@ -596,6 +699,74 @@ class _CommitResult(BaseModel):
     jsd_copied: bool
 
 
+def _rollback_import_artifacts(
+    *,
+    sti_dest: Path,
+    jsd_dest: Optional[Path],
+    original_jsd_bytes: Optional[bytes],
+) -> Optional[str]:
+    """Restore the destination files to their pre-import bytes.
+
+    Imports never overwrite an STI, but an unregistered companion JSD can
+    already exist beside a missing STI.  That JSD is still game data, so a
+    failed transaction must restore it rather than blindly deleting it.
+    """
+    errors: list[str] = []
+    try:
+        sti_dest.unlink(missing_ok=True)
+    except OSError as e:
+        errors.append(f"could not remove STI: {e}")
+
+    if jsd_dest is not None:
+        try:
+            if original_jsd_bytes is None:
+                jsd_dest.unlink(missing_ok=True)
+            else:
+                restore_error = _restore_exact_bytes(
+                    jsd_dest, original_jsd_bytes,
+                )
+                if restore_error is not None:
+                    errors.append(f"could not restore JSD: {restore_error}")
+        except OSError as e:
+            errors.append(f"could not remove JSD: {e}")
+
+    return "; ".join(errors) or None
+
+
+def _restore_exact_bytes(path: Path, original_bytes: bytes) -> Optional[str]:
+    """Restore bytes after a failed atomic write, including post-replace errors."""
+    write_error: Optional[OSError] = None
+    try:
+        write_bytes_atomic(path, original_bytes)
+    except OSError as e:
+        # Atomic writers can report a durable-fsync failure after their
+        # replace. The readback, not the exception alone, decides whether
+        # rollback restored the original bytes.
+        write_error = e
+    try:
+        actual_bytes = path.read_bytes()
+    except OSError as e:
+        return f"could not read restored file: {e}"
+    if actual_bytes != original_bytes:
+        detail = "restored bytes differ from the original"
+        if write_error is not None:
+            detail += f" after write error: {write_error}"
+        return detail
+    return None
+
+
+def _is_valid_xml_snapshot(path: Path) -> bool:
+    """A reusable Ja2Set backup must be readable, nonempty XML."""
+    try:
+        snapshot = path.read_bytes()
+        if not snapshot:
+            return False
+        ET.fromstring(snapshot)
+    except (OSError, ET.ParseError):
+        return False
+    return True
+
+
 def _commit_sti_to_tileset(
     *,
     xml_path: Path,
@@ -674,7 +845,15 @@ def _commit_sti_to_tileset(
             "message": "filename uses a Windows reserved device name",
         })
 
-    # 3. Slot pick — identical policy to add_sti_to_tileset.
+    # 3. Slot pick — identical policy to add_sti_to_tileset. Parse the
+    # registry ONCE; the same tree serves the slot-availability check /
+    # auto-pick AND the step-7 append (was two full parses per request).
+    try:
+        xml_original_bytes = xml_path.read_bytes()
+        tree = ET.ElementTree(ET.fromstring(xml_original_bytes))
+    except (OSError, ET.ParseError) as e:
+        raise HTTPException(500, {"error": "XML_PARSE",
+                                  "message": str(e)})
     if target_slot is not None:
         slot = target_slot
         # Engine-cap guard for manual picks. ja2.exe HARD-crashes on
@@ -706,11 +885,6 @@ def _commit_sti_to_tileset(
         # _next_free_slot, which DOES include tile-0 inheritance so it never
         # lands on an inherited slot.)
         used: dict[int, str] = {}
-        try:
-            tree = ET.parse(xml_path)
-        except (OSError, ET.ParseError) as e:
-            raise HTTPException(500, {"error": "XML_PARSE",
-                                       "message": str(e)})
         for ts in tree.getroot().iter("Tileset"):
             if int(ts.get("index", -1)) != tileset:
                 continue
@@ -745,7 +919,7 @@ def _commit_sti_to_tileset(
         # explicitly allowed). _next_free_slot includes tile-0
         # inheritance and raises 409 NO_FREE_SLOT_UNDER_CAP when full.
         ceiling = 255 if allow_above_cap else engine_max_tile_slot
-        slot = _next_free_slot(xml_path, tileset, ceiling)
+        slot = _next_free_slot(tree, tileset, ceiling)
 
     # 4. Write to <layer>/Tilesets/<tileset>/ — the same data layer that
     # owns the XML, so the engine VFS resolves it consistently.
@@ -766,30 +940,103 @@ def _commit_sti_to_tileset(
     if sti_dest.exists():
         raise HTTPException(409, {"error": "FILE_EXISTS",
             "message": f"{sti_dest} already exists — pick a different target_filename"})
-    sti_dest.write_bytes(sti_bytes)
-    jsd_copied = False
-    if jsd_bytes is not None:
-        jsd_dest = sti_dest.with_suffix(".jsd")
+
+    companion_dest = sti_dest.with_suffix(".jsd")
+    # An STI's sibling JSD is structural collision data. Even a source with
+    # no JSD would silently adopt an orphan companion if we wrote the STI, so
+    # imports never overwrite or reuse an unregistered destination sibling.
+    if companion_dest.exists():
+        raise HTTPException(409, {"error": "JSD_FILE_EXISTS",
+            "message": (
+                f"{companion_dest} already exists without its STI. "
+                "Refusing to overwrite or adopt existing collision data."
+            )})
+
+    jsd_dest = companion_dest if jsd_bytes is not None else None
+    original_jsd_bytes: Optional[bytes] = None
+    if jsd_dest is not None and jsd_dest.exists():
         try:
-            jsd_dest.write_bytes(jsd_bytes)
+            original_jsd_bytes = jsd_dest.read_bytes()
+        except OSError as e:
+            raise HTTPException(500, {"error": "JSD_READ_FAILED",
+                "message": f"could not read existing {jsd_dest}: {e}"})
+
+    try:
+        write_bytes_atomic(sti_dest, sti_bytes)
+    except OSError as e:
+        rollback_error = _rollback_import_artifacts(
+            sti_dest=sti_dest,
+            jsd_dest=jsd_dest,
+            original_jsd_bytes=original_jsd_bytes,
+        )
+        message = f"could not write {sti_dest}: {e}"
+        if rollback_error is not None:
+            message += f"; rollback also failed: {rollback_error}"
+        raise HTTPException(500, {"error": "STI_WRITE_FAILED", "message": message})
+
+    jsd_copied = False
+    if jsd_bytes is not None and jsd_dest is not None:
+        try:
+            write_bytes_atomic(jsd_dest, jsd_bytes)
             jsd_copied = True
-        except OSError:
-            pass  # non-fatal — the STI is still placed
+        except OSError as e:
+            rollback_error = _rollback_import_artifacts(
+                sti_dest=sti_dest,
+                jsd_dest=jsd_dest,
+                original_jsd_bytes=original_jsd_bytes,
+            )
+            message = f"could not write {jsd_dest}: {e}"
+            if rollback_error is not None:
+                message += f"; rollback also failed: {rollback_error}"
+            raise HTTPException(500, {"error": "JSD_WRITE_FAILED",
+                "message": message})
 
     # 6. Back up XML (idempotent .bak — first save per session wins).
+    # A copy/truncate failure may leave a file that exists but cannot be
+    # recovered from, so only an atomically written and readable snapshot is
+    # usable on retries.
     bak_path = xml_path.with_suffix(xml_path.suffix + ".bak")
     bak_str: Optional[str] = None
     if not bak_path.exists():
         try:
-            shutil.copy2(xml_path, bak_path)
+            write_bytes_atomic(bak_path, xml_original_bytes)
+            if (
+                bak_path.read_bytes() != xml_original_bytes
+                or not _is_valid_xml_snapshot(bak_path)
+            ):
+                raise OSError("backup readback did not match original XML")
             bak_str = str(bak_path)
         except OSError as e:
-            sti_dest.unlink(missing_ok=True)
-            if jsd_copied:
-                sti_dest.with_suffix(".jsd").unlink(missing_ok=True)
-            raise HTTPException(500, {"error": "BACKUP_FAILED",
-                "message": f"could not write {bak_path}: {e}"})
+            cleanup_error: Optional[OSError] = None
+            try:
+                # This path created the backup attempt. Remove it even when
+                # the atomic writer raised after replacement, so a retry
+                # cannot trust a partial or uncertain first snapshot.
+                bak_path.unlink(missing_ok=True)
+            except OSError as cleanup:
+                cleanup_error = cleanup
+            rollback_error = _rollback_import_artifacts(
+                sti_dest=sti_dest,
+                jsd_dest=jsd_dest,
+                original_jsd_bytes=original_jsd_bytes,
+            )
+            message = f"could not write {bak_path}: {e}"
+            if cleanup_error is not None:
+                message += f"; could not remove failed backup: {cleanup_error}"
+            if rollback_error is not None:
+                message += f"; rollback also failed: {rollback_error}"
+            raise HTTPException(500, {"error": "BACKUP_FAILED", "message": message})
     else:
+        if not _is_valid_xml_snapshot(bak_path):
+            rollback_error = _rollback_import_artifacts(
+                sti_dest=sti_dest,
+                jsd_dest=jsd_dest,
+                original_jsd_bytes=original_jsd_bytes,
+            )
+            message = f"existing backup {bak_path} is not a readable XML snapshot"
+            if rollback_error is not None:
+                message += f"; rollback also failed: {rollback_error}"
+            raise HTTPException(500, {"error": "BACKUP_INVALID", "message": message})
         bak_str = str(bak_path)
 
     # 7. Atomic XML edit — add `<file index="slot">filename</file>`.
@@ -797,7 +1044,6 @@ def _commit_sti_to_tileset(
     # power loss / OOM / AV truncation can't leave a half-written XML
     # that makes the engine refuse to boot.
     try:
-        tree = ET.parse(xml_path)
         root = tree.getroot()
         ts_node = None
         for ts in root.iter("Tileset"):
@@ -813,42 +1059,28 @@ def _commit_sti_to_tileset(
         new_file = ET.SubElement(files_node, "file")
         new_file.set("index", str(slot))
         new_file.text = target_filename
-        import os as _os
-        import tempfile as _tempfile
         from io import BytesIO as _BytesIO
         buf = _BytesIO()
         tree.write(buf, encoding="utf-8", xml_declaration=True)
-        fd, tmp = _tempfile.mkstemp(
-            dir=str(xml_path.parent),
-            prefix=xml_path.name + ".",
-            suffix=".tmp",
-        )
-        try:
-            with _os.fdopen(fd, "wb") as tf:
-                tf.write(buf.getvalue())
-                tf.flush()
-                _os.fsync(tf.fileno())
-            _os.replace(tmp, xml_path)
-        except BaseException:
-            try:
-                _os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        write_bytes_atomic(xml_path, buf.getvalue())
     except Exception as e:  # noqa: BLE001
-        sti_dest.unlink(missing_ok=True)
-        if jsd_copied:
-            sti_dest.with_suffix(".jsd").unlink(missing_ok=True)
+        xml_restore_error = _restore_exact_bytes(xml_path, xml_original_bytes)
+        rollback_error = _rollback_import_artifacts(
+            sti_dest=sti_dest,
+            jsd_dest=jsd_dest,
+            original_jsd_bytes=original_jsd_bytes,
+        )
+        message = f"{type(e).__name__}: {e}"
+        if xml_restore_error is not None:
+            message += f"; XML restore also failed: {xml_restore_error}"
+        if rollback_error is not None:
+            message += f"; rollback also failed: {rollback_error}"
         raise HTTPException(500, {"error": "XML_WRITE_FAILED",
-            "message": f"{type(e).__name__}: {e}"})
+            "message": message})
 
     # 8. Invalidate the on-disk atlas cache for this tileset.
-    from .mapforge import _ATLAS_CACHE  # circular-safe (function-scoped)
-    for d in _ATLAS_CACHE.glob(f"{tileset}_*"):
-        try:
-            shutil.rmtree(d, ignore_errors=True)
-        except OSError:
-            pass
+    from .mapforge import bust_atlas_cache  # circular-safe (function-scoped)
+    bust_atlas_cache(tileset)
 
     # Above-cap warning header — only when the user opted into
     # allow_above_cap AND the resolved slot is in the danger zone.
@@ -993,19 +1225,28 @@ def list_stis(
             except Exception:  # noqa: BLE001
                 pass
 
-        # Per-row tag union.
+        # Tag union for the whole page in ONE query (was 1 query per row —
+        # 1+N round-trips at per_page up to 200). ORDER BY t.name keeps
+        # each asset's tag list name-sorted after the per-asset regroup.
+        tags_by_asset: dict[int, list[str]] = {}
+        ids = [row["id"] for row in rows]
+        if ids:
+            ph = ",".join("?" * len(ids))
+            for r in conn.execute(
+                f"""SELECT DISTINCT sfia.asset_id, t.name
+                    FROM subframe_in_asset sfia
+                    JOIN subframe_tag st ON st.subframe_id = sfia.subframe_id
+                    JOIN tag t ON t.id = st.tag_id
+                    WHERE sfia.asset_id IN ({ph})
+                    ORDER BY t.name""",
+                ids,
+            ):
+                tags_by_asset.setdefault(r["asset_id"], []).append(r["name"])
+
         items: list[LibrarySti] = []
         for row in rows:
             name = (row["relpath"] or "").replace("\\", "/").split("/")[-1]
-            tag_rows = conn.execute(
-                """SELECT DISTINCT t.name FROM subframe_in_asset sfia
-                   JOIN subframe_tag st ON st.subframe_id = sfia.subframe_id
-                   JOIN tag t ON t.id = st.tag_id
-                   WHERE sfia.asset_id = ?
-                   ORDER BY t.name""",
-                (row["id"],),
-            ).fetchall()
-            tags = [r["name"] for r in tag_rows]
+            tags = tags_by_asset.get(row["id"], [])
             items.append(LibrarySti(
                 sha256=row["sha256"],
                 width=row["width"],
@@ -1113,7 +1354,7 @@ def get_sti_thumb(sha256: str):
 def list_sti_subs(sha256: str):
     """List every sub-frame of the given STI. Powers the per-sub viewer
     that opens when the user clicks "View subs" on a library entry —
-    user request 2026-05-24:
+    user request:
 
         "the viewer there needs to allow you to view subframes if you
          want and import an indiviudal or all subframes when you are
@@ -1194,27 +1435,13 @@ def list_loose_slots(tileset: int):
     inject-sub flow — SLF-only slots are excluded because the v1
     inject path can't extract from SLFs.
     """
-    state = get_state()
-    info = state.active()
-    if info is None:
-        raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL"})
-    install_root = Path(info.path)
-    xml_path: Optional[Path] = None
-    for layer in ("Data-1.13", "Data-DMK", "Data"):
-        for name in ("Ja2Set.dat.xml", "JA2SET.DAT.XML", "ja2set.dat.xml"):
-            candidate = install_root / layer / name
-            if candidate.is_file():
-                xml_path = candidate
-                break
-        if xml_path:
-            break
-    if not xml_path:
-        raise HTTPException(404, {"error": "JA2SET_XML_NOT_FOUND"})
+    install_root, xml_path = _captured_install_xml()
     slots = _find_loose_tileset_stis(install_root, xml_path, tileset)
     return LooseSlotList(tileset=tileset, slots=slots)
 
 
 @router.post("/stis/{src_sha256}/inject-sub", response_model=InjectSubResult)
+@_physical_install_write
 def inject_sub(src_sha256: str, body: InjectSubBody):
     """Append one sub-frame from a library STI onto an existing
     tileset slot's STI. v1 constraints:
@@ -1238,22 +1465,7 @@ def inject_sub(src_sha256: str, body: InjectSubBody):
         raise HTTPException(400, {"error": "BAD_SHA"})
 
     # Locate active install + xml.
-    state = get_state()
-    info = state.active()
-    if info is None:
-        raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL"})
-    install_root = Path(info.path)
-    xml_path: Optional[Path] = None
-    for layer in ("Data-1.13", "Data-DMK", "Data"):
-        for name in ("Ja2Set.dat.xml", "JA2SET.DAT.XML", "ja2set.dat.xml"):
-            candidate = install_root / layer / name
-            if candidate.is_file():
-                xml_path = candidate
-                break
-        if xml_path:
-            break
-    if not xml_path:
-        raise HTTPException(404, {"error": "JA2SET_XML_NOT_FOUND"})
+    install_root, xml_path = _captured_install_xml()
 
     # Resolve destination slot → file on disk.
     loose_slots = _find_loose_tileset_stis(install_root, xml_path, body.tileset)
@@ -1270,7 +1482,7 @@ def inject_sub(src_sha256: str, body: InjectSubBody):
             "tileset": body.tileset,
             "slot": body.target_slot,
         })
-    dest_path = Path(dest.path)
+    dest_path = Path(dest.path).resolve()
 
     # Fetch source bytes from catalog.
     conn = _catalog()
@@ -1315,8 +1527,8 @@ def inject_sub(src_sha256: str, body: InjectSubBody):
             "frame_count": len(src_img.images),
         })
     try:
-        with dest_path.open("rb") as fh:
-            dest_img = load_8bit_sti(fh)
+        dest_bytes = dest_path.read_bytes()
+        dest_img = load_8bit_sti(_io.BytesIO(dest_bytes))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, {
             "error": "DEST_LOAD_FAILED",
@@ -1342,6 +1554,40 @@ def inject_sub(src_sha256: str, body: InjectSubBody):
             "slot": body.target_slot,
         })
 
+    # JSD pre-flight. If the slot has a companion .jsd, the engine
+    # checks its structure count against the STI's sub-frame count at
+    # LoadMapTileset — a mismatch asserts for EVERY map in the tileset
+    # (see _validate_tileset_jsds in routes/mapforge.py). Appending a
+    # frame without extending the JSD manufactures exactly that, so
+    # refuse up front rather than let the user find out at map load.
+    from .mapforge import _find_jsd_bytes
+    jsd_found = _find_jsd_bytes(xml_path, body.tileset, dest.filename)
+    if jsd_found is not None and len(jsd_found[0]) >= 10:
+        import struct as _struct
+        try:
+            n_struct, n_stored, _ = _struct.unpack(
+                "<HHH", jsd_found[0][4:10])
+        except _struct.error:
+            n_struct = n_stored = -1
+        frames_after_inject = len(dest_img.images) + 1
+        if n_struct >= 0 and frames_after_inject not in (n_struct, n_stored):
+            raise HTTPException(409, {
+                "error": "JSD_FRAME_MISMATCH",
+                "message": (
+                    f"slot {body.target_slot} ({dest.filename}) has a "
+                    f"companion .jsd declaring {n_struct} structure(s) "
+                    f"(stored {n_stored}). Appending a sub-frame would give "
+                    f"the STI {frames_after_inject} frame(s) — the engine "
+                    "asserts at LoadMapTileset on this mismatch, for every "
+                    "map using the tileset. Inject into a slot without a "
+                    ".jsd, or extend the JSD first (PUT /mapforge/sti/jsd)."
+                ),
+                "tileset": body.tileset,
+                "slot": body.target_slot,
+                "jsd_structures": n_struct,
+                "frames_after_inject": frames_after_inject,
+            })
+
     # Backup the destination on first edit per session. The .bak
     # convention mirrors Ja2Set.dat.xml's first-edit backup; same
     # idempotency (won't clobber existing .bak).
@@ -1349,7 +1595,7 @@ def inject_sub(src_sha256: str, body: InjectSubBody):
     bak_str: Optional[str] = None
     if not bak_path.exists():
         try:
-            shutil.copy2(dest_path, bak_path)
+            write_bytes_atomic(bak_path, dest_bytes)
             bak_str = str(bak_path)
         except OSError as e:
             raise HTTPException(500, {
@@ -1387,28 +1633,48 @@ def inject_sub(src_sha256: str, body: InjectSubBody):
                 "check; the underlying STI format requires palette parity."
             ),
         })
+    encoded = _io.BytesIO()
     try:
-        with dest_path.open("wb") as fh:
-            save_8bit_sti(new_container, fh)
-    except OSError as e:
-        # Try to restore from the .bak we just wrote.
-        if bak_path.exists():
-            try:
-                shutil.copy2(bak_path, dest_path)
-            except OSError:
-                pass
+        save_8bit_sti(new_container, encoded)
+        new_bytes = encoded.getvalue()
+        candidate = load_8bit_sti(_io.BytesIO(new_bytes))
+        if len(candidate.images) != len(new_images):
+            raise ValueError("serialized STI frame count changed")
+        write_bytes_atomic(dest_path, new_bytes)
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(500, {
             "error": "WRITE_FAILED",
-            "message": f"could not write {dest_path}: {e}",
+            "message": f"could not serialize/write {dest_path}: {type(e).__name__}: {e}",
+        })
+
+    verify_error: str | None = None
+    try:
+        disk_bytes = dest_path.read_bytes()
+        if disk_bytes != new_bytes:
+            verify_error = "installed bytes differ from the atomic-write payload"
+        else:
+            installed = load_8bit_sti(_io.BytesIO(disk_bytes))
+            if len(installed.images) != len(new_images):
+                verify_error = "installed STI frame count differs from the candidate"
+    except Exception as e:  # noqa: BLE001
+        verify_error = f"{type(e).__name__}: {e}"
+    if verify_error is not None:
+        restore_error: str | None = None
+        try:
+            write_bytes_atomic(dest_path, dest_bytes)
+        except OSError as e:
+            restore_error = f"; restore also failed: {e}"
+        raise HTTPException(500, {
+            "error": "WRITE_UNVERIFIED",
+            "message": (
+                f"STI disk read-back failed ({verify_error}); the pre-edit "
+                f"bytes were restored{restore_error or ''}."
+            ),
         })
 
     # Invalidate atlas cache for this tileset.
-    from .mapforge import _ATLAS_CACHE
-    for d in _ATLAS_CACHE.glob(f"{body.tileset}_*"):
-        try:
-            shutil.rmtree(d, ignore_errors=True)
-        except OSError:
-            pass
+    from .mapforge import bust_atlas_cache
+    bust_atlas_cache(body.tileset)
 
     return InjectSubResult(
         tileset=body.tileset,
@@ -1441,6 +1707,7 @@ def list_tags():
 
 @router.post("/stis/{sha256}/add-to-tileset",
              response_model=AddStiToTilesetResult)
+@_physical_install_write
 def add_sti_to_tileset(
     sha256: str,
     body: AddStiToTilesetBody,
@@ -1473,23 +1740,7 @@ def add_sti_to_tileset(
         raise HTTPException(400, {"error": "BAD_SHA"})
 
     # 1+2. Active install + xml path
-    state = get_state()
-    info = state.active()
-    if info is None:
-        raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL"})
-    install_root = Path(info.path)
-    # Find Ja2Set.dat.xml under any data-layer dir.
-    xml_path: Optional[Path] = None
-    for layer in ("Data-1.13", "Data-DMK", "Data"):
-        for name in ("Ja2Set.dat.xml", "JA2SET.DAT.XML", "ja2set.dat.xml"):
-            candidate = install_root / layer / name
-            if candidate.is_file():
-                xml_path = candidate
-                break
-        if xml_path:
-            break
-    if not xml_path:
-        raise HTTPException(404, {"error": "JA2SET_XML_NOT_FOUND"})
+    install_root, xml_path = _captured_install_xml()
 
     # 1. Resolve bytes
     conn = _catalog()
@@ -1525,7 +1776,7 @@ def add_sti_to_tileset(
                     jsd_candidate_upper = src_full.with_suffix(".JSD")
                     if jsd_candidate_upper.is_file():
                         jsd_bytes = jsd_candidate_upper.read_bytes()
-            # SLF .jsd lookup is more complex; skip for now and let the
+            # SLF .jsd lookup is more complex; skip and let the
             # user copy it manually if the asset comes from an SLF.
     finally:
         conn.close()
@@ -1580,6 +1831,7 @@ def add_sti_to_tileset(
 
 def _resolve_live_tileset_sti(
     xml_path: Path, tileset: int, slot: int,
+    *, install_root: Optional[Path] = None,
 ) -> tuple[str, bytes]:
     """Resolve (tileset, slot) of the ACTIVE install to its STI filename
     + raw bytes, reading the LIVE tileset (not the catalog).
@@ -1598,7 +1850,7 @@ def _resolve_live_tileset_sti(
     from mercwizard_core.mapforge_engine.iso_renderer import (
         StiCache, load_tileset_xml,
     )
-    from .mapforge import _tileset_paths_for
+    from .mapforge import _install_tileset_paths, _tileset_paths_for
 
     slot_map = load_tileset_xml(xml_path, tileset)
     sti_filename = slot_map.get(slot)
@@ -1612,7 +1864,10 @@ def _resolve_live_tileset_sti(
             "src_tileset": tileset,
             "src_slot": slot,
         })
-    loose_dirs, slf_paths = _tileset_paths_for(xml_path)
+    loose_dirs, slf_paths = (
+        _install_tileset_paths(install_root)
+        if install_root is not None else _tileset_paths_for(xml_path)
+    )
     cache = StiCache(tileset, loose_dirs=loose_dirs, slf_paths=slf_paths)
     loose = cache._find_loose(sti_filename)
     if loose is not None:
@@ -1638,6 +1893,7 @@ def _resolve_live_tileset_sti(
     "/tilesets/{src_tileset}/slots/{src_slot}/copy-to-tileset",
     response_model=CopyTileToTilesetResult,
 )
+@_physical_install_write
 def copy_tile_to_tileset(
     src_tileset: int,
     src_slot: int,
@@ -1677,22 +1933,7 @@ def copy_tile_to_tileset(
     """
     # 1. Active install + its Ja2Set.dat.xml (same resolution the other
     # write paths use).
-    state = get_state()
-    info = state.active()
-    if info is None:
-        raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL"})
-    install_root = Path(info.path)
-    xml_path: Optional[Path] = None
-    for layer in ("Data-1.13", "Data-DMK", "Data"):
-        for name in ("Ja2Set.dat.xml", "JA2SET.DAT.XML", "ja2set.dat.xml"):
-            candidate = install_root / layer / name
-            if candidate.is_file():
-                xml_path = candidate
-                break
-        if xml_path:
-            break
-    if not xml_path:
-        raise HTTPException(404, {"error": "JA2SET_XML_NOT_FOUND"})
+    install_root, xml_path = _captured_install_xml()
 
     # No-op guard: copying a tile onto ITS OWN slot adds nothing (the
     # slot is already there). Only fires for the exact self-copy — same
@@ -1716,7 +1957,7 @@ def copy_tile_to_tileset(
 
     # 2. Resolve the SOURCE bytes from the LIVE tileset (not the catalog).
     sti_filename, sti_bytes = _resolve_live_tileset_sti(
-        xml_path, src_tileset, src_slot,
+        xml_path, src_tileset, src_slot, install_root=install_root,
     )
 
     # JSD companion of the source slot — only for a whole-STI copy. Uses

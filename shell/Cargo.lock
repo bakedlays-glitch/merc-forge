@@ -2034,7 +2034,7 @@ dependencies = [
 
 [[package]]
 name = "mercwizard"
-version = "1.0.0"
+version = "1.0.0-beta.4"
 dependencies = [
  "flexi_logger",
  "getrandom 0.2.17",

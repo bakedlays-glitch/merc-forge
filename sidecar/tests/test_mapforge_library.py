@@ -1,13 +1,14 @@
 """Tests for the MapForge library import path — focuses on the slot
-allocation policy added 2026-05-24 (user report: auto-pick was picking
+allocation policy added (user report: auto-pick was picking
 slots above the user's engine cap and silently shipping a CTD-bound
-sector) plus the single-sub extraction added the same day for the
-Phase 3 sub-import flow.
+sector) plus the single-sub extraction added alongside it for the
+sub-import flow.
 """
 from __future__ import annotations
 
 import io
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,70 @@ from fastapi import HTTPException
 from PIL import Image, ImagePalette
 
 from routes.mapforge_library import _extract_single_sub_bytes, _next_free_slot
+from mercwizard_core.mapforge_engine.jsd_structure import (
+    JsdFormatError,
+    StructureIdentity,
+    load_structure_identity,
+    parse_structure_identities,
+)
+
+
+@pytest.fixture(autouse=True)
+def no_physical_lock_in_library_unit_tests(monkeypatch):
+    """Keep unit fixtures independent of the host's Win32 lock provider."""
+    import routes.mapforge_library as library
+
+    monkeypatch.setattr(library, "cross_process_install_root_lock", lambda _root: nullcontext())
+
+
+_ROOT = Path(__file__).resolve().parents[3]
+_JSD_FIXTURES = _ROOT / "canonical_stis" / "structs"
+
+
+def test_mdrock_identity_preserves_four_tile_collision_footprint() -> None:
+    identity = load_structure_identity(_JSD_FIXTURES / "mdrock.jsd", 1)
+
+    assert identity == StructureIdentity(
+        jsd_sha256="eae7f492c117954e588cd94661dac21d532cb2d5b6b189c371f344a1d20f1b33",
+        anchor_sub=1,
+        members=((0, 0, 1), (0, -1, 1), (-1, 0, 1), (-1, -1, 1)),
+    )
+
+
+def test_furn_6_identity_uses_requested_anchor_not_frame_count() -> None:
+    identity = load_structure_identity(_JSD_FIXTURES / "furn_6.jsd", 13)
+
+    assert identity is not None
+    assert identity.anchor_sub == 13
+    assert identity.members == ((0, 0, 13), (-1, 0, 13))
+
+
+def test_tall_tree_preserves_coincident_structure_members() -> None:
+    identity = load_structure_identity(_JSD_FIXTURES / "tree2_t.jsd", 1)
+
+    assert identity is not None
+    assert identity.members == ((0, 0, 1), (0, 0, 1))
+
+
+def test_missing_structure_record_is_not_inferred_from_total_frame_count() -> None:
+    assert load_structure_identity(_JSD_FIXTURES / "tree2_t.jsd", 2) is None
+
+
+def test_missing_jsd_is_unavailable(tmp_path: Path) -> None:
+    assert load_structure_identity(tmp_path / "missing.jsd", 1) is None
+
+
+def test_corrupt_jsd_is_rejected() -> None:
+    with pytest.raises(JsdFormatError, match="J2SD"):
+        parse_structure_identities(b"not a jsd")
+
+
+def test_true_single_tile_identity_remains_scatter_eligible() -> None:
+    identity = load_structure_identity(_JSD_FIXTURES / "mdrock.jsd", 3)
+
+    assert identity is not None
+    assert identity.anchor_sub == 3
+    assert identity.members == ((0, 0, 3),)
 
 
 def _write_xml(path: Path, tileset_index: int, used_slots: list[int]) -> None:
@@ -35,7 +100,7 @@ def test_next_free_slot_picks_lowest_free(tmp_path: Path) -> None:
     """Baseline: returns the lowest slot index not in the used set."""
     xml = tmp_path / "Ja2Set.dat.xml"
     _write_xml(xml, tileset_index=1, used_slots=[0, 1, 2, 5, 6])
-    assert _next_free_slot(xml, tileset=1) == 3
+    assert _next_free_slot(ET.parse(xml), tileset=1) == 3
 
 
 def test_next_free_slot_respects_cap(tmp_path: Path) -> None:
@@ -45,7 +110,7 @@ def test_next_free_slot_respects_cap(tmp_path: Path) -> None:
     # Fill 0..10; cap at 10.
     _write_xml(xml, tileset_index=1, used_slots=list(range(0, 11)))
     with pytest.raises(HTTPException) as ei:
-        _next_free_slot(xml, tileset=1, engine_max_tile_slot=10)
+        _next_free_slot(ET.parse(xml), tileset=1, engine_max_tile_slot=10)
     assert ei.value.status_code == 409
     assert ei.value.detail["error"] == "NO_FREE_SLOT_UNDER_CAP"
     assert ei.value.detail["engine_max_tile_slot"] == 10
@@ -56,17 +121,17 @@ def test_next_free_slot_default_cap_is_stock_ja2(tmp_path: Path) -> None:
     only slot 0 used the next free is 1, well under the cap."""
     xml = tmp_path / "Ja2Set.dat.xml"
     _write_xml(xml, tileset_index=1, used_slots=[0])
-    assert _next_free_slot(xml, tileset=1) == 1
+    assert _next_free_slot(ET.parse(xml), tileset=1) == 1
 
 
 def test_next_free_slot_does_not_pick_above_cap(tmp_path: Path) -> None:
-    """Regression for a 2026-05-24 user report. Slots 0..5 used + cap
+    """Regression for a user report. Slots 0..5 used + cap
     set at 5 → no candidate exists ≤ cap, must raise. Previously this
     would happily return 6, which the engine can't address."""
     xml = tmp_path / "Ja2Set.dat.xml"
     _write_xml(xml, tileset_index=1, used_slots=[0, 1, 2, 3, 4, 5])
     with pytest.raises(HTTPException) as ei:
-        _next_free_slot(xml, tileset=1, engine_max_tile_slot=5)
+        _next_free_slot(ET.parse(xml), tileset=1, engine_max_tile_slot=5)
     assert ei.value.detail["error"] == "NO_FREE_SLOT_UNDER_CAP"
 
 
@@ -95,18 +160,21 @@ def test_next_free_slot_skips_to_inheritance_from_tileset_zero(
     f.text = "specific.sti"
     ET.ElementTree(root).write(xml, encoding="utf-8", xml_declaration=True)
     # 0 + 1 (inherited) + 2 (own) all taken → 3 is next.
-    assert _next_free_slot(xml, tileset=7) == 3
+    assert _next_free_slot(ET.parse(xml), tileset=7) == 3
 
 
-def test_next_free_slot_empty_xml_returns_one(tmp_path: Path) -> None:
-    """Defensive: an unparseable XML returns 1 (current behavior).
-    Wraps the OSError/ParseError path so the caller doesn't have to
-    distinguish between 'no slots used' and 'no file'."""
-    bogus = tmp_path / "does-not-exist.xml"
-    assert _next_free_slot(bogus, tileset=1) == 1
+def test_next_free_slot_empty_tree_returns_zero(tmp_path: Path) -> None:
+    """A parsed tree with no Tileset blocks → nothing used → slot 0.
+    (The old signature took a path and silently returned 1 on an
+    unparseable file; parse failures now surface upstream in
+    _commit_sti_to_tileset as XML_PARSE 500 instead of being masked.)"""
+    xml = tmp_path / "Ja2Set.dat.xml"
+    ET.ElementTree(ET.Element("Ja2Set")).write(
+        xml, encoding="utf-8", xml_declaration=True)
+    assert _next_free_slot(ET.parse(xml), tileset=1) == 0
 
 
-# ─── Single-sub extraction (Phase 3 — sub-import flow) ────────────────
+# ─── Single-sub extraction (sub-import flow) ──────────────────────────
 
 def _build_multiframe_8bit_sti(frame_count: int) -> bytes:
     """Build an in-memory N-frame indexed-mode STI for testing the
@@ -166,7 +234,7 @@ def test_extract_single_sub_rejects_garbage_bytes() -> None:
     assert ei.value.detail["error"] == "STI_REENCODE_FAILED"
 
 
-# ─── Phase 4: inject-sub helpers ──────────────────────────────────────
+# ─── inject-sub helpers ───────────────────────────────────────────────
 
 from routes.mapforge_library import _find_loose_tileset_stis, _palettes_match
 
@@ -219,6 +287,23 @@ def test_find_loose_tileset_stis_reads_frame_count(tmp_path: Path) -> None:
     assert slots[0].frame_count == 5
 
 
+def test_find_loose_tileset_stis_rejects_xml_path_traversal(tmp_path: Path) -> None:
+    install = tmp_path / "install"
+    layer = install / "Data-1.13"
+    tilesets_dir = layer / "Tilesets" / "2"
+    tilesets_dir.mkdir(parents=True)
+    outside = layer / "outside.sti"
+    outside.write_bytes(_build_multiframe_8bit_sti(frame_count=1))
+    xml_path = layer / "Ja2Set.dat.xml"
+    root = ET.Element("Ja2Set")
+    ts = ET.SubElement(root, "Tileset", index="2")
+    files = ET.SubElement(ts, "Files")
+    ET.SubElement(files, "file", index="0").text = "../../outside.sti"
+    ET.ElementTree(root).write(xml_path, encoding="utf-8", xml_declaration=True)
+
+    assert _find_loose_tileset_stis(install, xml_path, tileset=2) == []
+
+
 def test_palettes_match_identical_bytes() -> None:
     """Two palettes with identical byte content compare equal — the
     inject path uses this to allow merging frames cross-STI when the
@@ -250,6 +335,121 @@ from fastapi import Response
 from routes.mapforge_library import (
     copy_tile_to_tileset, CopyTileToTilesetBody, _commit_sti_to_tileset,
 )
+
+
+def test_library_mutator_wrapper_locks_physical_root_before_body(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A VFS profile alias must serialize the live content mutation once."""
+    import routes.mapforge_library as library
+    from contextlib import contextmanager
+    from threading import RLock
+    from types import SimpleNamespace
+
+    root = tmp_path / "install"
+    xml = root / "Data-1.13" / "Ja2Set.dat.xml"
+    xml.parent.mkdir(parents=True)
+    xml.write_text("<Ja2Set />", encoding="utf-8")
+    info = SimpleNamespace(id="profile-a", path=root)
+    state = SimpleNamespace(active=lambda: info, write_lock=RLock())
+    events: list[str] = []
+
+    @contextmanager
+    def fake_lock(install_root):
+        events.append(f"lock:{Path(install_root).resolve()}")
+        yield
+        events.append("unlock")
+
+    monkeypatch.setattr(library, "get_state", lambda: state)
+    monkeypatch.setattr(library, "cross_process_install_root_lock", fake_lock)
+
+    @library._physical_install_write
+    def mutate():
+        events.append("mutate")
+
+    mutate()
+
+    assert events == [f"lock:{root.resolve()}", "mutate", "unlock"]
+
+
+def test_library_mutator_wrapper_rejects_a_to_b_switch_before_handler(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A profile switch while waiting for the root lock cannot write."""
+    import routes.mapforge_library as library
+    from contextlib import contextmanager
+    from threading import RLock
+    from types import SimpleNamespace
+
+    root_a = tmp_path / "install-a"
+    root_b = tmp_path / "install-b"
+    xml = root_a / "Data-1.13" / "Ja2Set.dat.xml"
+    xml.parent.mkdir(parents=True)
+    xml.write_text("<Ja2Set />", encoding="utf-8")
+    current = {"value": SimpleNamespace(id="a", path=root_a)}
+    state = SimpleNamespace(active=lambda: current["value"], write_lock=RLock())
+    entered: list[bool] = []
+
+    @contextmanager
+    def barrier(_root):
+        entered.append(True)
+        current["value"] = SimpleNamespace(id="b", path=root_b)
+        yield
+
+    monkeypatch.setattr(library, "get_state", lambda: state)
+    monkeypatch.setattr(library, "cross_process_install_root_lock", barrier)
+    called: list[bool] = []
+
+    @library._physical_install_write
+    def mutate():
+        called.append(True)
+
+    with pytest.raises(HTTPException) as exc:
+        mutate()
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "ACTIVE_INSTALL_CHANGED"
+    assert entered == [True]
+    assert called == []
+
+
+def test_library_handler_uses_captured_xml_through_a_to_b_to_a_barrier(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Handlers use wrapper context even if active state briefly flips."""
+    import routes.mapforge_library as library
+    from contextlib import contextmanager
+    from threading import RLock
+    from types import SimpleNamespace
+
+    root_a = tmp_path / "install-a"
+    root_b = tmp_path / "install-b"
+    xml_a = root_a / "Data-1.13" / "Ja2Set.dat.xml"
+    xml_b = root_b / "Data-1.13" / "Ja2Set.dat.xml"
+    xml_a.parent.mkdir(parents=True)
+    xml_b.parent.mkdir(parents=True)
+    xml_a.write_text("<Ja2Set />", encoding="utf-8")
+    xml_b.write_text("<Ja2Set />", encoding="utf-8")
+    current = {"value": SimpleNamespace(id="a", path=root_a)}
+    state = SimpleNamespace(active=lambda: current["value"], write_lock=RLock())
+
+    @contextmanager
+    def barrier(_root):
+        current["value"] = SimpleNamespace(id="b", path=root_b)
+        current["value"] = SimpleNamespace(id="a", path=root_a)
+        yield
+
+    monkeypatch.setattr(library, "get_state", lambda: state)
+    monkeypatch.setattr(library, "cross_process_install_root_lock", barrier)
+    observed: list[tuple[Path, Path]] = []
+
+    @library._physical_install_write
+    def mutate():
+        observed.append(library._captured_install_xml())
+
+    mutate()
+
+    assert observed == [(root_a.resolve(), xml_a.resolve())]
 
 
 def _build_minimal_dat(
@@ -356,11 +556,116 @@ def _activate_install(monkeypatch, install_root: Path) -> None:
         path = str(install_root)
 
     class _FakeState:
+        write_lock = nullcontext()
+
         def active(self):
             return _FakeInfo()
 
     monkeypatch.setattr(mfl, "get_state", lambda: _FakeState())
     monkeypatch.setattr(mf, "_active_install_root", lambda: install_root)
+
+
+def test_inject_sub_uses_atomic_backup_write_and_disk_readback(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import routes.mapforge_library as library
+    from mercwizard_core.inject._atomic_xml import write_bytes_atomic as real_atomic
+    from ja2py.fileformats.Sti import load_8bit_sti
+
+    install = tmp_path / "inject-install"
+    layer = install / "Data-1.13"
+    tileset_dir = layer / "Tilesets" / "1"
+    tileset_dir.mkdir(parents=True)
+    dest = tileset_dir / "dest.sti"
+    original = _build_multiframe_8bit_sti(frame_count=1)
+    dest.write_bytes(original)
+    _write_xml(layer / "Ja2Set.dat.xml", tileset_index=1, used_slots=[0])
+    tree = ET.parse(layer / "Ja2Set.dat.xml")
+    tree.find(".//file").text = "dest.sti"
+    tree.write(layer / "Ja2Set.dat.xml", encoding="utf-8", xml_declaration=True)
+    _activate_install(monkeypatch, install)
+
+    class Catalog:
+        def execute(self, *_args):
+            return self
+        def fetchone(self):
+            return {"id": 1}
+        def close(self):
+            pass
+
+    source = _build_multiframe_8bit_sti(frame_count=2)
+    monkeypatch.setattr(library, "_catalog", lambda: Catalog())
+    monkeypatch.setattr(library, "_resolve_asset_bytes", lambda *_args: (source, {}))
+    calls: list[Path] = []
+
+    def recorded_atomic(path, data):
+        calls.append(Path(path))
+        real_atomic(Path(path), data)
+
+    monkeypatch.setattr(library, "write_bytes_atomic", recorded_atomic)
+    sha = "a" * 64
+    result = library.inject_sub(sha, library.InjectSubBody(
+        src_sha256=sha, tileset=1, target_slot=0, src_sub=1,
+    ))
+
+    backup = dest.with_suffix(".sti.bak")
+    assert calls == [backup, dest]
+    assert backup.read_bytes() == original
+    assert len(load_8bit_sti(io.BytesIO(dest.read_bytes())).images) == 2
+    assert result.frames_after == 2
+
+
+def test_inject_sub_restores_original_when_disk_readback_mismatches(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import routes.mapforge_library as library
+    from mercwizard_core.inject._atomic_xml import write_bytes_atomic as real_atomic
+
+    install = tmp_path / "inject-mismatch"
+    layer = install / "Data-1.13"
+    tileset_dir = layer / "Tilesets" / "1"
+    tileset_dir.mkdir(parents=True)
+    dest = tileset_dir / "dest.sti"
+    original = _build_multiframe_8bit_sti(frame_count=1)
+    dest.write_bytes(original)
+    _write_xml(layer / "Ja2Set.dat.xml", tileset_index=1, used_slots=[0])
+    tree = ET.parse(layer / "Ja2Set.dat.xml")
+    tree.find(".//file").text = "dest.sti"
+    tree.write(layer / "Ja2Set.dat.xml", encoding="utf-8", xml_declaration=True)
+    _activate_install(monkeypatch, install)
+
+    class Catalog:
+        def execute(self, *_args):
+            return self
+        def fetchone(self):
+            return {"id": 1}
+        def close(self):
+            pass
+
+    source = _build_multiframe_8bit_sti(frame_count=2)
+    monkeypatch.setattr(library, "_catalog", lambda: Catalog())
+    monkeypatch.setattr(library, "_resolve_asset_bytes", lambda *_args: (source, {}))
+    corrupted = False
+
+    def corrupt_first_live_write(path, data):
+        nonlocal corrupted
+        if Path(path) == dest and not corrupted:
+            corrupted = True
+            real_atomic(Path(path), b"not-an-sti")
+        else:
+            real_atomic(Path(path), data)
+
+    monkeypatch.setattr(library, "write_bytes_atomic", corrupt_first_live_write)
+    sha = "b" * 64
+    with pytest.raises(HTTPException) as exc:
+        library.inject_sub(sha, library.InjectSubBody(
+            src_sha256=sha, tileset=1, target_slot=0, src_sub=1,
+        ))
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "WRITE_UNVERIFIED"
+    assert corrupted is True
+    assert dest.read_bytes() == original
 
 
 def _files_by_index(xml_path: Path, tileset: int) -> dict[int, str]:
@@ -674,3 +979,248 @@ def test_copy_to_tileset_manual_override_of_inherited_slot_succeeds(
         )
     assert ei.value.status_code == 409
     assert ei.value.detail["error"] == "SLOT_TAKEN"
+
+
+def test_copy_to_tileset_rolls_back_sti_when_supplied_jsd_write_fails(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A failed companion JSD write must abort the whole import.
+
+    Removing the fatal JSD branch (or registering XML after it fails) would
+    leave a structural STI without collision data, which the engine cannot
+    load safely.  The observable contract is no destination artifacts and an
+    unchanged registry.
+    """
+    import routes.mapforge_library as library
+
+    install, xml_path = _make_copy_install(
+        tmp_path,
+        src_tileset=7, src_slot=12, src_filename="grass.sti",
+        dest_tileset=1, dest_used=[0, 1], with_jsd=True,
+    )
+    _activate_install(monkeypatch, install)
+    xml_before = xml_path.read_bytes()
+    real_atomic = library.write_bytes_atomic
+
+    def deny_jsd_write(path: Path, data: bytes) -> None:
+        if Path(path).suffix.lower() == ".jsd":
+            raise OSError("access denied")
+        real_atomic(Path(path), data)
+
+    monkeypatch.setattr(library, "write_bytes_atomic", deny_jsd_write)
+
+    with pytest.raises(HTTPException) as exc:
+        copy_tile_to_tileset(
+            src_tileset=7, src_slot=12,
+            body=CopyTileToTilesetBody(dest_tileset=1),
+            response=Response(),
+        )
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "JSD_WRITE_FAILED"
+    dest_sti = install / "Data-1.13" / "Tilesets" / "1" / "grass.sti"
+    assert not dest_sti.exists()
+    assert not dest_sti.with_suffix(".jsd").exists()
+    assert xml_path.read_bytes() == xml_before
+    assert 12 not in _files_by_index(xml_path, 1)
+
+
+def test_copy_to_tileset_rolls_back_artifacts_when_xml_write_fails(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """An XML replace failure removes every artifact from the new import.
+
+    Deleting either rollback branch would leave a loose STI/JSD that the XML
+    does not register. An existing orphan JSD is separately refused before
+    this transaction starts.
+    """
+    import routes.mapforge_library as library
+
+    install, xml_path = _make_copy_install(
+        tmp_path,
+        src_tileset=7, src_slot=12, src_filename="grass.sti",
+        dest_tileset=1, dest_used=[0, 1], with_jsd=True,
+    )
+    _activate_install(monkeypatch, install)
+    xml_before = xml_path.read_bytes()
+    dest_sti = install / "Data-1.13" / "Tilesets" / "1" / "grass.sti"
+    real_atomic = library.write_bytes_atomic
+
+    def deny_xml_write(path: Path, data: bytes) -> None:
+        if Path(path) == xml_path:
+            raise OSError("access denied")
+        real_atomic(Path(path), data)
+
+    monkeypatch.setattr(library, "write_bytes_atomic", deny_xml_write)
+
+    with pytest.raises(HTTPException) as exc:
+        copy_tile_to_tileset(
+            src_tileset=7, src_slot=12,
+            body=CopyTileToTilesetBody(dest_tileset=1),
+            response=Response(),
+        )
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "XML_WRITE_FAILED"
+    assert not dest_sti.exists()
+    assert not dest_sti.with_suffix(".jsd").exists()
+    assert xml_path.read_bytes() == xml_before
+    assert 12 not in _files_by_index(xml_path, 1)
+
+
+def test_copy_to_tileset_rolls_back_sti_when_atomic_write_raises_after_replace(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A post-replace STI error cannot leave an unregistered loose tile."""
+    import routes.mapforge_library as library
+
+    install, xml_path = _make_copy_install(
+        tmp_path,
+        src_tileset=7, src_slot=12, src_filename="grass.sti",
+        dest_tileset=1, dest_used=[0, 1],
+    )
+    _activate_install(monkeypatch, install)
+    xml_before = xml_path.read_bytes()
+    dest_sti = install / "Data-1.13" / "Tilesets" / "1" / "grass.sti"
+    real_atomic = library.write_bytes_atomic
+
+    def replace_sti_then_fail(path: Path, data: bytes) -> None:
+        real_atomic(Path(path), data)
+        if Path(path) == dest_sti:
+            raise OSError("post-replace fsync failed")
+
+    monkeypatch.setattr(library, "write_bytes_atomic", replace_sti_then_fail)
+
+    with pytest.raises(HTTPException) as exc:
+        copy_tile_to_tileset(
+            src_tileset=7, src_slot=12,
+            body=CopyTileToTilesetBody(dest_tileset=1),
+            response=Response(),
+        )
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "STI_WRITE_FAILED"
+    assert not dest_sti.exists()
+    assert xml_path.read_bytes() == xml_before
+    assert 12 not in _files_by_index(xml_path, 1)
+
+
+def test_copy_to_tileset_restores_xml_when_atomic_write_raises_after_replace(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A post-replace XML error restores the exact registry bytes."""
+    import routes.mapforge_library as library
+
+    install, xml_path = _make_copy_install(
+        tmp_path,
+        src_tileset=7, src_slot=12, src_filename="grass.sti",
+        dest_tileset=1, dest_used=[0, 1], with_jsd=True,
+    )
+    _activate_install(monkeypatch, install)
+    xml_before = xml_path.read_bytes()
+    dest_sti = install / "Data-1.13" / "Tilesets" / "1" / "grass.sti"
+    real_atomic = library.write_bytes_atomic
+
+    def replace_xml_then_fail(path: Path, data: bytes) -> None:
+        real_atomic(Path(path), data)
+        if Path(path) == xml_path:
+            raise OSError("post-replace fsync failed")
+
+    monkeypatch.setattr(library, "write_bytes_atomic", replace_xml_then_fail)
+
+    with pytest.raises(HTTPException) as exc:
+        copy_tile_to_tileset(
+            src_tileset=7, src_slot=12,
+            body=CopyTileToTilesetBody(dest_tileset=1),
+            response=Response(),
+        )
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "XML_WRITE_FAILED"
+    assert xml_path.read_bytes() == xml_before
+    assert not dest_sti.exists()
+    assert not dest_sti.with_suffix(".jsd").exists()
+    assert 12 not in _files_by_index(xml_path, 1)
+
+
+def test_copy_to_tileset_discards_partial_first_backup_before_retry(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A failed first backup neither persists partial bytes nor poisons retry."""
+    import routes.mapforge_library as library
+
+    install, xml_path = _make_copy_install(
+        tmp_path,
+        src_tileset=7, src_slot=12, src_filename="grass.sti",
+        dest_tileset=1, dest_used=[0, 1],
+    )
+    _activate_install(monkeypatch, install)
+    xml_before = xml_path.read_bytes()
+    backup_path = xml_path.with_suffix(xml_path.suffix + ".bak")
+    real_atomic = library.write_bytes_atomic
+
+    def replace_backup_then_fail(path: Path, data: bytes) -> None:
+        real_atomic(Path(path), data)
+        if Path(path) == backup_path:
+            raise OSError("post-replace fsync failed")
+
+    monkeypatch.setattr(library, "write_bytes_atomic", replace_backup_then_fail)
+
+    with pytest.raises(HTTPException) as exc:
+        copy_tile_to_tileset(
+            src_tileset=7, src_slot=12,
+            body=CopyTileToTilesetBody(dest_tileset=1),
+            response=Response(),
+        )
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "BACKUP_FAILED"
+    assert not backup_path.exists()
+    assert not (install / "Data-1.13" / "Tilesets" / "1" / "grass.sti").exists()
+    assert xml_path.read_bytes() == xml_before
+
+    monkeypatch.setattr(library, "write_bytes_atomic", real_atomic)
+    result = copy_tile_to_tileset(
+        src_tileset=7, src_slot=12,
+        body=CopyTileToTilesetBody(dest_tileset=1),
+        response=Response(),
+    )
+
+    assert result.slot == 12
+    assert backup_path.read_bytes() == xml_before
+
+
+@pytest.mark.parametrize("source_has_jsd", [False, True])
+def test_copy_to_tileset_refuses_preexisting_destination_jsd(
+    tmp_path: Path, monkeypatch, source_has_jsd: bool,
+) -> None:
+    """An orphan companion JSD is content, not an import destination.
+
+    This must reject both a source that would overwrite the orphan JSD and a
+    source with no JSD, which would otherwise silently adopt it.
+    """
+    install, xml_path = _make_copy_install(
+        tmp_path,
+        src_tileset=7, src_slot=12, src_filename="grass.sti",
+        dest_tileset=1, dest_used=[0, 1], with_jsd=source_has_jsd,
+    )
+    _activate_install(monkeypatch, install)
+    xml_before = xml_path.read_bytes()
+    dest_sti = install / "Data-1.13" / "Tilesets" / "1" / "grass.sti"
+    orphan_jsd = b"collision data that predates this import"
+    dest_sti.parent.mkdir(parents=True, exist_ok=True)
+    dest_sti.with_suffix(".jsd").write_bytes(orphan_jsd)
+
+    with pytest.raises(HTTPException) as exc:
+        copy_tile_to_tileset(
+            src_tileset=7, src_slot=12,
+            body=CopyTileToTilesetBody(dest_tileset=1),
+            response=Response(),
+        )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["error"] == "JSD_FILE_EXISTS"
+    assert not dest_sti.exists()
+    assert dest_sti.with_suffix(".jsd").read_bytes() == orphan_jsd
+    assert xml_path.read_bytes() == xml_before
+    assert 12 not in _files_by_index(xml_path, 1)

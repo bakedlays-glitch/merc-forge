@@ -12,6 +12,7 @@
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
+. (Join-Path $root "launch_checks.ps1")
 
 function Write-Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
 function Write-Skip($msg) { Write-Host "    [skip] $msg" -ForegroundColor DarkGray }
@@ -22,6 +23,29 @@ function Fail($msg) {
     Write-Host ""
     Read-Host "Press Enter to close this window"
     exit 1
+}
+
+function Stop-VerifiedMercForgeProcesses([string[]]$AllowedExecutablePaths) {
+    $allowed = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($path in $AllowedExecutablePaths) {
+        if (Test-Path -LiteralPath $path) {
+            [void]$allowed.Add([System.IO.Path]::GetFullPath($path))
+        }
+    }
+
+    foreach ($process in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+        if (-not $process.ExecutablePath) { continue }
+        try {
+            $processPath = [System.IO.Path]::GetFullPath($process.ExecutablePath)
+        } catch {
+            continue
+        }
+        if ($allowed.Contains($processPath)) {
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 # Paths
@@ -54,29 +78,14 @@ $shellSources = @(
     "shell\src", "shell\Cargo.toml", "shell\build.rs", "shell\tauri.conf.json"
 ) | ForEach-Object { Join-Path $root $_ }
 
-function Newer-Than-Artifact($paths, $artifact) {
-    if (-not (Test-Path -LiteralPath $artifact)) { return $true }
-    $artTime = (Get-Item -LiteralPath $artifact).LastWriteTimeUtc
-    foreach ($p in $paths) {
-        if (-not (Test-Path -LiteralPath $p)) { continue }
-        $hit = Get-ChildItem -LiteralPath $p -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTimeUtc -gt $artTime } |
-            Select-Object -First 1
-        if ($hit) { return $true }
-    }
-    return $false
-}
-
 $rebuildSidecar = Newer-Than-Artifact $sidecarSources $sidecarRuntime
-$rebuildTauri   = (Newer-Than-Artifact $frontendSources $frontendIndex) -or
-                  (Newer-Than-Artifact $shellSources $exe)
+$rebuildTauri   = Test-TauriRebuildNeeded $frontendSources $frontendIndex $shellSources $exe
 
 if (-not ($rebuildSidecar -or $rebuildTauri)) {
     Write-Step "No source changes since last build -- launching existing build."
 } else {
-    Write-Step "Stopping any running Merc Wizard processes..."
-    Get-Process -Name "Merc Wizard","mercwizard","mercwizard_core" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Step "Stopping verified Merc Forge build processes..."
+    Stop-VerifiedMercForgeProcesses @($exe, $sidecarRuntime)
     Start-Sleep -Milliseconds 600
 
     if ($rebuildSidecar) {

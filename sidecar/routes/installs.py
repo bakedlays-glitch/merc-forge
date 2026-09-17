@@ -261,6 +261,9 @@ def apply_vfs_config(install_id: str) -> ApplyVfsResult:
             "error": "JA2_INI_NOT_FOUND",
             "message": f"No Ja2.ini under {info.path}",
         })
+    from mercwizard_core import backup
+    from mercwizard_core.cross_lock import cross_process_install_root_lock
+
     try:
         rel = info.vfs_config_path.resolve().relative_to(info.path.resolve())
     except (OSError, ValueError):
@@ -272,7 +275,7 @@ def apply_vfs_config(install_id: str) -> ApplyVfsResult:
     # a VFS to this install" with "the current request would be a
     # no-op"). Read the file, scan for the first non-comment
     # VFS_CONFIG_INI line, and compare the value (whitespace +
-    # slash-direction tolerant). TODO #13 fix.
+    # slash-direction tolerant).
     backup_path = ja2_ini.with_suffix(ja2_ini.suffix + ".mwbak")
     already_active = False
     try:
@@ -292,7 +295,28 @@ def apply_vfs_config(install_id: str) -> ApplyVfsResult:
             break
     except OSError:
         pass
-    write_vfs_config_to_ja2_ini(ja2_ini, rel_str)
+    # Already active → true no-op: don't rewrite (the writer always rebuilds
+    # and normalizes spacing/EOLs, which would mutate bytes with no fresh
+    # recovery point), don't snapshot, just report.
+    if already_active:
+        return ApplyVfsResult(
+            install_id=install_id,
+            ja2_ini_path=str(ja2_ini),
+            vfs_config_written=rel_str,
+            backup_path=str(backup_path) if backup_path.exists() else None,
+            already_active=True,
+        )
+    # Locks + a per-apply snapshot. The one-shot .mwbak only preserves the
+    # FIRST-ever state — a second apply had no fresh recovery point and
+    # nothing on the Backups page; and the write raced other mutators.
+    with cross_process_install_root_lock(info.path), state.write_lock:
+        backup.snapshot(
+            install_root=info.path,
+            install_id=info.id,
+            files_to_back_up=[ja2_ini],
+            reason="apply_vfs_config",
+        )
+        write_vfs_config_to_ja2_ini(ja2_ini, rel_str)
     return ApplyVfsResult(
         install_id=install_id,
         ja2_ini_path=str(ja2_ini),

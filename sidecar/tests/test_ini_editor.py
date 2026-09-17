@@ -1,6 +1,6 @@
 """Tests for the INI editor (mercwizard_core.ini_editor + routes).
 
-Every finding from the 2026-06-07 adversarial reviews becomes a
+Every finding from the adversarial reviews becomes a
 regression test here:
   - comment/format preservation through surgical writes
   - duplicate keys: edit-last-occurrence (engine last-wins), delete-all

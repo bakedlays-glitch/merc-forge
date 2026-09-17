@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from mercwizard_core import backgrounds_schema as schema
 from mercwizard_core.backup import snapshot
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.inject import backgrounds_xml as bg_xml
 from mercwizard_core.install_context import make_install_context
 
@@ -245,7 +245,7 @@ def create_background(
             "message": f"uiIndex must be {schema.TEMPLATE_INDEX + 1}..{schema.MAX_INDEX}.",
         })
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         snap = snapshot(
             install_root=info.path, install_id=info.id,
             files_to_back_up=[write_path], reason="background_create",
@@ -281,7 +281,7 @@ def update_background(
         })
     clean_fields, clamps = _validate(body.name, body.short_name, body.description, body.fields)
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         snap = snapshot(
             install_root=info.path, install_id=info.id,
             files_to_back_up=[write_path], reason=f"background_edit_{ui_index}",
@@ -312,7 +312,7 @@ def delete_background(
             "message": "uiIndex 0 is the template row and can't be deleted.",
         })
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         snap = snapshot(
             install_root=info.path, install_id=info.id,
             files_to_back_up=[write_path], reason=f"background_delete_{ui_index}",
@@ -346,7 +346,7 @@ def set_imp_threshold(
             "message": "Provide ui_index, or all=true.",
         })
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         snap = snapshot(
             install_root=info.path, install_id=info.id,
             files_to_back_up=[write_path], reason="background_imp_threshold",

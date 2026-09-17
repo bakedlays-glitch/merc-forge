@@ -11,6 +11,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
+import { formatApiError } from "../lib/api";
 import { pickDirectory, pickFile } from "../lib/tauri";
 import {
   listSlf,
@@ -170,7 +171,7 @@ export default function ToolsSlfExtractor() {
       // card stuck on "Starting" while the red error card also renders.
       // The bug: previously `setProgress(null)` only ran after the
       // success path; a thrown error inside streamExtractSlf left
-      // `progress` populated forever (2026-05-25 review HIGH).
+      // `progress` populated forever.
       try {
         const final = await streamExtractSlf(
           {
@@ -249,11 +250,7 @@ export default function ToolsSlfExtractor() {
       )}
       {listing.isError && (
         <div className="card border-rust-500/40 bg-rust-500/10 text-sm text-rust-200">
-          {String(
-            listing.error instanceof Error
-              ? listing.error.message
-              : listing.error,
-          )}
+          {formatApiError(listing.error)}
         </div>
       )}
 
@@ -456,11 +453,7 @@ export default function ToolsSlfExtractor() {
 
           {extract.isError && (
             <div className="rounded border border-rust-500/40 bg-rust-500/10 p-2 text-xs text-rust-200">
-              {String(
-                extract.error instanceof Error
-                  ? extract.error.message
-                  : extract.error,
-              )}
+              {formatApiError(extract.error)}
             </div>
           )}
 

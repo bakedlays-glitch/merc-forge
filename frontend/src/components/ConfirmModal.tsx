@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useId, useRef, useState } from "react";
 
 interface Props {
   open: boolean;
@@ -13,6 +13,8 @@ interface Props {
   typeToConfirm?: string;
   /** Disable the confirm button (e.g. while a mutation is pending). */
   busy?: boolean;
+  /** Safe confirmation-action failure message, shown while allowing retry. */
+  error?: string | null;
 }
 
 export default function ConfirmModal({
@@ -26,9 +28,21 @@ export default function ConfirmModal({
   onCancel,
   typeToConfirm,
   busy = false,
+  error = null,
 }: Props) {
   const confirmRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const priorFocusRef = useRef<HTMLElement | null>(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    priorFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    return () => priorFocusRef.current?.focus();
+  }, [open]);
 
   // Escape closes; Enter confirms when the modal is non-destructive +
   // has no type-to-confirm gate. For destructive operations we focus
@@ -38,7 +52,25 @@ export default function ConfirmModal({
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onCancel();
+        if (!busy) onCancel();
+        return;
+      }
+      if (e.key === "Tab") {
+        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+        );
+        if (!focusable?.length) {
+          e.preventDefault();
+          dialogRef.current?.focus();
+          return;
+        }
+        const items = Array.from(focusable);
+        const current = items.indexOf(document.activeElement as HTMLElement);
+        const next = e.shiftKey
+          ? (current <= 0 ? items.length - 1 : current - 1)
+          : (current === items.length - 1 ? 0 : current + 1);
+        e.preventDefault();
+        items[next]?.focus();
         return;
       }
       if (e.key === "Enter" && !typeToConfirm && !destructive) {
@@ -60,31 +92,38 @@ export default function ConfirmModal({
   useEffect(() => {
     if (!open) return;
     if (typeToConfirm) return;
-    const target = destructive ? cancelRef.current : confirmRef.current;
+    const target = busy
+      ? dialogRef.current
+      : (destructive ? cancelRef.current : confirmRef.current);
     // Slight delay lets the dialog mount before focus moves — without
     // this Chrome occasionally swallows the focus call on the first
     // open of a session.
     const id = window.setTimeout(() => target?.focus(), 0);
     return () => window.clearTimeout(id);
-  }, [open, destructive, typeToConfirm]);
+  }, [open, destructive, typeToConfirm, busy]);
 
   if (!open) return null;
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
-      onClick={onCancel}
+      aria-labelledby={titleId}
+      tabIndex={-1}
+      data-app-dialog="1"
+      onClick={() => { if (!busy) onCancel(); }}
     >
       <div
         className="card max-w-md w-full mx-4"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-lg font-semibold mb-2">{title}</h2>
+        <h2 id={titleId} className="text-lg font-semibold mb-2">{title}</h2>
         <div className="text-sm text-wasteland-200 mb-4">{body}</div>
+        {error && <p role="alert" className="mb-3 text-sm text-rust-300">{error}</p>}
         {typeToConfirm && (
-          <TypeToConfirmInput required={typeToConfirm} onMatch={onConfirm}>
+          <TypeToConfirmInput required={typeToConfirm} busy={busy} onMatch={onConfirm}>
             {(matches) => (
               <>
                 <button
@@ -128,10 +167,12 @@ export default function ConfirmModal({
 
 function TypeToConfirmInput({
   required,
+  busy,
   onMatch,
   children,
 }: {
   required: string;
+  busy: boolean;
   onMatch: () => void;
   /** Render-prop so the Confirm button can disable until the input matches
    * (it was visually enabled but inert before — clicking on a mismatch did
@@ -139,18 +180,20 @@ function TypeToConfirmInput({
   children: (matches: boolean) => ReactNode;
 }) {
   const [value, setValue] = useState("");
+  const inputId = useId();
   const matches = value === required;
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (matches) onMatch();
+        if (matches && !busy) onMatch();
       }}
     >
-      <label className="block text-sm text-wasteland-300 mb-1">
+      <label htmlFor={inputId} className="block text-sm text-wasteland-300 mb-1">
         Type <code className="font-mono text-rust-400">{required}</code> to confirm:
       </label>
       <input
+        id={inputId}
         className="input mb-3"
         value={value}
         onChange={(e) => setValue(e.target.value)}

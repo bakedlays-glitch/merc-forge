@@ -22,7 +22,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 9,
+   "n_buildings": 3,
    "n_maps": 65
   },
   "cliff": {
@@ -38,7 +38,7 @@
    "n_maps": 45
   },
   "desert": {
-   "has_buildings": true,
+   "has_buildings": false,
    "layers": [
     "land",
     "objs",
@@ -47,7 +47,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 6,
+   "n_buildings": 0,
    "n_maps": 23
   },
   "farm": {
@@ -60,7 +60,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 14,
+   "n_buildings": 6,
    "n_maps": 41
   },
   "swamp": {
@@ -86,7 +86,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 21,
+   "n_buildings": 13,
    "n_maps": 139
   },
   "tropical": {
@@ -99,7 +99,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 2,
+   "n_buildings": 1,
    "n_maps": 32
   },
   "urban": {
@@ -112,7 +112,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 200,
+   "n_buildings": 153,
    "n_maps": 109
   },
   "wasteland": {
@@ -125,7 +125,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 8,
+   "n_buildings": 3,
    "n_maps": 3
   }
  },
@@ -143,7 +143,7 @@
    "n_maps": 20
   },
   "cave": {
-   "has_buildings": true,
+   "has_buildings": false,
    "layers": [
     "land",
     "objs",
@@ -152,7 +152,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 9,
+   "n_buildings": 0,
    "n_maps": 64
   },
   "cliff": {
@@ -168,7 +168,7 @@
    "n_maps": 45
   },
   "desert": {
-   "has_buildings": true,
+   "has_buildings": false,
    "layers": [
     "land",
     "objs",
@@ -177,7 +177,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 6,
+   "n_buildings": 0,
    "n_maps": 23
   },
   "farm": {
@@ -190,7 +190,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 14,
+   "n_buildings": 5,
    "n_maps": 41
   },
   "swamp": {
@@ -216,11 +216,11 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 21,
+   "n_buildings": 11,
    "n_maps": 139
   },
   "tropical": {
-   "has_buildings": true,
+   "has_buildings": false,
    "layers": [
     "land",
     "objs",
@@ -229,7 +229,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 2,
+   "n_buildings": 0,
    "n_maps": 32
   },
   "urban": {
@@ -242,7 +242,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 190,
+   "n_buildings": 100,
    "n_maps": 104
   },
   "wasteland": {
@@ -255,7 +255,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 8,
+   "n_buildings": 1,
    "n_maps": 3
   }
  },
@@ -366,7 +366,7 @@
     "shadows",
     "structs"
    ],
-   "n_buildings": 129,
+   "n_buildings": 114,
    "n_maps": 63
   },
   "wasteland": {

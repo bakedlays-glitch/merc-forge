@@ -62,6 +62,13 @@ export default function Items() {
   const [selected, setSelected] = useState<number | null>(null);
   const [q, setQ] = useState("");
   const [activeCategory, setActiveCategory] = useState<string>("all");
+  // Incremental render cap. Starts at ITEM_CAP and grows by ITEM_CAP per
+  // "Show more" click; snaps back whenever the visible set changes
+  // (search / category) so a narrow filter never keeps a huge DOM.
+  const [cap, setCap] = useState(ITEM_CAP);
+  useEffect(() => {
+    setCap(ITEM_CAP);
+  }, [q, activeCategory]);
   const [sortKey, setSortKey] = useState<SortKey>("id");
   const [draft, setDraft] = useState<ItemDetail | null>(null);
   const [saving, setSaving] = useState(false);
@@ -278,7 +285,7 @@ export default function Items() {
         </select>
       </div>
       <p className="text-[11px] text-wasteland-500 mb-2">
-        Showing {Math.min(rows.length, ITEM_CAP)} of {rows.length}
+        Showing {Math.min(rows.length, cap)} of {rows.length}
         {activeCategory !== "all" && ` (${allItems.length} total)`}
         {!writable && " · read-only install"}
       </p>
@@ -287,7 +294,7 @@ export default function Items() {
           <p className="text-sm text-wasteland-500 p-6 text-center">No items match.</p>
         )}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2">
-          {rows.slice(0, ITEM_CAP).map((it: ItemSummary) => (
+          {rows.slice(0, cap).map((it: ItemSummary) => (
             <button key={it.ui_index}
               onClick={() => requestSelect(it.ui_index)}
               title={it.name}
@@ -303,10 +310,16 @@ export default function Items() {
             </button>
           ))}
         </div>
-        {rows.length > ITEM_CAP && (
-          <p className="text-[11px] text-wasteland-500 p-3 text-center">
-            Showing first {ITEM_CAP} of {rows.length}. Refine with search or a category.
-          </p>
+        {rows.length > cap && (
+          <div className="p-3 text-center">
+            <button
+              type="button"
+              className="text-xs px-3 py-1.5 rounded border border-wasteland-600 text-wasteland-200 hover:border-rust-400 hover:bg-wasteland-800"
+              onClick={() => setCap((c) => c + ITEM_CAP)}
+            >
+              Show {Math.min(ITEM_CAP, rows.length - cap)} more ({rows.length - cap} remaining)
+            </button>
+          </div>
         )}
       </div>
       {guard}

@@ -1,4 +1,4 @@
-"""Phase 1 (A5 safety foundation): transactional edit rollback.
+"""Safety foundation: transactional edit rollback.
 
 Tests the `_snapshot_tiles` / `_restore_tiles` mechanism that makes
 `apply_edits` atomic — a mid-batch failure must leave the session
@@ -126,7 +126,10 @@ def _fake_session(parsed):
     sess.tileset = 0
     sess.parsed = parsed
     sess.original_bytes = b""
+    sess.disk_baseline = b""
     sess.dirty = False
+    sess.mutation_seq = 0
+    sess.autosaved_seq = 0
     sess.edit_count = 0
     sess.created_at = 0.0
     sess.last_used_at = 0.0

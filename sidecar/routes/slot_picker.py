@@ -11,27 +11,15 @@ older clients that haven't migrated yet.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from mercwizard_core.slot_picker import SlotPickerResponse, build_slot_picker
 
-from .state import get_state
+# Single owner of install resolution — this module used to carry a
+# character-for-character re-implementation.
+from .roster import _resolve_install
 
 router = APIRouter()
-
-
-def _resolve_install(install_id: str | None):
-    state = get_state()
-    if install_id:
-        info = state.get_install(install_id)
-    else:
-        info = state.active()
-    if info is None:
-        raise HTTPException(status_code=400, detail={
-            "error": "NO_ACTIVE_INSTALL",
-            "message": "Pass ?install_id=... or POST /installs/active first",
-        })
-    return info
 
 
 @router.get("/slots/picker")

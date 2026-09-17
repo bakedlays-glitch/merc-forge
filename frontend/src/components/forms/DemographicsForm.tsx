@@ -1,3 +1,5 @@
+import { useQuery } from "@tanstack/react-query";
+import { getBodyTypes, getHealth, type BodyTypeOptionApi } from "../../lib/api";
 import type { Merc } from "../../lib/schema";
 import { NATIONALITY_OPTIONS } from "../../lib/nationalities";
 import { RACE_OPTIONS } from "../../lib/races";
@@ -7,17 +9,9 @@ import { RACE_OPTIONS } from "../../lib/races";
  * pools, AI dialogue triggers (bHatedNationality), and which animation
  * pack is loaded for the tactical sprite.
  *
- * Body type values come from JA2 1.13's SoldierBodyTypes enum
- * (TacticalAnimation/AnimationData.h). REGMALE / BIGMALE / STOCKYMALE /
- * REGFEMALE are the four humanoid body types we surface; the rest are
- * non-humanoid (creatures, robots) and don't make sense for merc
- * profiles. Mods occasionally extend with custom IDs; users who need
- * them can punch into the raw value via the override field.
- *
- * Race + nationality options come from the canonical engine-derived tables
- * in ../../lib/races and ../../lib/nationalities (verbatim mirrors of the
- * engine's szRaceText[] / szNationalityText[]). Body type stays local — we
- * only surface the four humanoid types.
+ * Race + nationality options are static engine tables. Body types come from
+ * the selected target's sidecar registry because modded engines can append
+ * safe, custom animation IDs.
  */
 
 export interface DemographicsFormProps {
@@ -25,16 +19,35 @@ export interface DemographicsFormProps {
   onChange: <K extends keyof Merc>(field: K, value: Merc[K]) => void;
 }
 
-const BODY_TYPE_OPTIONS: ReadonlyArray<readonly [number, string]> = [
-  [0, "REGMALE — average male"],
-  [1, "BIGMALE — large male"],
-  [2, "STOCKYMALE — broad/stocky male"],
-  [3, "REGFEMALE — average female"],
-];
+export function mergeBodyTypeOptions(
+  options: readonly BodyTypeOptionApi[],
+  currentValue: number,
+): BodyTypeOptionApi[] {
+  return options.some((option) => option.id === currentValue)
+    ? [...options]
+    : [...options, {
+      id: currentValue,
+      name: `Custom ${currentValue}`,
+      category: "observed",
+      authorable: false,
+    }];
+}
+
+export function bodyTypeQueryKey(installId: string | null | undefined) {
+  return ["body-types", installId ?? "active"] as const;
+}
 
 export default function DemographicsForm({
   merc, onChange,
 }: DemographicsFormProps) {
+  const health = useQuery({ queryKey: ["health"], queryFn: getHealth });
+  const installId = health.data?.active_install_id;
+  const bodyTypes = useQuery({
+    queryKey: bodyTypeQueryKey(installId),
+    queryFn: () => getBodyTypes(installId ?? undefined),
+  });
+  const bodyTypeOptions = mergeBodyTypeOptions(bodyTypes.data?.options ?? [], merc.ubBodyType);
+
   return (
     <fieldset className="block border border-wasteland-700 rounded p-3">
       <legend className="text-sm font-medium text-wasteland-100 px-1">
@@ -81,22 +94,36 @@ export default function DemographicsForm({
             value={merc.ubBodyType}
             onChange={(e) => onChange("ubBodyType", Number(e.target.value))}
           >
-            {BODY_TYPE_OPTIONS.map(([v, l]) => (
-              <option key={v} value={v}>{l}</option>
-            ))}
-            {!BODY_TYPE_OPTIONS.some(([v]) => v === merc.ubBodyType) && (
-              <option value={merc.ubBodyType}>
-                (custom: {merc.ubBodyType})
+            {bodyTypeOptions.map((option) => (
+              <option
+                key={option.id}
+                value={option.id}
+                disabled={option.authorable === false && option.id !== merc.ubBodyType}
+              >
+                {option.name}{option.category ? ` — ${option.category}` : ""}
+                {option.authorable === false ? " (preserve only)" : ""}
               </option>
-            )}
+            ))}
           </select>
         </label>
       </div>
       <p className="text-xs text-wasteland-400 mt-2">
         Race + nationality drive AI dialogue triggers (hated nationality,
-        etc.). Body type selects the tactical-sprite animation pack — only
-        the four humanoid types load merc sprites correctly.
+        etc.). Body type selects the tactical-sprite animation pack.
       </p>
+      {bodyTypes.isLoading && (
+        <p className="text-xs text-wasteland-400 mt-1">Loading target body types…</p>
+      )}
+      {bodyTypes.isError && (
+        <p className="text-xs text-amber-300 mt-1">
+          Couldn&apos;t load target body types; keeping the current value available.
+        </p>
+      )}
+      {bodyTypes.data && (
+        <p className="text-xs text-wasteland-400 mt-1">
+          Target registry: {bodyTypes.data.mod_id} ({bodyTypes.data.source}).
+        </p>
+      )}
     </fieldset>
   );
 }

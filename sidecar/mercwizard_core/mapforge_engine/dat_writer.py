@@ -4,7 +4,7 @@ Round-trips a parsed .dat (per parse_dat_full) back to bytes that match
 what the engine writes. The first design goal is byte-exact identity:
 parse(file) → write_back → bytes must equal the original file. That's
 verified by tools/roundtrip_audit.py (B0 gate — 15,479/15,479 maps
-byte-perfect across 30 installs, 2026-06-10) and pinned at byte level
+byte-perfect across 30 installs) and pinned at byte level
 by tests/test_mapforge_save.py.
 
 Hybrid encoding strategy
@@ -164,6 +164,22 @@ def write_dat_bytes(parsed: Dict[str, Any], original_bytes: bytes) -> bytes:
             from appendix_writer import build_appendix
         appendix_bytes, new_flags = build_appendix(
             appendix_model, parsed.get("tail"), parsed["major"])
+        # Data-loss guard: build_appendix synthesizes ONLY the sections
+        # the model authors, and the result replaces the original
+        # appendix wholesale. If the original flags carry sections the
+        # model doesn't (items, lights, soldiers, doors…), a blind
+        # replace silently destroys them. Refuse instead.
+        orig_flags = int(parsed.get("flags") or 0)
+        lost = orig_flags & ~int(new_flags)
+        if lost:
+            raise ValueError(
+                f"appendix authoring would drop sections present in the "
+                f"original map (flag bits 0x{lost:08X}): the appendix "
+                "model only synthesizes what it authors, and the "
+                "original items/lights/soldiers/doors sections would be "
+                "destroyed. Author those sections too, or edit a map "
+                "without them."
+            )
         parsed["flags"] = new_flags
     else:
         appendix_bytes = original_bytes[appendix_offset:]
@@ -285,6 +301,13 @@ def build_empty_dat_bytes(
     # obj / struct / shadow / roof / onroof passes: empty.
     # Room info: 0 for every tile.
     out += bytes(room_bytes_per_tile * world_max)
-    # MapInformation tail (major>=7.0): 32-byte MAPCREATE_STRUCT, all zero.
-    out += bytes(32)
+    # MapInformation tail (major>=7.0): 32-byte MAPCREATE_STRUCT. Gridnos
+    # stay zero (editor recomputes on first save), but ubMapVersion (byte
+    # 26) must be stamped: the engine's UpdateOldVersionMap asserts "Map
+    # is less than minimum supported version" for ubMapVersion < 15, and
+    # SaveMapInformation writes ubMapVersion = the minor map version —
+    # mirror that (Map Information.cpp:154,195).
+    tail = bytearray(32)
+    tail[26] = minor & 0xFF
+    out += tail
     return bytes(out)

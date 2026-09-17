@@ -62,12 +62,15 @@ export default function FirstRun() {
       try {
         await applyVfsConfig(info.id);
       } catch (e) {
-        // Don't lose the registration if the apply fails — surface and stay.
+        // Don't lose the registration if the apply fails — surface and
+        // STAY. This used to navigate("/hub") right after setting the
+        // error, unmounting FirstRun before the message could be read.
         setManualError(
-          `Registered the install, but couldn't write the VFS config to JA2.ini: ${formatApiError(e)}`,
+          `Registered the install, but couldn't write the VFS config to `
+          + `JA2.ini: ${formatApiError(e)}. You can retry from the Hub's `
+          + "Apply VFS button.",
         );
         qc.invalidateQueries({ queryKey: ["health"] });
-        navigate("/hub");
         return;
       }
     }
@@ -138,6 +141,14 @@ export default function FirstRun() {
       setVfsPicker(null);
       setVfsConfirm(null);
       return null;
+    },
+    onError: (e) => {
+      // addInstall / setActiveInstall failures used to be fully
+      // swallowed: the modal un-busied and just sat there. Close the
+      // modals and surface the error where manualError renders.
+      setVfsPicker(null);
+      setVfsConfirm(null);
+      setManualError(formatApiError(e));
     },
   });
 

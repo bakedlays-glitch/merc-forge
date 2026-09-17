@@ -11,6 +11,7 @@ from __future__ import annotations
 import struct
 from typing import Any, Dict
 
+from .parse_dat_ext import exit_grid_record_size
 from .parse_world_items import parse_world_items
 from . import appendix_writer as AW
 
@@ -172,34 +173,68 @@ def extract_appendix_entities(data: bytes, parsed: Dict[str, Any]) -> Dict[str, 
                     return blocked("soldier_detailed")
         out["reached"].append("soldiers")
 
-    # 6. EXIT GRIDS â€” uint16 count + 12-byte records (<iiBBBx).
+    # 6. EXIT GRIDS â€” uint16 count + per-record size. major>=7.0: 12-byte
+    # records (<iiBBBx). major<7.0: 7-byte _OLD_EXITGRID records
+    # (<hhBBB: INT16 sMapIndex, INT16 usGridNo, 3xUINT8) â€” the engine's
+    # EXITGRID::Load reads EXACTLY "2+5" bytes with a "never use
+    # sizeof(_OLD_EXITGRID)" warning (Exit Grids.cpp:149-153,
+    # source-verified). A fixed 12 over-advanced the cursor
+    # on legacy maps, cascading misparse into doortable/edgepoints.
     if flags & AW.MAP_EXITGRIDS_SAVED:
         if pos + 2 > n:
             return blocked("exitgrid_count_truncated")
         eg_count = struct.unpack_from("<H", data, pos)[0]
         pos += 2
+        eg_size = exit_grid_record_size(major)
+        eg_modern = eg_size == 12
         for _ in range(eg_count):
-            if pos + 12 > n:
+            if pos + eg_size > n:
                 return blocked("exitgrid_records_overrun")
-            map_index, grid_no, sx, sy, sz = struct.unpack_from("<iiBBB", data, pos)
-            pos += 12  # 12B record: <iiBBBx>, trailing pad byte not unpacked
+            if eg_modern:
+                map_index, grid_no, sx, sy, sz = struct.unpack_from(
+                    "<iiBBB", data, pos)   # trailing pad byte not unpacked
+            else:
+                map_index, grid_no, sx, sy, sz = struct.unpack_from(
+                    "<hhBBB", data, pos)
+            pos += eg_size
             x, y = _xy(map_index, cols)
             out["exit_grids"].append({"gridno": map_index, "x": x, "y": y,
                                       "dest_gridno": grid_no, "sx": sx, "sy": sy, "sz": sz})
         out["reached"].append("exitgrids")
 
-    # 7. DOOR TABLE â€” uint8 count + 14-byte _OLD_DOOR records.
+    # 7. DOOR TABLE â€” uint8 count + version-branched door records,
+    # mirroring the EXIT GRIDS branch above exactly. major>=7.0: DOOR class =
+    # 12-byte record (INT32 sGridNo @+0, then fLocked/ubTrapLevel/ubTrapID/
+    # ubLockID/bPerceivedLocked/bPerceivedTrapped/bLockDamage 7x1B @+4, +1
+    # tail pad; Keys.h DOOR, Keys.cpp:848 "LOADDATA(this, sizeof(DOOR))" —
+    # witness-vote confirmed on a9.dat: 12B*34 doors lands exactly at EOF,
+    # gridnos sane and in ascending order). major<7.0: _OLD_DOOR = 14-byte
+    # record (INT16 sGridNo @+0, BOOLEAN fLocked @+2, then the same 6x1B
+    # fields, +bPadding[4]; Keys.h:66-90, Keys.cpp:841-846 "dMajorMapVersion
+    # < 7.0" branch reads sizeof(_OLD_DOOR)) — witness-vote confirmed on
+    # A2/L11/C6.DAT (14 gives sane locked/lock_id on every record; 15, as
+    # used by the standalone tools/scan_appendix_locks_lights.py
+    # OLD_DOOR_SZ, produces garbage past the first record on this install's
+    # live fleet). The layout differs by more than stride: fLocked sits at
+    # +2 on the 16-bit-gridno record but +4 on the 32-bit-gridno one.
     if flags & AW.MAP_DOORTABLE_SAVED:
         if pos + 1 > n:
             return blocked("doortable_count_truncated")
         dt_count = data[pos]
         pos += 1
+        door_modern = major >= 7.0
+        door_size = 12 if door_modern else 14
+        out["door_record_size"] = door_size
         for _ in range(dt_count):
-            if pos + 14 > n:
+            if pos + door_size > n:
                 return blocked("doortable_records_overrun")
-            g = struct.unpack_from("<h", data, pos)[0]
-            locked = data[pos + 2]
-            pos += 14
+            if door_modern:
+                g = struct.unpack_from("<i", data, pos)[0]
+                locked = data[pos + 4]
+            else:
+                g = struct.unpack_from("<h", data, pos)[0]
+                locked = data[pos + 2]
+            pos += door_size
             if g < 0:
                 continue
             x, y = _xy(g, cols)

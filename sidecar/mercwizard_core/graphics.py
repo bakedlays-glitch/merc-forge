@@ -1,6 +1,6 @@
 """Golden graphics stack (cnc-ddraw + ReShade) — verify + deploy.
 
-Model (per the 2026-06-07 review — this is NOT a file-copy "golden
+Model (per the review — this is NOT a file-copy "golden
 master"):
   - RUNTIME components (ddraw.dll, opengl32.dll, reshade-shaders/) are
     external downloads we don't ship. Status = presence only, with a

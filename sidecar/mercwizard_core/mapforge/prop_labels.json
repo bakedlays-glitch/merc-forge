@@ -1,0 +1,2466 @@
+{
+  "_schema": "wasteland prop labels v1. Keyed by STI basename (lowercase). name = primary palette label; origin = which sector/feature it belongs to; category is descriptive; per_sub {sub: name} names individual props (1-based sub index). aliases fold version/shadow/cross-tileset copies onto one canonical entry. Any custom sheet registered in a tileset but absent here is flagged by prop_labels_lint.py.",
+  "custom_prefixes": [
+    "gecko_",
+    "jt_",
+    "ncr_",
+    "plant",
+    "build_24a_rust",
+    "sandbag",
+    "fo2_",
+    "nv_props_",
+    "nvq_props_",
+    "nv_city_upper_",
+    "nv_railaux_v101",
+    "nv_statn_v101",
+    "nv_rails_v101",
+    "nv_tops54_",
+    "nv_tops55_",
+    "nv_tops56_",
+    "nv_strip_furniture",
+    "nv_court_115",
+    "nv_13_drum_02",
+    "nv_14_p-out3",
+    "nv_16_sandbag",
+    "nv_28_sandbags",
+    "nv_ncr_0",
+    "nv_ncr_1",
+    "nv_gomcourt_",
+    "nv_v21_complete",
+    "nv_v21_streetscape_",
+    "nv_ncr_streetscape_",
+    "nv_gomcourt_rail_",
+    "nv_alley_cafe_props_",
+    "nv_urban_soil_",
+    "nv_city_road_cells_",
+    "nv_story_props_",
+    "nv_",
+    "nvq_",
+    "reactor_power_"
+  ],
+  "sheets": {
+    "build_24a_rust.sti": {
+      "name": "Rusted corrugated-metal wall",
+      "origin": "Junktown (L8)",
+      "category": "wall",
+      "note": "Directional wall set (65 subs)."
+    },
+    "nv_props_73_v101.sti": {
+      "name": "New Vegas casino and street props",
+      "origin": "Fallout: New Vegas source props — Strip T84",
+      "category": "furniture",
+      "note": "Static source-mesh props. Names identify the art only; they do not imply interaction.",
+      "per_sub": {
+        "1": "Sunset Sarsaparilla vending-machine prop",
+        "2": "Casino slot-machine prop (reels facing southwest)",
+        "3": "Mojave Express dropbox prop (sign facing southwest)",
+        "4": "Roulette-table prop",
+        "5": "Fire-hydrant prop",
+        "6": "NCR bear-flag prop (cloth facing southwest)"
+      }
+    },
+    "nv_props_75_v101.sti": {
+      "name": "New Vegas signs and interior props",
+      "origin": "Fallout: New Vegas source props — Strip T84",
+      "category": "furniture",
+      "note": "Static source-mesh props. Names identify the art only; signs and appliances have no implied gameplay behavior.",
+      "per_sub": {
+        "1": "Lucky 38 sign prop",
+        "2": "Welcome to Fabulous New Vegas sign prop (face toward southwest)",
+        "3": "Strip double streetlamp prop",
+        "4": "Pool-table prop",
+        "5": "Closed retro refrigerator prop",
+        "6": "Office water-cooler prop",
+        "7": "Air-conditioning unit prop",
+        "8": "Pinball-machine prop",
+        "9": "Closed gun-cabinet prop"
+      }
+    },
+    "nv_props_76_v101.sti": {
+      "name": "Fallout vending, drum, and wreck props",
+      "origin": "Fallout 3 source props — Strip T84",
+      "category": "scatter",
+      "note": "Static source-mesh props. The vending machine and drum are visual props; the wreck uses library collision until a placement-specific footprint is authored.",
+      "per_sub": {
+        "1": "Nuka-Cola vending-machine prop",
+        "2": "Oil-drum prop",
+        "3": "Wrecked car-hulk prop"
+      }
+    },
+    "nv_props_77_v101.sti": {
+      "name": "New Vegas utility and workshop props",
+      "origin": "Fallout: New Vegas source props — Strip T84",
+      "category": "furniture",
+      "note": "Static source-mesh props. Workbenches, generator, and tank names describe their art and do not imply powered or interactive behavior.",
+      "per_sub": {
+        "1": "Motorcycle prop",
+        "2": "Workbench prop (vise and shelf)",
+        "3": "Hospital gurney prop",
+        "4": "Fusion-generator prop",
+        "5": "Reloading-bench prop",
+        "6": "Squat exterior water-tank prop"
+      }
+    },
+    "nv_story_props_77_v101.sti": {
+      "name": "New Vegas utility props and mature date palms",
+      "origin": "Fallout: New Vegas source props — Strip T89",
+      "category": "furniture",
+      "note": "Subs 1-6 preserve the qualified utility-prop bank; subs 7-8 add source-native date palms. Names identify visual art only and do not imply powered, interactive, lootable, or light-emitting behavior.",
+      "per_sub": {
+        "1": "Parked motorcycle prop",
+        "2": "Workbench prop (vise and shelf)",
+        "3": "Hospital gurney prop",
+        "4": "Fusion-generator source prop",
+        "5": "Reloading-bench source prop",
+        "6": "Squat exterior water-tank prop",
+        "7": "Mature FNV date palm (NVDatePalm02)",
+        "8": "Tall mature FNV date palm (NVDatePalm03)"
+      }
+    },
+    "nv_strip_furniture_v101.sti": {
+      "name": "Strip sidewalk furniture",
+      "origin": "New Vegas Strip T84",
+      "category": "furniture",
+      "note": "Source meshes: clutter\\VendingMachineMag\\VendMachMag.NIF; architecture\\Strip\\NVStripStreetLamp01off.NIF plus NVStripStreetLamp01BulbOff.NIF. Static art only; ACTI source identity does not carry interaction into JA2, and the off-state lamp art does not establish a JA2 light source.",
+      "per_sub": {
+        "1": "Magazine vending-machine prop (front at 135-degree source rotation)",
+        "2": "Strip streetlamp prop, off state (45-degree source rotation)"
+      }
+    },
+    "nv_court_115_v101.sti": {
+      "name": "Strip courtyard plants and benches",
+      "origin": "New Vegas Strip T84",
+      "category": "furniture",
+      "per_sub": {
+        "1": "Palm tree in planted bed",
+        "2": "Sago palm / cycad planting",
+        "3": "Park bench (base orientation)",
+        "4": "Park bench (90-degree rotated orientation)"
+      }
+    },
+    "nv_13_drum_02.sti": {
+      "name": "Wooden shipping crates",
+      "origin": "JA2 source art — Strip T84",
+      "category": "container",
+      "note": "Decoded art identity only; the sheet name is misleading. No lootable/openable behavior is implied.",
+      "per_sub": {
+        "1": "Tall closed wooden shipping crate",
+        "2": "Closed wooden shipping crate (front-left view)",
+        "3": "Open wooden shipping crate (front-left view)",
+        "4": "Closed wooden shipping crate (front-right view)",
+        "5": "Open wooden shipping crate (front-right view)",
+        "6": "Closed low wooden shipping crate",
+        "7": "Open low wooden shipping crate"
+      }
+    },
+    "nv_14_p-out3.sti": {
+      "name": "Flowering shrubs and planter",
+      "origin": "JA2 source art — Strip T84",
+      "category": "vegetation",
+      "per_sub": {
+        "1": "Low yellow-flowering shrub",
+        "2": "Tall yellow-flowering shrub",
+        "3": "Large yellow-flowering shrub",
+        "4": "Large yellow-flowering shrub (alternate)",
+        "5": "Grass clump",
+        "6": "Low red-flowering shrub",
+        "7": "Tall red-flowering shrub",
+        "8": "Large red-flowering shrub",
+        "9": "Large red-flowering shrub (alternate)",
+        "10": "Circular flower planter"
+      }
+    },
+    "nv_16_sandbag.sti": {
+      "name": "Sandbag barricades",
+      "origin": "JA2 source art — Strip T84",
+      "category": "cover",
+      "note": "Ten decoded directional barricade frames.",
+      "per_sub": {
+        "1": "Sandbag barricade orientation 1",
+        "2": "Sandbag barricade orientation 2",
+        "3": "Sandbag firing corner orientation 1",
+        "4": "Sandbag barricade orientation 3",
+        "5": "Sandbag barricade orientation 4",
+        "6": "Sandbag barricade orientation 5",
+        "7": "Sandbag barricade orientation 6",
+        "8": "Sandbag firing corner orientation 2",
+        "9": "Sandbag barricade orientation 7",
+        "10": "Sandbag barricade orientation 8"
+      }
+    },
+    "nv_28_sandbags.sti": {
+      "name": "Sandbag shadows",
+      "origin": "JA2 source art — Strip T84",
+      "category": "shadow",
+      "per_sub": {
+        "1": "Sandbag shadow for body sub 1",
+        "2": "Sandbag shadow for body sub 2",
+        "3": "Sandbag shadow for body sub 3",
+        "4": "Sandbag shadow for body sub 4",
+        "5": "Sandbag shadow for body sub 5",
+        "6": "Sandbag shadow for body sub 6",
+        "7": "Sandbag shadow for body sub 7",
+        "8": "Sandbag shadow for body sub 8",
+        "9": "Sandbag shadow for body sub 9",
+        "10": "Sandbag shadow for body sub 10"
+      }
+    },
+    "nv_ncr_0_v105.sti": {
+      "name": "NCR embassy facade slices — bank 1",
+      "origin": "Fallout: New Vegas NCR embassy projection — Strip T84",
+      "category": "structure",
+      "note": "Ten visual-only projected facade/cornice slices; not independent props or collision structures.",
+      "per_sub": {
+        "1": "Embassy facade slice 1",
+        "2": "Embassy facade slice 2",
+        "3": "Embassy facade slice 3",
+        "4": "Embassy facade slice 4",
+        "5": "Embassy facade slice 5",
+        "6": "Embassy facade slice 6",
+        "7": "Embassy facade slice 7",
+        "8": "Embassy facade slice 8",
+        "9": "Embassy facade slice 9",
+        "10": "Embassy facade slice 10"
+      }
+    },
+    "nv_ncr_1_v105.sti": {
+      "name": "NCR embassy facade slices — bank 2",
+      "origin": "Fallout: New Vegas NCR embassy projection — Strip T84",
+      "category": "structure",
+      "note": "Four visual-only projected facade/cornice slices; not independent props or collision structures.",
+      "per_sub": {
+        "1": "Embassy facade slice 11",
+        "2": "Embassy facade slice 12",
+        "3": "Embassy facade slice 13",
+        "4": "Embassy facade slice 14"
+      }
+    },
+    "nv_city_upper_c13c3_v103.sti": {
+      "name": "Two-storey plaster storefront upper facade",
+      "origin": "Urban Chaos C13 component 3 adaptation — New Vegas T85",
+      "category": "structure",
+      "note": "Seven static facade bands forming one upper storey and raised flat cap. Bands are not independent props; ground-floor doors and collision remain in the source building graft."
+    },
+    "nv_city_upper_c13c7_v103.sti": {
+      "name": "Three-storey office/service-block upper facade",
+      "origin": "Urban Chaos C13 component 7 adaptation — New Vegas T85",
+      "category": "structure",
+      "note": "Nine static facade bands forming two upper storeys, raised flat cap, and roof fixtures. Bands are not independent props or walkable upper floors."
+    },
+    "nv_railaux_v101.sti": {
+      "name": "New Vegas monorail guideway modules",
+      "origin": "New Vegas station and guideway adaptation — T85",
+      "category": "structure",
+      "note": "Nine static facade bands grouped into four guideway modules; individual bands are not standalone track props.",
+      "per_sub": {
+        "1": "Northeast guideway span — band 1 of 3",
+        "2": "Northeast guideway span — band 2 of 3",
+        "3": "Northeast guideway span — band 3 of 3",
+        "4": "Guideway curve — band 1 of 2",
+        "5": "Guideway curve — band 2 of 2",
+        "6": "Supported east guideway — band 1 of 2",
+        "7": "Supported east guideway — band 2 of 2",
+        "8": "Pierless east guideway — band 1 of 2",
+        "9": "Pierless east guideway — band 2 of 2"
+      }
+    },
+    "nv_statn_v101.sti": {
+      "name": "New Vegas monorail station facade",
+      "origin": "Fallout: New Vegas monorail station adaptation — T85",
+      "category": "structure",
+      "note": "Nine ordered static bands forming one station exterior; bands are not independent structures."
+    },
+    "nv_rails_v101.sti": {
+      "name": "Supported northeast monorail guideway",
+      "origin": "Fallout: New Vegas monorail guideway adaptation — T85",
+      "category": "structure",
+      "note": "Three ordered static bands forming one supported northeast guideway module."
+    },
+    "nv_tops54_v101.sti": {
+      "name": "The Tops exterior facade — lower bands",
+      "origin": "Fallout: New Vegas The Tops projection — T85",
+      "category": "structure",
+      "note": "Ten ordered projection bands; they assemble into the landmark and are not independent props."
+    },
+    "nv_tops55_v101.sti": {
+      "name": "The Tops exterior facade — upper bands",
+      "origin": "Fallout: New Vegas The Tops projection — T85",
+      "category": "structure",
+      "note": "Ten ordered projection bands with preserved authored offsets; they are not independent props."
+    },
+    "nv_tops56_v101.sti": {
+      "name": "The Tops exterior facade — cap bands",
+      "origin": "Fallout: New Vegas The Tops projection — T85",
+      "category": "structure",
+      "note": "Two ordered cap bands completing the landmark; they are not independent props."
+    },
+    "fo2_junktown_gate.sti": {
+      "name": "Junktown gate — wrecked-vehicle entrance (WIP, blue-cast)",
+      "origin": "Junktown (L8)",
+      "category": "structure",
+      "note": "Broken/blue-cast WIP art (a wrecked vehicle serving as the Junktown town gate). Registered ONLY at T72/GECKO slot 52 (a stray — the C15 map dropped it, commit 0d49577a5). NOT the NCR canvas tents: those are T71 ncr_tents.sti. .bak_badguess sits beside the T71 copy."
+    },
+    "fo2_watrtank.sti": {
+      "name": "Water tank (wooden, raised)",
+      "origin": "Gecko",
+      "category": "structure",
+      "note": "Wooden water tank on a raised stand. Refers to the 115x100 Copy asset. The different archive metal tank is staged and labeled as fo2_metal_watrtank_v101.sti.",
+      "per_sub": {
+        "1": "Water tank (wooden, raised)"
+      }
+    },
+    "fo2_gektank1.sti": {
+      "name": "Domed industrial pressure vessel",
+      "origin": "Gecko (C15 plant)",
+      "category": "structure",
+      "per_sub": {
+        "1": "Domed industrial pressure vessel"
+      },
+      "note": "Decoded archive and Copy art checked. Industrial vessel identity only; potable-water use is not established."
+    },
+    "fo2_gektank2.sti": {
+      "name": "Paired tall industrial cylinders",
+      "origin": "Gecko (C15 plant)",
+      "category": "structure",
+      "per_sub": {
+        "1": "Paired tall industrial cylinders"
+      },
+      "note": "Decoded archive and Copy art checked. Industrial vessel identity only; potable-water use is not established."
+    },
+    "fo2_gektank3.sti": {
+      "name": "Plant tanks (paired silos)",
+      "origin": "Gecko (C15 plant)",
+      "category": "structure"
+    },
+    "fo2_vertibird_flying.sti": {
+      "name": "Vertibird (parked / flying set-piece)",
+      "origin": "Gecko (set-piece)",
+      "category": "structure",
+      "note": "Place with its shadow sub fo2_vertibird_shadow (slot 100)."
+    },
+    "fo2_vertibird.sti": {
+      "name": "Vertibird (grounded)",
+      "origin": "Fallout 2 (set-piece)",
+      "category": "structure",
+      "note": "Landed pose; pair with fo2_vertibird_shadow."
+    },
+    "fo2_vertibird_shadow.sti": {
+      "name": "Vertibird shadow",
+      "origin": "Fallout 2",
+      "category": "shadow"
+    },
+    "fo2_vertibird_flying_shadow.sti": {
+      "name": "Vertibird shadow (flying)",
+      "origin": "Fallout 2",
+      "category": "shadow"
+    },
+    "fo2_prop_shadows.sti": {
+      "name": "FO2 prop shadows",
+      "origin": "Fallout 2",
+      "category": "shadow",
+      "note": "Shared shadow set for the FO2 props (7 subs)."
+    },
+    "fo2_car1.sti": {
+      "name": "Wrecked car (coupe)",
+      "origin": "Fallout 2",
+      "category": "scatter"
+    },
+    "fo2_car2.sti": {
+      "name": "Wrecked car (sedan)",
+      "origin": "Fallout 2",
+      "category": "scatter"
+    },
+    "fo2_car3.sti": {
+      "name": "Burnt-out car",
+      "origin": "Fallout 2",
+      "category": "scatter"
+    },
+    "fo2_car4.sti": {
+      "name": "Stripped car hulk",
+      "origin": "Fallout 2",
+      "category": "scatter"
+    },
+    "fo2_car5.sti": {
+      "name": "Rusted car body",
+      "origin": "Fallout 2",
+      "category": "scatter"
+    },
+    "fo2_car_shadows.sti": {
+      "name": "Wrecked-car shadows",
+      "origin": "Fallout 2",
+      "category": "shadow",
+      "note": "Shadow set for fo2_car1-5 (5 subs)."
+    },
+    "fo2_gektank4.sti": {
+      "name": "Plant tank (twin cylinder)",
+      "origin": "Gecko (C15 plant)",
+      "category": "structure"
+    },
+    "fo2_gektank5.sti": {
+      "name": "Plant tank (bulbous)",
+      "origin": "Gecko (C15 plant)",
+      "category": "structure"
+    },
+    "fo2_watrtank_smooth_v101.sti": {
+      "name": "Water tank (metal, smooth)",
+      "origin": "Gecko",
+      "category": "structure"
+    },
+    "fo2_watrtank_origangle_v101.sti": {
+      "name": "Water tank (metal, orig angle)",
+      "origin": "Gecko",
+      "category": "structure"
+    },
+    "fo2_adobe_floor.sti": {
+      "name": "Adobe floor",
+      "origin": "Fallout 2",
+      "category": "floor"
+    },
+    "fo2_asphalt.sti": {
+      "name": "Asphalt ground",
+      "origin": "Fallout 2",
+      "category": "floor",
+      "note": "Base road/lot ground tile (registered as ground slots 6/7 in T70/71/72)."
+    },
+    "fo2_door03.sti": {
+      "name": "Metal door (directional set)",
+      "origin": "Fallout 2",
+      "category": "wall",
+      "note": "Door set (20 subs)."
+    },
+    "fo2_flcdoor.sti": {
+      "name": "Round bunker door (directional set)",
+      "origin": "Fallout 2",
+      "category": "wall",
+      "note": "Circular mechanical door set (20 subs)."
+    },
+    "gecko_ambient.sti": {
+      "name": "Ambient effects",
+      "origin": "Gecko",
+      "category": "scatter",
+      "note": "Coal/slag pile plus glow effects."
+    },
+    "gecko_cavhole.sti": {
+      "name": "Cave entrance & ladders",
+      "origin": "Gecko caves",
+      "category": "structure",
+      "per_sub": {
+        "1": "Cave floor hole",
+        "2": "Ladder",
+        "3": "Ladder"
+      }
+    },
+    "gecko_chainlink.sti": {
+      "name": "Chain-link fence",
+      "origin": "Gecko (junkyard)",
+      "category": "fence",
+      "note": "Fence run / corner / gate pieces (23 subs)."
+    },
+    "gecko_cooltower.sti": {
+      "name": "Nuclear cooling tower",
+      "origin": "Gecko (C15 plant)",
+      "category": "structure",
+      "per_sub": {
+        "1": "Cooling tower body",
+        "2": "Cooling tower top / dome",
+        "3": "Smokestack / chimney"
+      }
+    },
+    "gecko_cooltower_sh.sti": {
+      "name": "Cooling tower shadow",
+      "origin": "Gecko (C15 plant)",
+      "category": "shadow"
+    },
+    "gecko_ctree2s_v101.sti": {
+      "name": "Cave-tree shadow",
+      "origin": "Gecko",
+      "category": "shadow"
+    },
+    "gecko_cvflr4.sti": {
+      "name": "Cave floor",
+      "origin": "Gecko caves",
+      "category": "floor",
+      "note": "Floor variants (35 subs)."
+    },
+    "gecko_cvstruct.sti": {
+      "name": "Cave rock formation",
+      "origin": "Gecko caves",
+      "category": "structure",
+      "note": "Real art on a shadow-type slot (hidden in palette unless shadows shown)."
+    },
+    "gecko_cvwalls.sti": {
+      "name": "Cave rock wall",
+      "origin": "Gecko caves",
+      "category": "wall",
+      "note": "Real wall art registered on a shadow-type slot (hidden in palette unless shadows shown)."
+    },
+    "gecko_cvwood.sti": {
+      "name": "Mine timber support",
+      "origin": "Gecko caves",
+      "category": "structure",
+      "note": "Support-beam variants (posts, braces, A-frames)."
+    },
+    "gecko_door5s_v101.sti": {
+      "name": "Door shadow",
+      "origin": "Gecko",
+      "category": "shadow"
+    },
+    "gecko_drum2s_v101.sti": {
+      "name": "Drum shadow",
+      "origin": "Gecko",
+      "category": "shadow"
+    },
+    "gecko_dumps_v101.sti": {
+      "name": "Dumpster shadow",
+      "origin": "Gecko",
+      "category": "shadow"
+    },
+    "gecko_floorflora_v101.sti": {
+      "name": "Floor growth / debris",
+      "origin": "Gecko",
+      "category": "floor",
+      "note": "Ground dressing; sub 4 is a growth cluster."
+    },
+    "gecko_ftrees_v101.sti": {
+      "name": "Flat-tree shadow",
+      "origin": "Gecko",
+      "category": "shadow"
+    },
+    "gecko_junk_edges.sti": {
+      "name": "Junk-pile ground edge",
+      "origin": "Gecko (junkyard)",
+      "category": "floor"
+    },
+    "gecko_plank_roofs.sti": {
+      "name": "Wooden plank roof",
+      "origin": "Gecko",
+      "category": "roof"
+    },
+    "gecko_plant_floors.sti": {
+      "name": "Power-plant floor",
+      "origin": "Gecko (C15 plant)",
+      "category": "floor",
+      "note": "Surfaced 2026-09-06 — was on disk but unregistered.",
+      "per_sub": {
+        "1": "Metal grate floor",
+        "2": "Concrete floor",
+        "3": "Concrete floor (worn)"
+      }
+    },
+    "gecko_plant_scenery.sti": {
+      "name": "Power-plant fixtures",
+      "origin": "Gecko (C15 plant)",
+      "category": "scatter",
+      "note": "Subs 1/2/4 read as satellite dishes / discs (they float as pods on flat ground) — only sub 3 (the control cabinet) sits flush. The 'crooked prop realign' lane is deleting the disc subs.",
+      "per_sub": {
+        "1": "Satellite dish (domed)",
+        "2": "Satellite dish (open)",
+        "3": "Electrical control cabinet",
+        "4": "Disc / flat mound"
+      }
+    },
+    "gecko_plant_wall.sti": {
+      "name": "Power-plant concrete wall",
+      "origin": "Gecko (C15 plant)",
+      "category": "wall",
+      "note": "Directional wall set (65 subs)."
+    },
+    "gecko_tunnel_lights.sti": {
+      "name": "Tunnel light grate",
+      "origin": "Gecko caves",
+      "category": "scatter",
+      "note": "Real vent/light art on a shadow-type slot (hidden unless shadows shown)."
+    },
+    "jt_casino.sti": {
+      "name": "Roulette table",
+      "origin": "Junktown (L8) — Gizmo's",
+      "category": "furniture",
+      "per_sub": {
+        "1": "Roulette table",
+        "2": "Roulette table (active)"
+      }
+    },
+    "jt_containers.sti": {
+      "name": "Metal storage lockers",
+      "origin": "Junktown (L8)",
+      "category": "container",
+      "per_sub": {
+        "1": "Footlocker (closed)",
+        "2": "Footlocker (open)",
+        "3": "Tall locker (closed)",
+        "4": "Tall locker (open)",
+        "5": "Tall locker (front)",
+        "6": "Tall locker (open, interior)"
+      }
+    },
+    "jt_firepit.sti": {
+      "name": "Fire pit (animated)",
+      "origin": "Junktown (L8)",
+      "category": "scatter",
+      "note": "12 flame animation frames."
+    },
+    "jt_gizsign.sti": {
+      "name": "Gizmo's casino neon sign",
+      "origin": "Junktown (L8) — Gizmo's",
+      "category": "sign",
+      "note": "9 animation frames of one sign."
+    },
+    "jt_objects.sti": {
+      "name": "Junktown furnishings",
+      "origin": "Junktown (L8)",
+      "category": "furniture",
+      "per_sub": {
+        "1": "Wooden dresser",
+        "2": "Wooden wardrobe",
+        "3": "Bottle shelf (bar rack)",
+        "4": "Rubble / debris pile",
+        "5": "Wooden bed",
+        "6": "Lamp post (rusty street lamp)",
+        "7": "X-braced barn gate",
+        "8": "Round table",
+        "9": "Wooden well / planter",
+        "10": "Workbench",
+        "11": "Padded armchair",
+        "12": "Folded bedroll",
+        "13": "Wooden chair",
+        "14": "Wooden barrel (light)",
+        "15": "Wooden barrel (dark)",
+        "16": "Tire stack",
+        "17": "Fire brazier",
+        "18": "Barbed-wire coil",
+        "19": "Burnt wreckage",
+        "20": "Pipe / log row",
+        "21": "Broken chair",
+        "22": "Stacked lumber",
+        "23": "Jumbled wood pile",
+        "24": "Open wooden crate",
+        "25": "Woven crate / basket",
+        "26": "Cardboard box"
+      }
+    },
+    "jt_objects_ovf_v113.sti": {
+      "name": "Junktown furnishings — overflow bank",
+      "origin": "Junktown (L8), v113 split",
+      "category": "furniture",
+      "note": "Overflow half of the Junktown furniture set, re-homed in v113.",
+      "per_sub": {
+        "1": "Fire brazier",
+        "2": "Barbed-wire coil",
+        "3": "Burnt wreckage",
+        "4": "Pipe / log row",
+        "5": "Broken chair",
+        "6": "Stacked lumber",
+        "7": "Jumbled wood pile",
+        "8": "Open wooden crate",
+        "9": "Woven crate / basket"
+      }
+    },
+    "ncr_sandbag.sti": {
+      "name": "Sandbag emplacement",
+      "origin": "NCR camp",
+      "category": "cover",
+      "per_sub": {
+        "1": "Sandbag pile (small)",
+        "2": "Sandbag pile (stacked)",
+        "3": "Sandbag firing position",
+        "4": "Sandbag wall",
+        "5": "Sandbag wall",
+        "6": "Sandbag wall",
+        "7": "Sandbag wall",
+        "8": "Sandbag wall",
+        "9": "Sandbag pile",
+        "10": "Sandbag pile"
+      }
+    },
+    "ncr_tents.sti": {
+      "name": "Military canvas tent",
+      "origin": "NCR camp",
+      "category": "structure",
+      "per_sub": {
+        "1": "Canvas tent (A)",
+        "2": "Canvas tent (B)",
+        "3": "Canvas tent (C)",
+        "4": "Canvas tent (D)"
+      }
+    },
+    "sandbags.sti": {
+      "name": "Sandbag shadow",
+      "origin": "NCR camp",
+      "category": "shadow",
+      "note": "Shadow set for the sandbags; unregistered, not surfaced."
+    },
+    "wasteland_crate.sti": {
+      "name": "Wasteland crate",
+      "origin": "Gecko",
+      "category": "container",
+      "note": "Sub 1 is a blue-cast box (long-standing ban — reads wrong on the map); sub 2 is the usable open crate. Registered at T72 slot 74.",
+      "per_sub": {
+        "1": "Blue box (avoid — banned)",
+        "2": "Open crate"
+      }
+    },
+    "nv_gomcourt_107_v107.sti": {
+      "name": "Gomorrah rear arcade",
+      "origin": "New Vegas Strip J14",
+      "category": "building",
+      "note": "Source-material courtyard adaptation. The hotel occludes the pool from the tactical camera.",
+      "per_sub": {
+        "1": "Gomorrah rear arcade - section 1 of 9",
+        "2": "Gomorrah rear arcade - section 2 of 9",
+        "3": "Gomorrah rear arcade - section 3 of 9",
+        "4": "Gomorrah rear arcade - section 4 of 9",
+        "5": "Gomorrah rear arcade - section 5 of 9",
+        "6": "Gomorrah rear arcade - section 6 of 9",
+        "7": "Gomorrah rear arcade - section 7 of 9",
+        "8": "Gomorrah rear arcade - section 8 of 9",
+        "9": "Gomorrah rear arcade - section 9 of 9"
+      }
+    },
+    "nv_v21_complete_v117.sti": {
+      "name": "Vault 21 reception and hotel sign",
+      "origin": "New Vegas Strip J14",
+      "category": "building",
+      "note": "Completed aboveground reception, moved public doorway, and independently oriented source sign.",
+      "per_sub": {
+        "1": "Vault 21 reception and hotel sign - section 1 of 6",
+        "2": "Vault 21 reception and hotel sign - section 2 of 6",
+        "3": "Vault 21 reception and hotel sign - section 3 of 6",
+        "4": "Vault 21 reception and hotel sign - section 4 of 6",
+        "5": "Vault 21 reception and hotel sign - section 5 of 6",
+        "6": "Vault 21 reception and hotel sign - section 6 of 6"
+      }
+    },
+    "nv_v21_complete_s_v117.sti": {
+      "name": "Vault 21 empty shadow companion",
+      "origin": "New Vegas Strip J14",
+      "category": "building",
+      "note": "Intentionally empty companion frames; does not contain visible scenery.",
+      "per_sub": {
+        "1": "Vault 21 empty shadow companion - section 1 of 6",
+        "2": "Vault 21 empty shadow companion - section 2 of 6",
+        "3": "Vault 21 empty shadow companion - section 3 of 6",
+        "4": "Vault 21 empty shadow companion - section 4 of 6",
+        "5": "Vault 21 empty shadow companion - section 5 of 6",
+        "6": "Vault 21 empty shadow companion - section 6 of 6"
+      }
+    },
+    "nv_v21_streetscape_v101.sti": {
+      "name": "Vault 21 streetscape reception and hotel sign",
+      "origin": "New Vegas Strip J14 T88",
+      "category": "building",
+      "note": "Five visual projection bands forming one complete Vault 21 frontage; individual bands are not standalone props.",
+      "per_sub": {
+        "1": "Vault 21 frontage - band 1 of 5",
+        "2": "Vault 21 frontage - band 2 of 5",
+        "3": "Vault 21 frontage - band 3 of 5",
+        "4": "Vault 21 frontage - band 4 of 5",
+        "5": "Vault 21 frontage - band 5 of 5"
+      }
+    },
+    "nv_v21_streetscape_s_v101.sti": {
+      "name": "Vault 21 empty shadow companion",
+      "origin": "New Vegas Strip J14 T88",
+      "category": "building",
+      "note": "Five intentionally empty shadow-companion frames paired with the Vault 21 frontage.",
+      "per_sub": {
+        "1": "Vault 21 empty shadow companion - band 1 of 5",
+        "2": "Vault 21 empty shadow companion - band 2 of 5",
+        "3": "Vault 21 empty shadow companion - band 3 of 5",
+        "4": "Vault 21 empty shadow companion - band 4 of 5",
+        "5": "Vault 21 empty shadow companion - band 5 of 5"
+      }
+    },
+    "nv_ncr_streetscape_0_v103.sti": {
+      "name": "NCR embassy boulevard facade - upper bank",
+      "origin": "New Vegas Strip J14 T88",
+      "category": "building",
+      "note": "Three visual bands forming the upper portion of the reoriented NCR embassy.",
+      "per_sub": {
+        "1": "NCR embassy upper facade - band 1 of 3",
+        "2": "NCR embassy upper facade - band 2 of 3",
+        "3": "NCR embassy upper facade - band 3 of 3"
+      }
+    },
+    "nv_ncr_streetscape_1_v103.sti": {
+      "name": "NCR embassy boulevard facade - lower bank",
+      "origin": "New Vegas Strip J14 T88",
+      "category": "building",
+      "note": "Two visual bands forming the lower portion and public frontage of the reoriented NCR embassy.",
+      "per_sub": {
+        "1": "NCR embassy lower facade - band 1 of 2",
+        "2": "NCR embassy lower facade - band 2 of 2"
+      }
+    },
+    "nv_gomcourt_rail_107_v101.sti": {
+      "name": "Gomorrah rear arcade and station guideway transition",
+      "origin": "New Vegas Strip J14 T88",
+      "category": "structure",
+      "note": "Shared visual bank: subs 1-9 are the original Gomorrah courtyard adaptation; subs 10-18 are the relocated station-to-seam guideway. Rail subs must not be labeled as Gomorrah courtyard.",
+      "per_sub": {
+        "1": "Gomorrah rear arcade - section 1 of 9",
+        "2": "Gomorrah rear arcade - section 2 of 9",
+        "3": "Gomorrah rear arcade - section 3 of 9",
+        "4": "Gomorrah rear arcade - section 4 of 9",
+        "5": "Gomorrah rear arcade - section 5 of 9",
+        "6": "Gomorrah rear arcade - section 6 of 9",
+        "7": "Gomorrah rear arcade - section 7 of 9",
+        "8": "Gomorrah rear arcade - section 8 of 9",
+        "9": "Gomorrah rear arcade - section 9 of 9",
+        "10": "Station-to-seam guideway transition - band 1 of 9",
+        "11": "Station-to-seam guideway transition - band 2 of 9",
+        "12": "Station-to-seam guideway transition - band 3 of 9",
+        "13": "Station-to-seam guideway transition - band 4 of 9",
+        "14": "Station-to-seam guideway transition - band 5 of 9",
+        "15": "Station-to-seam guideway transition - band 6 of 9",
+        "16": "Station-to-seam guideway transition - band 7 of 9",
+        "17": "Station-to-seam guideway transition - band 8 of 9",
+        "18": "Station-to-seam guideway transition - band 9 of 9"
+      }
+    },
+    "nv_alley_cafe_props_v102.sti": {
+      "name": "Named alley and cafe furnishings",
+      "origin": "New Vegas Strip J14 T88",
+      "category": "furniture",
+      "note": "One arrangement per named service alley or cafe terrace; not generic scatter.",
+      "per_sub": {
+        "1": "Closed wooden alley dumpster - grid-X",
+        "2": "Closed wooden alley dumpster - grid-Y",
+        "3": "Four-chair cafe table - facing A",
+        "4": "Four-chair cafe table - facing B"
+      }
+    },
+    "nv_urban_soil_v101.sti": {
+      "name": "Contained urban planting soil",
+      "origin": "New Vegas Strip J14 T88; recolored native dirt-family ground",
+      "category": "floor",
+      "note": "Thirty-five native dirt-family variants recolored as dark earth for contained raised planting beds.",
+      "per_sub": {
+        "1": "Contained urban planting soil - dirt-family variant 1 of 35",
+        "2": "Contained urban planting soil - dirt-family variant 2 of 35",
+        "3": "Contained urban planting soil - dirt-family variant 3 of 35",
+        "4": "Contained urban planting soil - dirt-family variant 4 of 35",
+        "5": "Contained urban planting soil - dirt-family variant 5 of 35",
+        "6": "Contained urban planting soil - dirt-family variant 6 of 35",
+        "7": "Contained urban planting soil - dirt-family variant 7 of 35",
+        "8": "Contained urban planting soil - dirt-family variant 8 of 35",
+        "9": "Contained urban planting soil - dirt-family variant 9 of 35",
+        "10": "Contained urban planting soil - dirt-family variant 10 of 35",
+        "11": "Contained urban planting soil - dirt-family variant 11 of 35",
+        "12": "Contained urban planting soil - dirt-family variant 12 of 35",
+        "13": "Contained urban planting soil - dirt-family variant 13 of 35",
+        "14": "Contained urban planting soil - dirt-family variant 14 of 35",
+        "15": "Contained urban planting soil - dirt-family variant 15 of 35",
+        "16": "Contained urban planting soil - dirt-family variant 16 of 35",
+        "17": "Contained urban planting soil - dirt-family variant 17 of 35",
+        "18": "Contained urban planting soil - dirt-family variant 18 of 35",
+        "19": "Contained urban planting soil - dirt-family variant 19 of 35",
+        "20": "Contained urban planting soil - dirt-family variant 20 of 35",
+        "21": "Contained urban planting soil - dirt-family variant 21 of 35",
+        "22": "Contained urban planting soil - dirt-family variant 22 of 35",
+        "23": "Contained urban planting soil - dirt-family variant 23 of 35",
+        "24": "Contained urban planting soil - dirt-family variant 24 of 35",
+        "25": "Contained urban planting soil - dirt-family variant 25 of 35",
+        "26": "Contained urban planting soil - dirt-family variant 26 of 35",
+        "27": "Contained urban planting soil - dirt-family variant 27 of 35",
+        "28": "Contained urban planting soil - dirt-family variant 28 of 35",
+        "29": "Contained urban planting soil - dirt-family variant 29 of 35",
+        "30": "Contained urban planting soil - dirt-family variant 30 of 35",
+        "31": "Contained urban planting soil - dirt-family variant 31 of 35",
+        "32": "Contained urban planting soil - dirt-family variant 32 of 35",
+        "33": "Contained urban planting soil - dirt-family variant 33 of 35",
+        "34": "Contained urban planting soil - dirt-family variant 34 of 35",
+        "35": "Contained urban planting soil - dirt-family variant 35 of 35"
+      }
+    },
+    "nv_city_road_cells_v101.sti": {
+      "name": "Native urban road and curb cells",
+      "origin": "New Vegas Strip J14 T88",
+      "category": "floor",
+      "note": "Generated native 40x20 road, lot-edge, curb, and parcel-transition cells. Frame meanings are build-local combinations; use as a ground family."
+    },
+    "nv_0_t_sand1.sti": {
+      "name": "Mojave sand ground — light",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "JA2 desert T_SAND1 source; 35 terrain/edge variants."
+    },
+    "nv_1_t_sand3.sti": {
+      "name": "Mojave sand ground — coarse",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "JA2 desert T_SAND3 source; 35 terrain/edge variants."
+    },
+    "nv_city_concrete_v101.sti": {
+      "name": "City concrete ground",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Eight concrete ground variants decoded from the registered T89 sheet."
+    },
+    "nv_urban_roads_v104.sti": {
+      "name": "Urban asphalt and curb ground",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Twenty-eight road/curb image variants; native editable ground."
+    },
+    "nv_12_cactus.sti": {
+      "name": "Desert cactus and rock cluster",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "vegetation",
+      "note": "Decoded JA2 source sheet; art includes cacti and rocks, not ten cacti.",
+      "per_sub": {
+        "1": "Upright saguaro cactus variant 1 of 7",
+        "2": "Upright saguaro cactus variant 2 of 7",
+        "3": "Upright saguaro cactus variant 3 of 7",
+        "4": "Upright saguaro cactus variant 4 of 7",
+        "5": "Upright saguaro cactus variant 5 of 7",
+        "6": "Upright saguaro cactus variant 6 of 7",
+        "7": "Upright saguaro cactus variant 7 of 7",
+        "8": "Low desert rock cluster",
+        "9": "Desert rocks",
+        "10": "Cactus cluster"
+      }
+    },
+    "nv_24_cactshdw.sti": {
+      "name": "Desert cactus shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Registered buddy shadow art for the cactus/rock sheet.",
+      "per_sub": {
+        "1": "Cactus/rock shadow companion for body frame 1",
+        "2": "Cactus/rock shadow companion for body frame 2",
+        "3": "Cactus/rock shadow companion for body frame 3",
+        "4": "Cactus/rock shadow companion for body frame 4",
+        "5": "Cactus/rock shadow companion for body frame 5",
+        "6": "Cactus/rock shadow companion for body frame 6",
+        "7": "Cactus/rock shadow companion for body frame 7",
+        "8": "Cactus/rock shadow companion for body frame 8",
+        "9": "Cactus/rock shadow companion for body frame 9",
+        "10": "Cactus/rock shadow companion for body frame 10"
+      }
+    },
+    "nv_perimeter_v103.sti": {
+      "name": "Strip perimeter wall and gate panels",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "wall",
+      "note": "Thirty decoded directional masonry wall/gate panels; frame positions are wall-set roles, not standalone storefronts."
+    },
+    "nv_86_wirefenc.sti": {
+      "name": "Wire fence sections",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "wall",
+      "note": "Twenty-one decoded fence body sections and directional connections.",
+      "per_sub": {
+        "1": "Wire fence west corner",
+        "2": "Wire fence north corner",
+        "3": "Wire fence east corner",
+        "4": "Wire fence south corner",
+        "5": "Wire fence braced panel, variant 1",
+        "6": "Wire fence braced panel, variant 2",
+        "7": "Wire fence braced panel, variant 3",
+        "8": "Wire fence braced panel, variant 4",
+        "9": "Wire fence braced panel, variant 5",
+        "10": "Wire fence grid-X panel, variant 1",
+        "11": "Wire fence grid-X panel, variant 2",
+        "12": "Wire fence grid-X panel, variant 3",
+        "13": "Wire fence grid-Y panel, variant 1",
+        "14": "Wire fence grid-Y panel, variant 2",
+        "15": "Wire fence grid-Y panel, variant 3",
+        "16": "Damaged wire fence grid-X panel, variant 1",
+        "17": "Damaged wire fence grid-X panel, variant 2",
+        "18": "Damaged wire fence grid-X panel, variant 3",
+        "19": "Damaged wire fence grid-Y panel, variant 1",
+        "20": "Damaged wire fence grid-Y panel, variant 2",
+        "21": "Damaged wire fence grid-Y panel, variant 3"
+      }
+    },
+    "nv_87_wirefens.sti": {
+      "name": "Wire fence shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Twenty-one directional buddy-shadow frames for the wire fence.",
+      "per_sub": {
+        "1": "Wire fence shadow companion for body frame 1",
+        "2": "Wire fence shadow companion for body frame 2",
+        "3": "Wire fence shadow companion for body frame 3",
+        "4": "Wire fence shadow companion for body frame 4",
+        "5": "Wire fence shadow companion for body frame 5",
+        "6": "Wire fence shadow companion for body frame 6",
+        "7": "Wire fence shadow companion for body frame 7",
+        "8": "Wire fence shadow companion for body frame 8",
+        "9": "Wire fence shadow companion for body frame 9",
+        "10": "Wire fence shadow companion for body frame 10",
+        "11": "Wire fence shadow companion for body frame 11",
+        "12": "Wire fence shadow companion for body frame 12",
+        "13": "Wire fence shadow companion for body frame 13",
+        "14": "Wire fence shadow companion for body frame 14",
+        "15": "Wire fence shadow companion for body frame 15",
+        "16": "Wire fence shadow companion for body frame 16",
+        "17": "Wire fence shadow companion for body frame 17",
+        "18": "Wire fence shadow companion for body frame 18",
+        "19": "Wire fence shadow companion for body frame 19",
+        "20": "Wire fence shadow companion for body frame 20",
+        "21": "Wire fence shadow companion for body frame 21"
+      }
+    },
+    "nv_79_debrocks.sti": {
+      "name": "Desert rubble and rocks",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "scatter",
+      "note": "Four low rubble/rock debris images; visual classification only.",
+      "per_sub": {
+        "1": "Low rubble/rock variant 1 of 4",
+        "2": "Low rubble/rock variant 2 of 4",
+        "3": "Low rubble/rock variant 3 of 4",
+        "4": "Low rubble/rock variant 4 of 4"
+      }
+    },
+    "nv_80_wp_deb.sti": {
+      "name": "Metal service-access grates",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "ground",
+      "note": "Visually verified grating tiles; the previous debris-patch name was incorrect.",
+      "per_sub": {
+        "1": "Hazard-edged metal access grate, variant 1",
+        "2": "Hazard-edged metal access grate, variant 2",
+        "3": "Hazard-edged metal access grate, variant 3",
+        "4": "Hazard-edged metal access grate, variant 4",
+        "5": "Hazard-edged metal access grate, variant 5",
+        "6": "Hazard-edged metal access grate, variant 6",
+        "7": "Hazard-edged metal access grate, variant 7",
+        "8": "Hazard-edged metal access grate, variant 8",
+        "9": "Plain metal access grate, variant 1",
+        "10": "Plain metal access grate, variant 2"
+      }
+    },
+    "nv_81_sweeds.sti": {
+      "name": "Dry desert weeds",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "vegetation",
+      "note": "Eight weed tuft images from decoded sheet.",
+      "per_sub": {
+        "1": "Dry weed tuft 1 of 8",
+        "2": "Dry weed tuft 2 of 8",
+        "3": "Dry weed tuft 3 of 8",
+        "4": "Dry weed tuft 4 of 8",
+        "5": "Dry weed tuft 5 of 8",
+        "6": "Dry weed tuft 6 of 8",
+        "7": "Dry weed tuft 7 of 8",
+        "8": "Dry weed tuft 8 of 8"
+      }
+    },
+    "nv_25_drum2shd.sti": {
+      "name": "Wooden crate shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Paired body sheet slot 13 contains wooden crates, despite its drum filename.",
+      "per_sub": {
+        "1": "Wooden crate shadow companion for body frame 1",
+        "2": "Wooden crate shadow companion for body frame 2",
+        "3": "Wooden crate shadow companion for body frame 3",
+        "4": "Wooden crate shadow companion for body frame 4",
+        "5": "Wooden crate shadow companion for body frame 5",
+        "6": "Wooden crate shadow companion for body frame 6",
+        "7": "Wooden crate shadow companion for body frame 7"
+      }
+    },
+    "nv_26_p-out3s.sti": {
+      "name": "Flowering shrub shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Paired body sheet slot 14 contains yellow/red shrubs, grass and planter.",
+      "per_sub": {
+        "1": "Shrub/planter shadow companion for body frame 1",
+        "2": "Shrub/planter shadow companion for body frame 2",
+        "3": "Shrub/planter shadow companion for body frame 3",
+        "4": "Shrub/planter shadow companion for body frame 4",
+        "5": "Shrub/planter shadow companion for body frame 5",
+        "6": "Shrub/planter shadow companion for body frame 6",
+        "7": "Shrub/planter shadow companion for body frame 7",
+        "8": "Shrub/planter shadow companion for body frame 8",
+        "9": "Shrub/planter shadow companion for body frame 9",
+        "10": "Shrub/planter shadow companion for body frame 10"
+      }
+    },
+    "nv_c13c3_us_v104.sti": {
+      "name": "Upper storefront shadow companion — plaster",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Seven empty companion frames; static upper-facade bands are visual only.",
+      "per_sub": {
+        "1": "Plaster upper-facade band shadow companion for body frame 1",
+        "2": "Plaster upper-facade band shadow companion for body frame 2",
+        "3": "Plaster upper-facade band shadow companion for body frame 3",
+        "4": "Plaster upper-facade band shadow companion for body frame 4",
+        "5": "Plaster upper-facade band shadow companion for body frame 5",
+        "6": "Plaster upper-facade band shadow companion for body frame 6",
+        "7": "Plaster upper-facade band shadow companion for body frame 7"
+      }
+    },
+    "nv_c13c7_us_v104.sti": {
+      "name": "Upper office shadow companion",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Nine empty companion frames for the office/service upper-facade bands.",
+      "per_sub": {
+        "1": "Office upper-facade band shadow companion for body frame 1",
+        "2": "Office upper-facade band shadow companion for body frame 2",
+        "3": "Office upper-facade band shadow companion for body frame 3",
+        "4": "Office upper-facade band shadow companion for body frame 4",
+        "5": "Office upper-facade band shadow companion for body frame 5",
+        "6": "Office upper-facade band shadow companion for body frame 6",
+        "7": "Office upper-facade band shadow companion for body frame 7",
+        "8": "Office upper-facade band shadow companion for body frame 8",
+        "9": "Office upper-facade band shadow companion for body frame 9"
+      }
+    },
+    "nv_court_palms_77_v101.sti": {
+      "name": "Street utility props and palms",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "furniture",
+      "note": "The inherited six-frame utility bank plus two date palms and source-native queen palm; palm source is pinned in house_shopping_court_v101/palms/registration_v101.json. Static appearance only.",
+      "per_sub": {
+        "1": "Parked motorcycle",
+        "2": "Workbench with vise and shelf",
+        "3": "Hospital gurney",
+        "4": "Fusion generator body",
+        "5": "Reloading bench",
+        "6": "Squat exterior water tank",
+        "7": "Mature date palm (NVDatePalm02)",
+        "8": "Tall date palm (NVDatePalm03)",
+        "9": "Queen palm (NVQueenPalm01)"
+      }
+    },
+    "nv_bookshop_109_v102.sti": {
+      "name": "Bookshop facade and BOOKS lettering",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Frames 1-9 are inherited nvq_shadows_75_v101 buddy shadows, verified against story_dressing_v101/build_v115 XML; 10-24 are bookshop lower/upper bands. BOOKS lettering is baked into upper band 22; see shopping_signage_v101/build.py and facade_registration.json. Visual art only.",
+      "per_sub": {
+        "1": "Inherited slot75 art shadow companion for body frame 1",
+        "2": "Inherited slot75 art shadow companion for body frame 2",
+        "3": "Inherited slot75 art shadow companion for body frame 3",
+        "4": "Inherited slot75 art shadow companion for body frame 4",
+        "5": "Inherited slot75 art shadow companion for body frame 5",
+        "6": "Inherited slot75 art shadow companion for body frame 6",
+        "7": "Inherited slot75 art shadow companion for body frame 7",
+        "8": "Inherited slot75 art shadow companion for body frame 8",
+        "9": "Inherited slot75 art shadow companion for body frame 9",
+        "10": "Bookshop lower-facade band 1 of 7",
+        "11": "Bookshop lower-facade band 2 of 7",
+        "12": "Bookshop lower-facade band 3 of 7",
+        "13": "Bookshop lower-facade band 4 of 7",
+        "14": "Bookshop lower-facade band 5 of 7",
+        "15": "Bookshop lower-facade band 6 of 7",
+        "16": "Bookshop lower-facade band 7 of 7",
+        "17": "Bookshop upper-facade band 1 of 8",
+        "18": "Bookshop upper-facade band 2 of 8",
+        "19": "Bookshop upper-facade band 3 of 8",
+        "20": "Bookshop upper-facade band 4 of 8",
+        "21": "Bookshop upper-facade band 5 of 8",
+        "22": "Bookshop upper-facade band 6 of 8",
+        "23": "Bookshop upper-facade band 7 of 8",
+        "24": "Bookshop upper-facade band 8 of 8"
+      }
+    },
+    "nv_house_facades_110_v101.sti": {
+      "name": "Cafe, news kiosk and office frontage",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Frames 1-3 are inherited nvq_shadows_76_v101 buddy shadows, verified against story_dressing_v101/build_v115 XML. Frames 4-15 are mapped by house_shopping_court_v101/build_v102/facade_registration.json. Original office sign/canopy treatment is under visual correction; decorative only.",
+      "per_sub": {
+        "1": "Inherited slot76 art shadow companion for body frame 1",
+        "2": "Inherited slot76 art shadow companion for body frame 2",
+        "3": "Inherited slot76 art shadow companion for body frame 3",
+        "4": "CAFE awning/facade band 1 of 3",
+        "5": "CAFE awning/facade band 2 of 3",
+        "6": "CAFE awning/facade band 3 of 3",
+        "7": "NEWS kiosk band 1 of 3",
+        "8": "NEWS kiosk band 2 of 3",
+        "9": "NEWS kiosk band 3 of 3",
+        "10": "Office entry canopy and wall sign — section 1",
+        "11": "Office entry canopy and wall sign — section 2",
+        "12": "Office frontage trim band 1 of 4",
+        "13": "Office frontage trim band 2 of 4",
+        "14": "Office frontage trim band 3 of 4",
+        "15": "Office frontage trim band 4 of 4"
+      }
+    },
+    "nv_frontages110_v101.sti": {
+      "name": "Cafe, news kiosk and office wall plaque — diagnostic",
+      "origin": "New Vegas J14 T89 frontage diagnostic v101",
+      "category": "structure",
+      "note": "Exact decoded comparison against nv_house_facades_110_v101: only frames 10-11 change indexed art, removing the small OFFICES canopy and retaining a wall plaque; offsets 10-15 are compensated for placement. Frame identity is pinned by frontage_labels_v101/catalog/compare_nv_frontages110_v101_v101.json. This is diagnostic art, not gameplay or final visual approval.",
+      "per_sub": {
+        "1": "Inherited slot76 art shadow companion for body frame 1",
+        "2": "Inherited slot76 art shadow companion for body frame 2",
+        "3": "Inherited slot76 art shadow companion for body frame 3",
+        "4": "CAFE awning/facade band 1 of 3",
+        "5": "CAFE awning/facade band 2 of 3",
+        "6": "CAFE awning/facade band 3 of 3",
+        "7": "NEWS kiosk band 1 of 3",
+        "8": "NEWS kiosk band 2 of 3",
+        "9": "NEWS kiosk band 3 of 3",
+        "10": "OFFICES wall plaque — readable band",
+        "11": "OFFICES wall plaque — edge fragment",
+        "12": "Office frontage trim band 1 of 4",
+        "13": "Office frontage trim band 2 of 4",
+        "14": "Office frontage trim band 3 of 4",
+        "15": "Office frontage trim band 4 of 4"
+      }
+    },
+    "nv_frontages110_v102.sti": {
+      "name": "Cafe, news kiosk and office wall plaque",
+      "origin": "New Vegas J14 T89 shopping frontage v102",
+      "category": "structure",
+      "note": "Fifteen decorative images in the corrected shopping frontage. Frames 4-6 reproject the CAFE awning and lettering for its intended axis; frames 10-15 reproject office frontage bands with the little OFFICES canopy removed and the wall plaque retained. Frames 1-3 are inherited shadow companions, 7-9 are NEWS kiosk bands. Exact indexed/offset differences from the selected v109 baseline are in frontage_labels_v101/catalog/compare_nv_frontages110_v102_v101.json. Appearance only; no independent roof, doorway or interaction behavior is implied.",
+      "per_sub": {
+        "1": "Inherited slot76 art shadow companion for body frame 1",
+        "2": "Inherited slot76 art shadow companion for body frame 2",
+        "3": "Inherited slot76 art shadow companion for body frame 3",
+        "4": "CAFE awning and lettering — band 1 of 3",
+        "5": "CAFE awning and lettering — band 2 of 3",
+        "6": "CAFE awning and lettering — band 3 of 3",
+        "7": "NEWS kiosk band 1 of 3",
+        "8": "NEWS kiosk band 2 of 3",
+        "9": "NEWS kiosk band 3 of 3",
+        "10": "OFFICES wall plaque — readable band",
+        "11": "OFFICES wall plaque — edge fragment",
+        "12": "Office frontage trim band 1 of 4",
+        "13": "Office frontage trim band 2 of 4",
+        "14": "Office frontage trim band 3 of 4",
+        "15": "Office frontage trim band 4 of 4"
+      }
+    },
+    "nv_frontages110_v105.sti": {
+      "name": "CAFE awning, NEWS kiosk, OFFICES plaque and ARCADE awning",
+      "origin": "New Vegas J14 T89 shopping frontage v105",
+      "category": "structure",
+      "note": "Fifteen decorative images, registered as slot 110 in frontage_labels_v101/build_v105. Frames 1-3 are inherited shadow companions; 4-6 are the reprojected CAFE sign/striped awning, raised for doorway clearance; 7-9 preserve the NEWS kiosk; 10-11 retain the OFFICES wall plaque without its former small canopy; 12-15 form the ARCADE awning seam, lettering, striped run and tip. The build also moves the decorative cafe and office nodes with offset compensation; these images alone do not change the physical doors or imply another roof or interaction. Decoded comparison is pinned in catalog/compare_nv_frontages110_v105_v101.json.",
+      "per_sub": {
+        "1": "Inherited slot76 art shadow companion for body frame 1",
+        "2": "Inherited slot76 art shadow companion for body frame 2",
+        "3": "Inherited slot76 art shadow companion for body frame 3",
+        "4": "CAFE lettering and striped awning — first band",
+        "5": "CAFE striped awning — middle band",
+        "6": "CAFE striped awning — end band",
+        "7": "NEWS kiosk band 1 of 3",
+        "8": "NEWS kiosk band 2 of 3",
+        "9": "NEWS kiosk band 3 of 3",
+        "10": "OFFICES wall plaque — readable band",
+        "11": "OFFICES wall plaque — tiny lower edge fragment",
+        "12": "ARCADE awning upper seam",
+        "13": "ARCADE lettering and striped awning — first band",
+        "14": "ARCADE striped awning — continuation band",
+        "15": "ARCADE awning end tip"
+      }
+    },
+    "nv_l38_collision_v101.sti": {
+      "name": "Lucky 38 collision marker",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "collision",
+      "note": "Intentionally near-invisible frame with JSD collision; no rendered tower art.",
+      "per_sub": {
+        "1": "Lucky 38 invisible collision base"
+      }
+    },
+    "nv_l38_col_sh_v101.sti": {
+      "name": "Lucky 38 collision shadow companion",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Intentionally empty shadow frame for the collision marker.",
+      "per_sub": {
+        "1": "Empty Lucky 38 collision shadow companion"
+      }
+    },
+    "nv_l38_upper_a_v103.sti": {
+      "name": "Lucky 38 upper tower facade bands",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Fourteen projected visual tower sections; only assembled placement represents the landmark.",
+      "per_sub": {
+        "1": "Lucky 38 tower upper band 1 of 14",
+        "2": "Lucky 38 tower upper band 2 of 14",
+        "3": "Lucky 38 tower upper band 3 of 14",
+        "4": "Lucky 38 tower upper band 4 of 14",
+        "5": "Lucky 38 tower upper band 5 of 14",
+        "6": "Lucky 38 tower upper band 6 of 14",
+        "7": "Lucky 38 tower upper band 7 of 14",
+        "8": "Lucky 38 tower upper band 8 of 14",
+        "9": "Lucky 38 tower upper band 9 of 14",
+        "10": "Lucky 38 tower upper band 10 of 14",
+        "11": "Lucky 38 tower upper band 11 of 14",
+        "12": "Lucky 38 tower upper band 12 of 14",
+        "13": "Lucky 38 tower upper band 13 of 14",
+        "14": "Lucky 38 tower upper band 14 of 14"
+      }
+    },
+    "nv_street_78_v109.sti": {
+      "name": "Street crossing and edge brush",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Twenty-four indexed street edits from street_consistency_v101/build.py; ground/edge variants, not independent props."
+    },
+    "nv_gom_a_sh_v111.sti": {
+      "name": "Gomorrah facade shadow companion",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Twelve intentionally empty facade shadow frames.",
+      "per_sub": {
+        "1": "Gomorrah facade bank A shadow companion for body frame 1",
+        "2": "Gomorrah facade bank A shadow companion for body frame 2",
+        "3": "Gomorrah facade bank A shadow companion for body frame 3",
+        "4": "Gomorrah facade bank A shadow companion for body frame 4",
+        "5": "Gomorrah facade bank A shadow companion for body frame 5",
+        "6": "Gomorrah facade bank A shadow companion for body frame 6",
+        "7": "Gomorrah facade bank A shadow companion for body frame 7",
+        "8": "Gomorrah facade bank A shadow companion for body frame 8",
+        "9": "Gomorrah facade bank A shadow companion for body frame 9",
+        "10": "Gomorrah facade bank A shadow companion for body frame 10",
+        "11": "Gomorrah facade bank A shadow companion for body frame 11",
+        "12": "Gomorrah facade bank A shadow companion for body frame 12"
+      }
+    },
+    "nv_gom_col_v111.sti": {
+      "name": "Casino footprint collision marker",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "collision",
+      "note": "Shared collision marker used beneath Lucky 38 and Gomorrah.",
+      "per_sub": {
+        "1": "Invisible casino footprint collision base"
+      }
+    },
+    "nv_gom_col_sh_v111.sti": {
+      "name": "Gomorrah collision shadow companion",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Intentionally empty shadow frame for collision marker.",
+      "per_sub": {
+        "1": "Empty Gomorrah collision shadow companion"
+      }
+    },
+    "nv_strip_brick_v105.sti": {
+      "name": "Strip brick ground",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Sixteen native tile variants; editable paving."
+    },
+    "nv_city_lawn_v101.sti": {
+      "name": "City lawn ground",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Sixteen dry lawn variants decoded from source ground sheet."
+    },
+    "nv_court_props_v101.sti": {
+      "name": "Court palms, cycad and benches",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "furniture",
+      "note": "Decoded four-frame static street-furniture bank; names describe appearance only.",
+      "per_sub": {
+        "1": "Tall court palm",
+        "2": "Low sago palm / cycad",
+        "3": "Park bench, first orientation",
+        "4": "Park bench, second orientation"
+      }
+    },
+    "nv_court_shadow_v101.sti": {
+      "name": "Court furniture shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Four intentionally empty shadow frames paired with court palms/cycad/benches.",
+      "per_sub": {
+        "1": "Court furniture shadow companion for body frame 1",
+        "2": "Court furniture shadow companion for body frame 2",
+        "3": "Court furniture shadow companion for body frame 3",
+        "4": "Court furniture shadow companion for body frame 4"
+      }
+    },
+    "nv_casino_58_v101.sti": {
+      "name": "Casino architectural interior stair pieces",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Ten decoded decorative stair/arch bands; source-room identity has not been verified, so no casino name is asserted.",
+      "per_sub": {
+        "1": "Casino stair and arch assembly band 1 of 10",
+        "2": "Casino stair and arch assembly band 2 of 10",
+        "3": "Casino stair and arch assembly band 3 of 10",
+        "4": "Casino stair and arch assembly band 4 of 10",
+        "5": "Casino stair and arch assembly band 5 of 10",
+        "6": "Casino stair and arch assembly band 6 of 10",
+        "7": "Casino stair and arch assembly band 7 of 10",
+        "8": "Casino stair and arch assembly band 8 of 10",
+        "9": "Casino stair and arch assembly band 9 of 10",
+        "10": "Casino stair and arch assembly band 10 of 10"
+      }
+    },
+    "nv_casino_59_v101.sti": {
+      "name": "Casino arched interior wall pieces",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Two decoded decorative arch/wall image bands; source-room identity is unverified.",
+      "per_sub": {
+        "1": "Casino arched wall band 1 of 2",
+        "2": "Casino arched wall band 2 of 2"
+      }
+    },
+    "nv_casino_113_v101.sti": {
+      "name": "Mixed Strip casino frontage bands",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Ten visually distinct facade/gate sections. Decoded art shows mixed entrances, shuttered frontage and raised decorative elements. Exact per-casino origin for every band is unverified; do not use as one storefront.",
+      "per_sub": {
+        "1": "Stone arch and gate frontage",
+        "2": "Small free-standing canopy on dark field",
+        "3": "Curved casino entrance frontage",
+        "4": "Ultra-Luxe illuminated entrance band",
+        "5": "Shuttered street frontage",
+        "6": "Low frontage rail",
+        "7": "Raised roof crest band",
+        "8": "Segmented raised roof band A",
+        "9": "Segmented raised roof band B",
+        "10": "Short raised roof band"
+      }
+    },
+    "nv_us_sign114_v104.sti": {
+      "name": "Ultra-Luxe staff wall and receiving canopy",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Frames 2-8 are source-pinned in ultraluxe_court_v101/packed_v103/registration_v103.json; frame 9 duplicates STAFF sign with shifted offset per ultraluxe_service_v101/build.py. Frame 1 is a 46x7 dark horizontal trim fragment, pixel-matched to nv_casino_114_v101.sti; the original source object is not established. Visual art only.",
+      "per_sub": {
+        "1": "Dark horizontal trim fragment",
+        "2": "Ultra-Luxe staff wall, X direction",
+        "3": "Ultra-Luxe staff wall, Y direction",
+        "4": "Ultra-Luxe wall pier",
+        "5": "STAFF wall sign",
+        "6": "RECEIVING canopy upper band",
+        "7": "RECEIVING canopy middle band",
+        "8": "RECEIVING canopy lower band",
+        "9": "STAFF wall sign, shifted duplicate"
+      }
+    },
+    "nv_ul_court_115_v114.sti": {
+      "name": "Ultra-Luxe court plants and front marker",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "furniture",
+      "note": "Frames 1-4 preserve court palm/cycad/bench source; frame 5 is the entrance marker from ultraluxe_court_v101/packed_v103/registration_v103.json. Static appearance only.",
+      "per_sub": {
+        "1": "Court palm",
+        "2": "Court sago palm / cycad",
+        "3": "Park bench, first orientation",
+        "4": "Park bench, second orientation",
+        "5": "Ultra-Luxe front marker"
+      }
+    },
+    "nv_l38f_0_v111.sti": {
+      "name": "Lucky 38 lower tower facade bands",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Twenty-one dark projected body bands; only the assembled landmark identifies the building.",
+      "per_sub": {
+        "1": "Lucky 38 lower facade band 1 of 21",
+        "2": "Lucky 38 lower facade band 2 of 21",
+        "3": "Lucky 38 lower facade band 3 of 21",
+        "4": "Lucky 38 lower facade band 4 of 21",
+        "5": "Lucky 38 lower facade band 5 of 21",
+        "6": "Lucky 38 lower facade band 6 of 21",
+        "7": "Lucky 38 lower facade band 7 of 21",
+        "8": "Lucky 38 lower facade band 8 of 21",
+        "9": "Lucky 38 lower facade band 9 of 21",
+        "10": "Lucky 38 lower facade band 10 of 21",
+        "11": "Lucky 38 lower facade band 11 of 21",
+        "12": "Lucky 38 lower facade band 12 of 21",
+        "13": "Lucky 38 lower facade band 13 of 21",
+        "14": "Lucky 38 lower facade band 14 of 21",
+        "15": "Lucky 38 lower facade band 15 of 21",
+        "16": "Lucky 38 lower facade band 16 of 21",
+        "17": "Lucky 38 lower facade band 17 of 21",
+        "18": "Lucky 38 lower facade band 18 of 21",
+        "19": "Lucky 38 lower facade band 19 of 21",
+        "20": "Lucky 38 lower facade band 20 of 21",
+        "21": "Lucky 38 lower facade band 21 of 21"
+      }
+    },
+    "nv_l38f_0s_v111.sti": {
+      "name": "Lucky 38 lower facade shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Twenty-one intentionally empty shadow frames.",
+      "per_sub": {
+        "1": "Lucky 38 lower facade shadow companion for body frame 1",
+        "2": "Lucky 38 lower facade shadow companion for body frame 2",
+        "3": "Lucky 38 lower facade shadow companion for body frame 3",
+        "4": "Lucky 38 lower facade shadow companion for body frame 4",
+        "5": "Lucky 38 lower facade shadow companion for body frame 5",
+        "6": "Lucky 38 lower facade shadow companion for body frame 6",
+        "7": "Lucky 38 lower facade shadow companion for body frame 7",
+        "8": "Lucky 38 lower facade shadow companion for body frame 8",
+        "9": "Lucky 38 lower facade shadow companion for body frame 9",
+        "10": "Lucky 38 lower facade shadow companion for body frame 10",
+        "11": "Lucky 38 lower facade shadow companion for body frame 11",
+        "12": "Lucky 38 lower facade shadow companion for body frame 12",
+        "13": "Lucky 38 lower facade shadow companion for body frame 13",
+        "14": "Lucky 38 lower facade shadow companion for body frame 14",
+        "15": "Lucky 38 lower facade shadow companion for body frame 15",
+        "16": "Lucky 38 lower facade shadow companion for body frame 16",
+        "17": "Lucky 38 lower facade shadow companion for body frame 17",
+        "18": "Lucky 38 lower facade shadow companion for body frame 18",
+        "19": "Lucky 38 lower facade shadow companion for body frame 19",
+        "20": "Lucky 38 lower facade shadow companion for body frame 20",
+        "21": "Lucky 38 lower facade shadow companion for body frame 21"
+      }
+    },
+    "nv_gomf_0_v111.sti": {
+      "name": "Gomorrah primary facade bands",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Twelve projected casino facade image sections; decorative, not stand-alone doors.",
+      "per_sub": {
+        "1": "Gomorrah primary facade band 1 of 12",
+        "2": "Gomorrah primary facade band 2 of 12",
+        "3": "Gomorrah primary facade band 3 of 12",
+        "4": "Gomorrah primary facade band 4 of 12",
+        "5": "Gomorrah primary facade band 5 of 12",
+        "6": "Gomorrah primary facade band 6 of 12",
+        "7": "Gomorrah primary facade band 7 of 12",
+        "8": "Gomorrah primary facade band 8 of 12",
+        "9": "Gomorrah primary facade band 9 of 12",
+        "10": "Gomorrah primary facade band 10 of 12",
+        "11": "Gomorrah primary facade band 11 of 12",
+        "12": "Gomorrah primary facade band 12 of 12"
+      }
+    },
+    "nv_gomf_0s_v111.sti": {
+      "name": "Gomorrah primary facade shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Twelve intentionally empty shadow frames.",
+      "per_sub": {
+        "1": "Gomorrah primary facade shadow companion for body frame 1",
+        "2": "Gomorrah primary facade shadow companion for body frame 2",
+        "3": "Gomorrah primary facade shadow companion for body frame 3",
+        "4": "Gomorrah primary facade shadow companion for body frame 4",
+        "5": "Gomorrah primary facade shadow companion for body frame 5",
+        "6": "Gomorrah primary facade shadow companion for body frame 6",
+        "7": "Gomorrah primary facade shadow companion for body frame 7",
+        "8": "Gomorrah primary facade shadow companion for body frame 8",
+        "9": "Gomorrah primary facade shadow companion for body frame 9",
+        "10": "Gomorrah primary facade shadow companion for body frame 10",
+        "11": "Gomorrah primary facade shadow companion for body frame 11",
+        "12": "Gomorrah primary facade shadow companion for body frame 12"
+      }
+    },
+    "nv_gomf_1_v111.sti": {
+      "name": "Gomorrah secondary facade and neon",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Eleven visual facade sections; decoded later frames show Gomorrah signs and frontage, but the precise internal segment split remains unverified.",
+      "per_sub": {
+        "1": "Gomorrah secondary dark facade band 1 of 4",
+        "2": "Gomorrah secondary dark facade band 2 of 4",
+        "3": "Gomorrah secondary dark facade band 3 of 4",
+        "4": "Gomorrah secondary dark facade band 4 of 4",
+        "5": "Gomorrah stone entrance band",
+        "6": "Gomorrah illuminated sign/frontage",
+        "7": "Gomorrah sign and doorway",
+        "8": "Gomorrah arcade frontage",
+        "9": "Gomorrah low wall section 1 of 3",
+        "10": "Gomorrah low wall section 2 of 3",
+        "11": "Gomorrah low wall section 3 of 3"
+      }
+    },
+    "nv_statns_v101.sti": {
+      "name": "Station roof shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Nine intentionally empty companion frames for station roof bands.",
+      "per_sub": {
+        "1": "Station roof shadow companion for body frame 1",
+        "2": "Station roof shadow companion for body frame 2",
+        "3": "Station roof shadow companion for body frame 3",
+        "4": "Station roof shadow companion for body frame 4",
+        "5": "Station roof shadow companion for body frame 5",
+        "6": "Station roof shadow companion for body frame 6",
+        "7": "Station roof shadow companion for body frame 7",
+        "8": "Station roof shadow companion for body frame 8",
+        "9": "Station roof shadow companion for body frame 9"
+      }
+    },
+    "nv_railss_v101.sti": {
+      "name": "Monorail guideway shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Three intentionally empty companion frames for rail guideway.",
+      "per_sub": {
+        "1": "Monorail guideway shadow companion for body frame 1",
+        "2": "Monorail guideway shadow companion for body frame 2",
+        "3": "Monorail guideway shadow companion for body frame 3"
+      }
+    },
+    "nv_gatef_0_v111.sti": {
+      "name": "Strip gate arch facade",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Three visual arch image bands; the full gate is their assembled placement.",
+      "per_sub": {
+        "1": "Strip gate stone arch, left face",
+        "2": "Strip gate stone arch, right face",
+        "3": "Strip gate curved arch band"
+      }
+    },
+    "nv_gatef_0s_v111.sti": {
+      "name": "Strip gate arch shadow companions",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "shadow",
+      "note": "Three intentionally empty companion frames.",
+      "per_sub": {
+        "1": "Strip gate arch shadow companion for body frame 1",
+        "2": "Strip gate arch shadow companion for body frame 2",
+        "3": "Strip gate arch shadow companion for body frame 3"
+      }
+    },
+    "nv_street_50_v109.sti": {
+      "name": "Connected boulevard and local-street ground",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Four hundred native indexed ground/road/curb variants generated by street_consistency_v101/build.py. The bank preserves source ground plus build-specific street patches; frames are not stand-alone props."
+    },
+    "nv_us_brush82_v104.sti": {
+      "name": "Ultra-Luxe service court edge brush A",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Ten tile-level curb/shade/receiving-line images from ultraluxe_service_v101/build.py."
+    },
+    "nv_us_brush83_v104.sti": {
+      "name": "Ultra-Luxe service court edge brush B",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "terrain",
+      "note": "Two further tile-level curb/shade/receiving-line images from ultraluxe_service_v101/build.py."
+    },
+    "nv_ul_east_canopy_v103.sti": {
+      "name": "Ultra-Luxe east receiving awning",
+      "origin": "New Vegas J14 T89 registered art",
+      "category": "structure",
+      "note": "Two projected canopy bands from ultraluxe_service_v101/canopy/source_v103/source_manifest_v103.json; roof visual only.",
+      "per_sub": {
+        "1": "East receiving awning upper band",
+        "2": "East receiving awning lower band"
+      }
+    },
+    "nv_gate_wall_v107.sti": {
+      "name": "Strip boundary wall panels",
+      "category": "wall",
+      "note": "Thirty directional masonry panels form the continuous Strip wall. These are wall pieces, not standalone buildings.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_boundary_v107.sti": {
+      "name": "Outside-sector boundary collision",
+      "category": "collision",
+      "note": "Invisible, indestructible single-cell obstacle excludes exterior map padding from play.",
+      "per_sub": {
+        "1": "Unwalkable outside-sector boundary"
+      },
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_ground50_v107.sti": {
+      "name": "City road and curb ground",
+      "category": "terrain",
+      "note": "Editable 40 x 20 ground diamonds containing connected streets, gate approach, and curb transitions. Repacked indices belong to this build.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_ground78_v107.sti": {
+      "name": "Street edge and crossing ground",
+      "category": "terrain",
+      "note": "Editable 40 x 20 street edge and crossing brushes. Repacked indices belong to this build.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_ground5_v107.sti": {
+      "name": "Outside-sector ground and wall-foot edge",
+      "category": "terrain",
+      "note": "Editable 40 x 20 ground diamonds for dark exterior padding and the straight transition at the foot of the north wall.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_wall_v109.sti": {
+      "name": "Strip boundary wall panels",
+      "category": "wall",
+      "note": "Thirty-five directional masonry panels form the Strip boundary, including the shallow corner beyond the western block. These are wall pieces, not standalone buildings.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_boundary_v109.sti": {
+      "name": "Outside-sector boundary collision",
+      "category": "collision",
+      "note": "Invisible, indestructible single-cell obstacle excludes exterior map padding from play.",
+      "per_sub": {
+        "1": "Unwalkable outside-sector boundary"
+      },
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_ground50_v109.sti": {
+      "name": "City road and curb ground",
+      "category": "terrain",
+      "note": "Editable 40 x 20 ground diamonds containing connected streets, gate approach, and curb transitions. Repacked indices belong to this build.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_ground78_v109.sti": {
+      "name": "Street edge and crossing ground",
+      "category": "terrain",
+      "note": "Editable 40 x 20 street edge and crossing brushes. Repacked indices belong to this build.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_gate_road50_v104.sti": {
+      "name": "Strip entrance road and paving",
+      "category": "terrain",
+      "note": "Editable 40 x 20 diamonds for the straight gate approach, connected city streets, curb edges, and preserved boundary ground.",
+      "origin": "New Vegas J14 straight gate approach"
+    },
+    "nv_gate_road78_v104.sti": {
+      "name": "Strip entrance paving transitions",
+      "category": "terrain",
+      "note": "Editable 40 x 20 sidewalk and surface transitions. Paired with the straight gate approach ground bank.",
+      "origin": "New Vegas J14 straight gate approach"
+    },
+    "nv_gate_ground5_v109.sti": {
+      "name": "Outside-sector ground and wall-foot edge",
+      "category": "terrain",
+      "note": "Editable 40 x 20 ground diamonds for dark exterior padding and the straight transition at the foot of the north wall.",
+      "origin": "New Vegas J14 northwest gate"
+    },
+    "nv_raised_gardens_v103.sti": {
+      "name": "Lucky 38 raised roadside planters",
+      "origin": "New Vegas J14 Lucky 38 frontage",
+      "category": "vegetation",
+      "per_sub": {
+        "1": "Avenue palms",
+        "2": "Layered oasis - two palms, sage agave and flowers",
+        "3": "Silver desert garden",
+        "4": "Specimen palm"
+      }
+    },
+    "nv_garden_shadows_v101.sti": {
+      "name": "Raised planter shadow companions",
+      "origin": "New Vegas J14 planter art study",
+      "category": "shadows",
+      "note": "Intentionally empty companion frames"
+    },
+    "nv_planter_ground50_v103.sti": {
+      "name": "Lucky 38 road, curb and planter paving",
+      "origin": "New Vegas J14 planter review with preserved editor changes",
+      "category": "ground"
+    },
+    "nv_planter_ground78_v103.sti": {
+      "name": "Lucky 38 paving transitions",
+      "origin": "New Vegas J14 planter review with preserved editor changes",
+      "category": "ground"
+    },
+    "nv_split_ground5_fv101.sti": {
+      "name": "Strip boundary ground at the entrance",
+      "origin": "New Vegas J14 raised planter review",
+      "category": "ground"
+    },
+    "nv_l38_row_gardens_v103.sti": {
+      "name": "Lucky 38 raised roadside planters",
+      "origin": "Lucky 38 first roadside row",
+      "category": "vegetation",
+      "per_sub": {
+        "1": "Avenue palms",
+        "2": "Layered oasis - two palms, sage agave and flowers",
+        "3": "Silver desert garden",
+        "4": "Specimen palm",
+        "5": "Layered oasis - turned crowns"
+      }
+    },
+    "nv_l38_row_shadows_v103.sti": {
+      "name": "Raised planter shadow companions",
+      "origin": "Lucky 38 first roadside row",
+      "category": "shadows",
+      "note": "Intentionally empty companions; native qualification pending"
+    },
+    "nv_split_ground50_row103.sti": {
+      "name": "Lucky 38 roadside paving and planting soil",
+      "origin": "Lucky 38 first roadside row",
+      "category": "ground"
+    },
+    "nv_split_ground5_row103.sti": {
+      "name": "Strip entrance boundary ground",
+      "origin": "Lucky 38 first roadside row",
+      "category": "ground"
+    },
+    "nv_l38_soil_gardens_v101.sti": {
+      "name": "Lucky 38 raised planters with textured soil",
+      "origin": "Lucky 38 soil and water-yard fence review",
+      "category": "vegetation",
+      "per_sub": {
+        "1": "Avenue palms",
+        "2": "Layered oasis - two palms, sage agave and flowers",
+        "3": "Silver desert garden",
+        "4": "Specimen palm",
+        "5": "Layered oasis - turned crowns"
+      }
+    },
+    "fo2_metal_watrtank_v101.sti": {
+      "name": "Riveted metal water tank with side plumbing",
+      "origin": "Fallout scenery; archived extracted STI",
+      "category": "industrial",
+      "note": "Identity checked against decoded indexed art. This label does not imply registration, collision, or gameplay behavior. Byte-identical staged copy of the archive fo2_watrtank.sti (218x116). Distinct basename prevents confusion with the different wooden fo2_watrtank.sti in the Copy (115x100).",
+      "per_sub": {
+        "1": "Riveted metal water tank with side plumbing"
+      }
+    },
+    "fo2_garpipe1.sti": {
+      "name": "Bundled industrial pipe run",
+      "origin": "Fallout scenery; archived extracted STI",
+      "category": "industrial",
+      "note": "Identity checked against decoded indexed art. This label does not imply registration, collision, or gameplay behavior.",
+      "per_sub": {
+        "1": "Bundled industrial pipe run"
+      }
+    },
+    "fo2_garpipe2.sti": {
+      "name": "Vertical pipe with bent ends",
+      "origin": "Fallout scenery; archived extracted STI",
+      "category": "industrial",
+      "note": "Identity checked against decoded indexed art. This label does not imply registration, collision, or gameplay behavior.",
+      "per_sub": {
+        "1": "Vertical pipe with bent ends"
+      }
+    },
+    "fo2_gekpipe1.sti": {
+      "name": "Parallel flanged pipes with elbow ends",
+      "origin": "Fallout scenery; archived extracted STI",
+      "category": "industrial",
+      "note": "Identity checked against decoded indexed art. This label does not imply registration, collision, or gameplay behavior.",
+      "per_sub": {
+        "1": "Parallel flanged pipes with elbow ends"
+      }
+    },
+    "fo2_pumpnec.sti": {
+      "name": "Necropolis pump assembly",
+      "origin": "Fallout scenery; archived extracted STI",
+      "category": "industrial",
+      "note": "Identity checked against decoded indexed art. This label does not imply registration, collision, or gameplay behavior.",
+      "per_sub": {
+        "1": "Necropolis pump assembly"
+      }
+    },
+    "fo2_power1.sti": {
+      "name": "Transformer and capacitor cluster",
+      "origin": "Fallout scenery; archived extracted STI",
+      "category": "industrial",
+      "note": "Identity checked against decoded indexed art. This label does not imply registration, collision, or gameplay behavior.",
+      "per_sub": {
+        "1": "Transformer and capacitor cluster"
+      }
+    },
+    "reactor_power_v101.sti": {
+      "name": "Electrical infrastructure and pump equipment",
+      "origin": "Fallout 4 and Fallout scenery; reactor_power staging",
+      "category": "industrial",
+      "note": "All seven indexed frames checked against prop_staging/reactor_power/INDEX.md source records. Sub 4 is PUMPNEC pump art, not a separate generator design. Staged art has no JSD and is not registered by this label entry.",
+      "per_sub": {
+        "1": "Tall electrical transmission tower",
+        "2": "Small electrical transmission tower",
+        "3": "Compact transformer and capacitor cluster",
+        "4": "Compact Necropolis pump assembly",
+        "5": "Green wall fuse box",
+        "6": "Turbine housing",
+        "7": "Small utility power pylon"
+      }
+    },
+    "nv_casino_114_v101.sti": {
+      "name": "Dark horizontal trim fragment",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "structure",
+      "note": "Single 46x7 inherited graphic; appearance label only, original source object not established. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair.",
+      "per_sub": {
+        "1": "Dark horizontal trim fragment"
+      }
+    },
+    "nvq_shadows_75_v101.sti": {
+      "name": "Shadows for New Vegas prop set 75",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "shadow",
+      "note": "Original automatic shadow companions for nvq_props_75_v101.sti; identical to inherited frames in the later facade sheet. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair.",
+      "per_sub": {
+        "1": "Shadow for Lucky 38 sign prop",
+        "2": "Shadow for Welcome to Fabulous New Vegas sign prop (face toward southwest)",
+        "3": "Shadow for Strip double streetlamp prop",
+        "4": "Shadow for Pool-table prop",
+        "5": "Shadow for Closed retro refrigerator prop",
+        "6": "Shadow for Office water-cooler prop",
+        "7": "Shadow for Air-conditioning unit prop",
+        "8": "Shadow for Pinball-machine prop",
+        "9": "Shadow for Closed gun-cabinet prop"
+      }
+    },
+    "nvq_shadows_76_v101.sti": {
+      "name": "Shadows for New Vegas prop set 76",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "shadow",
+      "note": "Original automatic shadow companions for nvq_props_76_v101.sti; identical to inherited frames in the later facade sheet. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair.",
+      "per_sub": {
+        "1": "Shadow for Nuka-Cola vending-machine prop",
+        "2": "Shadow for Oil-drum prop",
+        "3": "Shadow for Wrecked car-hulk prop"
+      }
+    },
+    "nv_house_facades_109_v101.sti": {
+      "name": "Bookshop facade with earlier BOOKS lettering",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "structure",
+      "note": "Preserved subset of nv_bookshop_109_v102.sti. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair. Frame 22 was visually inspected separately; the other 23 frames match the named later sheet.",
+      "per_sub": {
+        "1": "Inherited slot75 art shadow companion for body frame 1",
+        "2": "Inherited slot75 art shadow companion for body frame 2",
+        "3": "Inherited slot75 art shadow companion for body frame 3",
+        "4": "Inherited slot75 art shadow companion for body frame 4",
+        "5": "Inherited slot75 art shadow companion for body frame 5",
+        "6": "Inherited slot75 art shadow companion for body frame 6",
+        "7": "Inherited slot75 art shadow companion for body frame 7",
+        "8": "Inherited slot75 art shadow companion for body frame 8",
+        "9": "Inherited slot75 art shadow companion for body frame 9",
+        "10": "Bookshop lower-facade band 1 of 7",
+        "11": "Bookshop lower-facade band 2 of 7",
+        "12": "Bookshop lower-facade band 3 of 7",
+        "13": "Bookshop lower-facade band 4 of 7",
+        "14": "Bookshop lower-facade band 5 of 7",
+        "15": "Bookshop lower-facade band 6 of 7",
+        "16": "Bookshop lower-facade band 7 of 7",
+        "17": "Bookshop upper-facade band 1 of 8",
+        "18": "Bookshop upper-facade band 2 of 8",
+        "19": "Bookshop upper-facade band 3 of 8",
+        "20": "Bookshop upper-facade band 4 of 8",
+        "21": "Bookshop upper-facade band 5 of 8",
+        "22": "Bookshop upper-facade band with earlier BOOKS lettering",
+        "23": "Bookshop upper-facade band 7 of 8",
+        "24": "Bookshop upper-facade band 8 of 8"
+      }
+    },
+    "nv_l38_forecourt_v101.sti": {
+      "name": "Lucky 38 platform rim and lobby threshold",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "floor",
+      "note": "Two flat source-mesh graphics, platform and cutaway floor respectively; source mapping is lucky38_integration/build_integration.py. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair.",
+      "per_sub": {
+        "1": "Lucky 38 outer platform rim",
+        "2": "Lucky 38 lobby floor and threshold"
+      }
+    },
+    "nv_raised_gardens_v101.sti": {
+      "name": "Raised garden prototypes",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "vegetation",
+      "note": "Four original garden designs. Sub 2 is the earlier narrow two-palm arrangement; other frames are pixel-matched to named roadside planter art. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair.",
+      "per_sub": {
+        "1": "Avenue palms",
+        "2": "Layered oasis - two palms and low desert planting",
+        "3": "Silver desert garden",
+        "4": "Specimen palm"
+      }
+    },
+    "nv_ul_court_114_v104.sti": {
+      "name": "Ultra-Luxe staff wall and receiving canopy - original eight frames",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "structure",
+      "note": "Preserved subset of nv_us_sign114_v104.sti. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair.",
+      "per_sub": {
+        "1": "Dark horizontal trim fragment",
+        "2": "Ultra-Luxe staff wall, X direction",
+        "3": "Ultra-Luxe staff wall, Y direction",
+        "4": "Ultra-Luxe wall pier",
+        "5": "STAFF wall sign",
+        "6": "RECEIVING canopy upper band",
+        "7": "RECEIVING canopy middle band",
+        "8": "RECEIVING canopy lower band"
+      }
+    },
+    "nv_house_ground_50_v101.sti": {
+      "name": "Street paving, road markings and curb cells",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "floor",
+      "note": "378 native 40x20 ground cells; every frame pixel-matched to previously named ground art. Frame combinations are build-local. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair."
+    },
+    "nv_split_ground50_fv101.sti": {
+      "name": "Lucky 38 road, curb and paving cells - earlier split-map bank",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "floor",
+      "note": "386 native ground cells; every frame pixel-matched to previously named paving banks. Frame combinations are build-local. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair."
+    },
+    "nv_ul_ground_50_v104.sti": {
+      "name": "Ultra-Luxe street paving and garden curbs (v104)",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "floor",
+      "note": "397 native 40x20 ground cells. Existing road cells are pixel-matched; the remaining pale straight/corner curb and paving fragments were visually inspected. Source builder: ultraluxe_court_v101/build.py and build_corrections.py. Frame combinations are build-local. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair."
+    },
+    "nv_ul_ground_50_v110.sti": {
+      "name": "Ultra-Luxe street paving and garden curbs (v110)",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "floor",
+      "note": "397 native 40x20 ground cells. Existing road cells are pixel-matched; the remaining pale straight/corner curb and paving fragments were visually inspected. Source builder: ultraluxe_court_v101/build.py and build_corrections.py. Frame combinations are build-local. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair."
+    },
+    "nv_ul_ground_50_v111.sti": {
+      "name": "Ultra-Luxe street paving and garden curbs (v111)",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "floor",
+      "note": "397 native 40x20 ground cells. Existing road cells are pixel-matched; the remaining pale straight/corner curb and paving fragments were visually inspected. Source builder: ultraluxe_court_v101/build.py and build_corrections.py. Frame combinations are build-local. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair."
+    },
+    "nv_ul_ground_50_v114.sti": {
+      "name": "Ultra-Luxe street paving and garden curbs (v114)",
+      "origin": "New Vegas J14 T89 preserved art",
+      "category": "floor",
+      "note": "397 native 40x20 ground cells. Existing road cells are pixel-matched; the remaining pale straight/corner curb and paving fragments were visually inspected. Source builder: ultraluxe_court_v101/build.py and build_corrections.py. Frame combinations are build-local. Verified against decoded indexed art in utility_yard_v101/label_repairs_v101/older_identity_v101; not registered by this label repair."
+    },
+    "nv_l38_boards_gate_v101.sti": {
+      "name": "Lucky 38 billboards and open service entrance",
+      "origin": "Lucky 38 fenced water yard and former flank planters",
+      "category": "prop",
+      "note": "Two complete Fallout New Vegas billboard frames with original Lucky 38 and Sunset artwork; one authored galvanized open entrance frame. Collision and visual review are staged, not native gameplay qualification.",
+      "per_sub": {
+        "1": "Lucky 38 advertising billboard",
+        "2": "Sunset Sarsaparilla advertising billboard",
+        "3": "Open water-yard service entrance frame"
+      }
+    },
+    "nv_l38_boards_gate_sh_v101.sti": {
+      "name": "Empty shadow companions for Lucky 38 billboards and entrance",
+      "origin": "Lucky 38 private map review",
+      "category": "shadow",
+      "note": "Three transparent placeholders; body art casts no additional automatic shadow in this review.",
+      "per_sub": {
+        "1": "Empty shadow companion for Lucky 38 advertising billboard",
+        "2": "Empty shadow companion for Sunset Sarsaparilla advertising billboard",
+        "3": "Empty shadow companion for Open water-yard service entrance frame"
+      }
+    },
+    "uc19_60_i_floor.sti": {
+      "name": "Dark mottled floor",
+      "origin": "New Vegas J14 registered floor art, inherited from UC19",
+      "category": "floor",
+      "note": "All eight registered indexed frames inspected in fence_billboards_v101/floor_labels_contact_v101.png; appearance-based name.",
+      "per_sub": {
+        "1": "Dark mottled floor - variation 1",
+        "2": "Dark mottled floor - variation 2",
+        "3": "Dark mottled floor - variation 3",
+        "4": "Dark mottled floor - variation 4",
+        "5": "Dark mottled floor - variation 5",
+        "6": "Dark mottled floor - variation 6",
+        "7": "Dark mottled floor - variation 7",
+        "8": "Dark mottled floor - variation 8"
+      }
+    },
+    "uc19_61_jailflor.sti": {
+      "name": "Light gray speckled floor",
+      "origin": "New Vegas J14 registered floor art, inherited from UC19",
+      "category": "floor",
+      "note": "All eight registered indexed frames inspected in fence_billboards_v101/floor_labels_contact_v101.png; appearance-based name.",
+      "per_sub": {
+        "1": "Light gray speckled floor - variation 1",
+        "2": "Light gray speckled floor - variation 2",
+        "3": "Light gray speckled floor - variation 3",
+        "4": "Light gray speckled floor - variation 4",
+        "5": "Light gray speckled floor - variation 5",
+        "6": "Light gray speckled floor - variation 6",
+        "7": "Light gray speckled floor - variation 7",
+        "8": "Light gray speckled floor - variation 8"
+      }
+    },
+    "uc19_62_hosfloor.sti": {
+      "name": "Pale green square-tile floor",
+      "origin": "New Vegas J14 registered floor art, inherited from UC19",
+      "category": "floor",
+      "note": "All eight registered indexed frames inspected in fence_billboards_v101/floor_labels_contact_v101.png; appearance-based name.",
+      "per_sub": {
+        "1": "Pale green square-tile floor - variation 1",
+        "2": "Pale green square-tile floor - variation 2",
+        "3": "Pale green square-tile floor - variation 3",
+        "4": "Pale green square-tile floor - variation 4",
+        "5": "Pale green square-tile floor - variation 5",
+        "6": "Pale green square-tile floor - variation 6",
+        "7": "Pale green square-tile floor - variation 7",
+        "8": "Pale green square-tile floor - variation 8"
+      }
+    },
+    "uc19_63_p-floor3.sti": {
+      "name": "Warm brown plank floor",
+      "origin": "New Vegas J14 registered floor art, inherited from UC19",
+      "category": "floor",
+      "note": "All eight registered indexed frames inspected in fence_billboards_v101/floor_labels_contact_v101.png; appearance-based name.",
+      "per_sub": {
+        "1": "Warm brown plank floor - variation 1",
+        "2": "Warm brown plank floor - variation 2",
+        "3": "Warm brown plank floor - variation 3",
+        "4": "Warm brown plank floor - variation 4",
+        "5": "Warm brown plank floor - variation 5",
+        "6": "Warm brown plank floor - variation 6",
+        "7": "Warm brown plank floor - variation 7",
+        "8": "Warm brown plank floor - variation 8"
+      }
+    },
+    "nv_curved_lamps_v101.sti": {
+      "name": "Curved city streetlight",
+      "origin": "JA2 Redux 2009, Tilesets/11/LAMPPOST.STI, source frames 7 and 8",
+      "category": "furniture",
+      "note": "Exact indexed source art and offsets retained. Named facings describe the visible lamp arm. Light emission is not implied by the sprite. Private Lucky38 editor registration.",
+      "per_sub": {
+        "1": "Curved city streetlight - arm right",
+        "2": "Curved city streetlight - arm left"
+      }
+    },
+    "nv_curved_lamp_sh_v101.sti": {
+      "name": "Curved city streetlight shadows",
+      "origin": "JA2 Redux 2009, Tilesets/11/LAMPPOSTS.STI, source frames 7 and 8",
+      "category": "shadow",
+      "note": "Exact indexed source art and offsets retained. Named facings describe the visible lamp arm. Light emission is not implied by the sprite. Private Lucky38 editor registration.",
+      "per_sub": {
+        "1": "Shadow for Curved city streetlight - arm right",
+        "2": "Shadow for Curved city streetlight - arm left"
+      }
+    },
+    "nv_split_ground50_pair101.sti": {
+      "name": "Lucky 38 parallel-row street, curb and paving",
+      "origin": "Lucky 38 aligned planter rows and shifted access street",
+      "category": "ground",
+      "note": "384 registered editable ground diamonds. Existing pixel appearances outside the local street correction are preserved."
+    },
+    "nv_split_ground50_four101.sti": {
+      "name": "New Vegas street, curb and restored paving",
+      "origin": "J14 four paired Lucky 38 planters and mapwide old-bed cleanup",
+      "category": "ground",
+      "note": "326 registered editable ground diamonds. Old planter soil and curbs removed mapwide; unrelated ground artwork preserved."
+    },
+    "nv_l38_waterworks_v101.sti": {
+      "name": "Water treatment machinery and service equipment",
+      "origin": "Lucky 38 water-treatment yard; Fallout industrial art",
+      "category": "prop",
+      "note": "Native source scale. Eight individually named pump, filter, pipe, electrical and maintenance pieces. Private editor collision review only.",
+      "per_sub": {
+        "1": "Large water pump",
+        "2": "Paired vertical filter vessels",
+        "3": "Twin flanged pipes with elbow",
+        "4": "Bundled pipe manifold",
+        "5": "Bent vertical pipe riser",
+        "6": "Transformer and capacitor bank",
+        "7": "Pump control cabinet",
+        "8": "Maintenance workbench with vise and shelf"
+      }
+    },
+    "nv_l38_waterworks_sh_v101.sti": {
+      "name": "Waterworks empty shadow companions",
+      "origin": "Lucky 38 private map review",
+      "category": "shadow",
+      "per_sub": {
+        "1": "Empty shadow companion for Large water pump",
+        "2": "Empty shadow companion for Paired vertical filter vessels",
+        "3": "Empty shadow companion for Twin flanged pipes with elbow",
+        "4": "Empty shadow companion for Bundled pipe manifold",
+        "5": "Empty shadow companion for Bent vertical pipe riser",
+        "6": "Empty shadow companion for Transformer and capacitor bank",
+        "7": "Empty shadow companion for Pump control cabinet",
+        "8": "Empty shadow companion for Maintenance workbench with vise and shelf"
+      }
+    },
+    "nv_l38_machines_v101.sti": {
+      "name": "New Vegas street props and waterworks machinery",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Pump, transformer and manifold reconstructed with Meshy; workbench uses the original FNV model; modular pipe fittings authored locally. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Sunset Sarsaparilla vending-machine prop",
+        "2": "Casino slot-machine prop (reels facing southwest)",
+        "3": "Mojave Express dropbox prop (sign facing southwest)",
+        "4": "Roulette-table prop",
+        "5": "Fire-hydrant prop",
+        "6": "NCR bear-flag prop (cloth facing southwest)",
+        "7": "Water booster pump - 0 degrees",
+        "8": "Water booster pump - 45 degrees",
+        "9": "Water booster pump - 90 degrees",
+        "10": "Water booster pump - 135 degrees",
+        "11": "Water booster pump - 180 degrees",
+        "12": "Water booster pump - 225 degrees",
+        "13": "Water booster pump - 270 degrees",
+        "14": "Water booster pump - 315 degrees",
+        "15": "Transformer bank - 0 degrees",
+        "16": "Transformer bank - 45 degrees",
+        "17": "Transformer bank - 90 degrees",
+        "18": "Transformer bank - 135 degrees",
+        "19": "Transformer bank - 180 degrees",
+        "20": "Transformer bank - 225 degrees",
+        "21": "Transformer bank - 270 degrees",
+        "22": "Transformer bank - 315 degrees"
+      }
+    },
+    "nv_l38_pipekit_v101.sti": {
+      "name": "New Vegas furnishings and modular pipe fittings",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Pump, transformer and manifold reconstructed with Meshy; workbench uses the original FNV model; modular pipe fittings authored locally. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Lucky 38 sign prop",
+        "2": "Welcome to Fabulous New Vegas sign prop (face toward southwest)",
+        "3": "Strip double streetlamp prop",
+        "4": "Pool-table prop",
+        "5": "Closed retro refrigerator prop",
+        "6": "Office water-cooler prop",
+        "7": "Air-conditioning unit prop",
+        "8": "Pinball-machine prop",
+        "9": "Closed gun-cabinet prop",
+        "10": "Straight flanged pipe - 0 degrees",
+        "11": "Straight flanged pipe - 90 degrees",
+        "12": "Flanged pipe elbow - 0 degrees",
+        "13": "Flanged pipe elbow - 90 degrees",
+        "14": "Flanged pipe elbow - 180 degrees",
+        "15": "Flanged pipe elbow - 270 degrees",
+        "16": "Flanged pipe tee - 0 degrees",
+        "17": "Flanged pipe tee - 90 degrees",
+        "18": "Flanged pipe tee - 180 degrees",
+        "19": "Flanged pipe tee - 270 degrees",
+        "20": "Pipe with handwheel valve - 0 degrees",
+        "21": "Pipe with handwheel valve - 90 degrees",
+        "22": "Pipe with handwheel valve - 180 degrees",
+        "23": "Pipe with handwheel valve - 270 degrees"
+      }
+    },
+    "nv_l38_workshop_v101.sti": {
+      "name": "Fallout props, pipe manifolds and workbenches",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Pump, transformer and manifold reconstructed with Meshy; workbench uses the original FNV model; modular pipe fittings authored locally. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Nuka-Cola vending-machine prop",
+        "2": "Oil-drum prop",
+        "3": "Wrecked car-hulk prop",
+        "4": "Pipe manifold - 0 degrees",
+        "5": "Pipe manifold - 45 degrees",
+        "6": "Pipe manifold - 90 degrees",
+        "7": "Pipe manifold - 135 degrees",
+        "8": "Pipe manifold - 180 degrees",
+        "9": "Pipe manifold - 225 degrees",
+        "10": "Pipe manifold - 270 degrees",
+        "11": "Pipe manifold - 315 degrees",
+        "12": "Maintenance workbench - 0 degrees",
+        "13": "Maintenance workbench - 45 degrees",
+        "14": "Maintenance workbench - 90 degrees",
+        "15": "Maintenance workbench - 135 degrees",
+        "16": "Maintenance workbench - 180 degrees",
+        "17": "Maintenance workbench - 225 degrees",
+        "18": "Maintenance workbench - 270 degrees",
+        "19": "Maintenance workbench - 315 degrees"
+      }
+    },
+    "nv_l38_workshop_v102.sti": {
+      "name": "Fallout props, pipe manifolds and workbenches",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Original FNV workbench with an original Fallout 4 small toolbox on its worktop; separate Fallout 4 toolboxes and rolling tool chests. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Nuka-Cola vending-machine prop",
+        "2": "Oil-drum prop",
+        "3": "Wrecked car-hulk prop",
+        "4": "Pipe manifold - 0 degrees",
+        "5": "Pipe manifold - 45 degrees",
+        "6": "Pipe manifold - 90 degrees",
+        "7": "Pipe manifold - 135 degrees",
+        "8": "Pipe manifold - 180 degrees",
+        "9": "Pipe manifold - 225 degrees",
+        "10": "Pipe manifold - 270 degrees",
+        "11": "Pipe manifold - 315 degrees",
+        "12": "Maintenance workbench - 0 degrees",
+        "13": "Maintenance workbench - 45 degrees",
+        "14": "Maintenance workbench - 90 degrees",
+        "15": "Maintenance workbench - 135 degrees",
+        "16": "Maintenance workbench - 180 degrees",
+        "17": "Maintenance workbench - 225 degrees",
+        "18": "Maintenance workbench - 270 degrees",
+        "19": "Maintenance workbench - 315 degrees",
+        "20": "Maintenance workbench with small toolbox - 0 degrees",
+        "21": "Maintenance workbench with small toolbox - 90 degrees",
+        "22": "Maintenance workbench with small toolbox - 180 degrees",
+        "23": "Maintenance workbench with small toolbox - 270 degrees"
+      }
+    },
+    "nv_l38_toolchests_v101.sti": {
+      "name": "Fallout workshop storage, utilities and palms",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Original FNV workbench with an original Fallout 4 small toolbox on its worktop; separate Fallout 4 toolboxes and rolling tool chests. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Parked motorcycle",
+        "2": "Workbench with vise and shelf",
+        "3": "Hospital gurney",
+        "4": "Fusion generator body",
+        "5": "Reloading bench",
+        "6": "Squat exterior water tank",
+        "7": "Mature date palm (NVDatePalm02)",
+        "8": "Tall date palm (NVDatePalm03)",
+        "9": "Queen palm (NVQueenPalm01)",
+        "10": "Fallout 4 small toolbox - 0 degrees",
+        "11": "Fallout 4 small toolbox - 90 degrees",
+        "12": "Fallout 4 small toolbox - 180 degrees",
+        "13": "Fallout 4 small toolbox - 270 degrees",
+        "14": "Fallout 4 rolling tool chest - 0 degrees",
+        "15": "Fallout 4 rolling tool chest - 90 degrees",
+        "16": "Fallout 4 rolling tool chest - 180 degrees",
+        "17": "Fallout 4 rolling tool chest - 270 degrees"
+      }
+    },
+    "nv_l38_workshop_v103.sti": {
+      "name": "Fallout props, pipe manifolds and workbenches",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Original FNV workbench with larger red Fallout 4 toolbox; toolbox colors use previously unused palette entries. Other artwork retains identical colors. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Nuka-Cola vending-machine prop",
+        "2": "Oil-drum prop",
+        "3": "Wrecked car-hulk prop",
+        "4": "Pipe manifold - 0 degrees",
+        "5": "Pipe manifold - 45 degrees",
+        "6": "Pipe manifold - 90 degrees",
+        "7": "Pipe manifold - 135 degrees",
+        "8": "Pipe manifold - 180 degrees",
+        "9": "Pipe manifold - 225 degrees",
+        "10": "Pipe manifold - 270 degrees",
+        "11": "Pipe manifold - 315 degrees",
+        "12": "Maintenance workbench - 0 degrees",
+        "13": "Maintenance workbench - 45 degrees",
+        "14": "Maintenance workbench - 90 degrees",
+        "15": "Maintenance workbench - 135 degrees",
+        "16": "Maintenance workbench - 180 degrees",
+        "17": "Maintenance workbench - 225 degrees",
+        "18": "Maintenance workbench - 270 degrees",
+        "19": "Maintenance workbench - 315 degrees",
+        "20": "Maintenance workbench with red toolbox - 0 degrees",
+        "21": "Maintenance workbench with red toolbox - 90 degrees",
+        "22": "Maintenance workbench with red toolbox - 180 degrees",
+        "23": "Maintenance workbench with red toolbox - 270 degrees"
+      }
+    },
+    "nv_l38_rail_tools_v101.sti": {
+      "name": "Gomorrah rail structures and red toolboxes",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Original FNV workbench with larger red Fallout 4 toolbox; toolbox colors use previously unused palette entries. Other artwork retains identical colors. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Gomorrah rear arcade - section 1 of 9",
+        "2": "Gomorrah rear arcade - section 2 of 9",
+        "3": "Gomorrah rear arcade - section 3 of 9",
+        "4": "Gomorrah rear arcade - section 4 of 9",
+        "5": "Gomorrah rear arcade - section 5 of 9",
+        "6": "Gomorrah rear arcade - section 6 of 9",
+        "7": "Gomorrah rear arcade - section 7 of 9",
+        "8": "Gomorrah rear arcade - section 8 of 9",
+        "9": "Gomorrah rear arcade - section 9 of 9",
+        "10": "Station-to-seam guideway transition - band 1 of 9",
+        "11": "Station-to-seam guideway transition - band 2 of 9",
+        "12": "Station-to-seam guideway transition - band 3 of 9",
+        "13": "Station-to-seam guideway transition - band 4 of 9",
+        "14": "Station-to-seam guideway transition - band 5 of 9",
+        "15": "Station-to-seam guideway transition - band 6 of 9",
+        "16": "Station-to-seam guideway transition - band 7 of 9",
+        "17": "Station-to-seam guideway transition - band 8 of 9",
+        "18": "Station-to-seam guideway transition - band 9 of 9",
+        "19": "Fallout 4 red toolbox - enlarged - 0 degrees",
+        "20": "Fallout 4 red toolbox - enlarged - 90 degrees",
+        "21": "Fallout 4 red toolbox - enlarged - 180 degrees",
+        "22": "Fallout 4 red toolbox - enlarged - 270 degrees"
+      }
+    },
+    "nv_l38_toolchests_v102.sti": {
+      "name": "Fallout workshop storage, utilities and palms",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Original Fallout 4 rolling chest enlarged 25 percent, with stronger drawer contrast; other frames unchanged. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Parked motorcycle",
+        "2": "Workbench with vise and shelf",
+        "3": "Hospital gurney",
+        "4": "Fusion generator body",
+        "5": "Reloading bench",
+        "6": "Squat exterior water tank",
+        "7": "Mature date palm (NVDatePalm02)",
+        "8": "Tall date palm (NVDatePalm03)",
+        "9": "Queen palm (NVQueenPalm01)",
+        "10": "Fallout 4 small toolbox - 0 degrees",
+        "11": "Fallout 4 small toolbox - 90 degrees",
+        "12": "Fallout 4 small toolbox - 180 degrees",
+        "13": "Fallout 4 small toolbox - 270 degrees",
+        "14": "Fallout 4 rolling tool chest - enlarged - 0 degrees",
+        "15": "Fallout 4 rolling tool chest - enlarged - 90 degrees",
+        "16": "Fallout 4 rolling tool chest - enlarged - 180 degrees",
+        "17": "Fallout 4 rolling tool chest - enlarged - 270 degrees"
+      }
+    },
+    "nv_l38_waterworks_v102.sti": {
+      "name": "Lucky 38 waterworks and rolling tool chests",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Original Fallout 4 rolling chest with stronger red paint and highlights; same size and placement, other frames unchanged. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Large water pump",
+        "2": "Paired vertical filter vessels",
+        "3": "Twin flanged pipes with elbow",
+        "4": "Bundled pipe manifold",
+        "5": "Bent vertical pipe riser",
+        "6": "Transformer and capacitor bank",
+        "7": "Pump control cabinet",
+        "8": "Maintenance workbench with vise and shelf",
+        "9": "Fallout 4 rolling tool chest - enlarged - 0 degrees",
+        "10": "Fallout 4 rolling tool chest - enlarged - 90 degrees",
+        "11": "Fallout 4 rolling tool chest - enlarged - 180 degrees",
+        "12": "Fallout 4 rolling tool chest - enlarged - 270 degrees"
+      }
+    },
+    "nv_l38_service_props_v101.sti": {
+      "name": "Alley furniture and water-yard maintenance props",
+      "origin": "Lucky 38 water yard - rotatable 3D equipment",
+      "category": "prop",
+      "note": "Existing frames preserved. Low shelf adapted from Fallout 3 rack, original Fallout 4 oil cans and toolbox, Fallout 3 rag; hose coil modeled locally. Existing frames preserved. Direction names are source-model yaw.",
+      "per_sub": {
+        "1": "Closed wooden alley dumpster - grid-X",
+        "2": "Closed wooden alley dumpster - grid-Y",
+        "3": "Four-chair cafe table - facing A",
+        "4": "Four-chair cafe table - facing B",
+        "5": "Low maintenance shelf with oil cans, rag and toolbox - 0 degrees",
+        "6": "Low maintenance shelf with oil cans, rag and toolbox - 90 degrees",
+        "7": "Low maintenance shelf with oil cans, rag and toolbox - 180 degrees",
+        "8": "Low maintenance shelf with oil cans, rag and toolbox - 270 degrees",
+        "9": "Coiled service hose with brass couplings - 0 degrees",
+        "10": "Coiled service hose with brass couplings - 90 degrees",
+        "11": "Coiled service hose with brass couplings - 180 degrees",
+        "12": "Coiled service hose with brass couplings - 270 degrees"
+      }
+    }
+  },
+  "aliases": {
+    "nv_split_wall_v112.sti": "nv_gate_wall_v109.sti",
+    "nv_split_ground50_v112.sti": "nv_gate_road50_v104.sti",
+    "nv_split_ground5_v112.sti": "nv_gate_ground5_v109.sti",
+    "nv_gate_road50_v105.sti": "nv_gate_road50_v104.sti",
+    "nv_gate_road78_v105.sti": "nv_gate_road78_v104.sti",
+    "gecko_props_s_v101.sti": "jt_objects.sti",
+    "gecko_props_v101.sti": "jt_objects.sti",
+    "jt_casino_v108.sti": "jt_casino.sti",
+    "jt_containers_s.sti": "jt_containers.sti",
+    "jt_containers_s_v109.sti": "jt_containers.sti",
+    "jt_containers_v108.sti": "jt_containers.sti",
+    "jt_firepit_v108.sti": "jt_firepit.sti",
+    "jt_gizsign_v108.sti": "jt_gizsign.sti",
+    "jt_objects_ovf_s_v113.sti": "jt_objects_ovf_v113.sti",
+    "jt_objects_s.sti": "jt_objects.sti",
+    "jt_objects_s_v109.sti": "jt_objects.sti",
+    "jt_objects_v109.sti": "jt_objects.sti",
+    "sandbag.sti": "ncr_sandbag.sti",
+    "nvq_props_73_v101.sti": "nv_props_73_v101.sti",
+    "nvq_props_75_v101.sti": "nv_props_75_v101.sti",
+    "nvq_props_76_v101.sti": "nv_props_76_v101.sti",
+    "nvq_props_77_v101.sti": "nv_props_77_v101.sti",
+    "nv_city_upper_c13c3_v102.sti": "nv_city_upper_c13c3_v103.sti",
+    "nv_city_upper_c13c7_v102.sti": "nv_city_upper_c13c7_v103.sti",
+    "nv_city_upper_c13c3_v104.sti": "nv_city_upper_c13c3_v103.sti",
+    "nv_city_upper_c13c7_v104.sti": "nv_city_upper_c13c7_v103.sti",
+    "nv_story_props_77_v102.sti": "nv_story_props_77_v101.sti",
+    "nv_ul_court_114_v110.sti": "nv_ul_court_114_v104.sti",
+    "nv_ul_court_114_v111.sti": "nv_ul_court_114_v104.sti",
+    "nv_ul_court_114_v114.sti": "nv_ul_court_114_v104.sti",
+    "nv_ul_court_115_v104.sti": "nv_ul_court_115_v114.sti",
+    "nv_ul_court_115_v110.sti": "nv_ul_court_115_v114.sti",
+    "nv_ul_court_115_v111.sti": "nv_ul_court_115_v114.sti",
+    "nv_planter_review_ground50_v103.sti": "nv_planter_ground50_v103.sti"
+  }
+}

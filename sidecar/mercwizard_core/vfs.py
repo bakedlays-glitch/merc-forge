@@ -474,7 +474,20 @@ def write_vfs_config_to_ja2_ini(
         import shutil
         shutil.copy2(ja2_ini_path, backup_path)
 
-    text = ja2_ini_path.read_text(encoding="utf-8", errors="replace")
+    # Byte-faithful round-trip: decode utf-8 strict, fall back to cp1252
+    # (the common legacy encoding for these INIs), re-encode with the
+    # SAME codec + the file's own EOL style. The previous read_text(
+    # errors="replace") + utf-8/LF rewrite silently mangled cp1252 bytes
+    # and converted CRLF→LF across the whole file.
+    raw = ja2_ini_path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252")
+        encoding = "cp1252"
+    eol = "\r\n" if "\r\n" in text else "\n"
+
     new_line = f"VFS_CONFIG_INI = {vfs_config_relative}"
     out_lines: list[str] = []
     replaced = False
@@ -499,7 +512,11 @@ def write_vfs_config_to_ja2_ini(
         if out_lines and out_lines[-1].strip():
             out_lines.append("")
         out_lines.append(new_line)
-    ja2_ini_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    # Atomic write: the bare write_text used here before could truncate
+    # Ja2.ini on a crash mid-write → the engine won't boot. Shared helper
+    # adds fsync + tmp-cleanup-on-error over a raw tmp+os.replace.
+    from .inject._atomic_xml import write_bytes_atomic
+    write_bytes_atomic(ja2_ini_path, (eol.join(out_lines) + eol).encode(encoding))
 
 
 def _read_vfs_config_path_from_ja2_ini(ja2_ini_path: Path) -> Optional[Path]:
@@ -534,7 +551,7 @@ def compute_vfs_mismatch(install_path: Path, vfs_config_path: Optional[Path]) ->
     """True when an install's bound `vfs_config_path` disagrees with the
     VFS_CONFIG_INI line in its live `Ja2.ini`.
 
-    Bug-review B5: after bug #11 the activation handshake stopped writing
+    After bug #11 the activation handshake stopped writing
     to Ja2.ini, so the user can register the same install folder twice
     (one entry bound to AIMNAS, one to Wildfire), activate the Wildfire
     entry, and end up editing the AIMNAS content layer because Ja2.ini

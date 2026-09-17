@@ -1,5 +1,11 @@
 # Setup Flow — Spec
 
+> **Shelved for v1.0.0-beta.4.** The flow is not exposed in the build:
+> the Hub tile, the offer banner and the `/setup` route were removed.
+> `frontend/src/routes/Setup.tsx` and `sidecar/routes/setup.py` are
+> still in the tree. This spec stays binding for whenever it returns.
+
+
 Binding spec for the `/setup` route + `routes/setup.py` (MercForge UI
 Phase 3, 2026-06-07). Owner decisions: build the full flow (MercForge may
 become the player-facing launcher); resolution step detects cnc-ddraw and

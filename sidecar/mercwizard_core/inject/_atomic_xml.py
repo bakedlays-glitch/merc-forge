@@ -1,6 +1,6 @@
 """Shared atomic XML write helper used by every XML injector.
 
-Pre-2026-05-15 the four XML writers (profiles_xml, aim_availability,
+Previously the four XML writers (profiles_xml, aim_availability,
 merc_availability, starting_gear) each had their own `_save(tree, path)`
 that did `etree.tostring(...) -> path.write_bytes(xml_bytes)` — non-atomic.
 A crash mid-write (power loss, OOM, AV truncation) left a half-written
@@ -14,6 +14,7 @@ for the binary EDTs.
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
 import tempfile
@@ -26,10 +27,15 @@ from lxml import etree
 # Require whitespace (or the closing `?>`) right after `xml` so this matches
 # only a real `<?xml ...?>` declaration, NOT a `<?xml-stylesheet ...?>` PI.
 _XML_DECL_RE = re.compile(r"^\s*<\?xml(?:\s[^>]*)?\?>\s*")
+_UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS = {
+    errno.EINVAL,
+    getattr(errno, "ENOTSUP", errno.EINVAL),
+    getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+}
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:
-    """Replace `path` with `data` atomically (same-dir tempfile + os.replace).
+    """Durably replace ``path`` with ``data`` via a same-directory tempfile.
 
     The bytes-level core of `save_atomic`, exposed for callers that have
     already serialized their content and must NOT round-trip it through an
@@ -65,13 +71,60 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
             tf.write(data)
             tf.flush()
             os.fsync(tf.fileno())
-        os.replace(tmp, path)
+        if os.name == "nt":
+            _replace_windows_write_through(Path(tmp), path)
+        else:
+            os.replace(tmp, path)
+            _fsync_file(path)
+            _fsync_directory(path.parent)
     except BaseException:
         try:
             os.unlink(tmp)
         except OSError:
             pass
         raise
+
+
+def _fsync_file(path: Path) -> None:
+    """Flush the replacement inode after its name has been installed."""
+    with path.open("rb") as target:
+        os.fsync(target.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Flush a POSIX directory entry where the platform supports it."""
+    try:
+        directory_fd = os.open(str(path), os.O_RDONLY)
+    except OSError as exc:
+        if exc.errno in _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS:
+            return
+        raise
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        if exc.errno not in _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS:
+            raise
+    finally:
+        os.close(directory_fd)
+
+
+def _replace_windows_write_through(source: Path, destination: Path) -> None:
+    """Atomically replace on NTFS and wait for the rename to reach storage."""
+    import ctypes
+
+    move_file_replace_existing = 0x1
+    move_file_write_through = 0x8
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    move_file = kernel32.MoveFileExW
+    move_file.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
+    move_file.restype = ctypes.c_int
+    if not move_file(
+        str(source),
+        str(destination),
+        move_file_replace_existing | move_file_write_through,
+    ):
+        error = ctypes.get_last_error()
+        raise OSError(error, f"MoveFileExW write-through replacement failed: {destination}")
 
 
 def save_atomic(

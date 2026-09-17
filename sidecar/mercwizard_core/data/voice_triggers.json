@@ -1,0 +1,1567 @@
+{
+  "source_sha256": {
+    "dialogue_header": "22ac70d49ce05f3735be9e39f8415118ce4cc3e0a00682b3ac02fcbd17c2d28a",
+    "profile_header": "4dc5415dc5b8ce876d7a768e2c70a4426bfb691e71718912189d6d4f73ad2640"
+  },
+  "profile_types": {
+    "NONE": 0,
+    "AIM": 1,
+    "MERC": 2,
+    "RPC": 3,
+    "NPC": 4,
+    "VEHICLE": 5,
+    "IMP": 6
+  },
+  "triggers": [
+    {
+      "slot": 0,
+      "aliases": [
+        {
+          "name": "QUOTE_SEE_ENEMY",
+          "meaning": "used when we spot an enemy",
+          "source_comment": "used when we spot an enemy"
+        }
+      ]
+    },
+    {
+      "slot": 1,
+      "aliases": [
+        {
+          "name": "QUOTE_SEE_ENEMY_VARIATION",
+          "meaning": "used when we spot an enemy in this sector for the first time",
+          "source_comment": "used when we spot an enemy in this sector for the first time"
+        }
+      ]
+    },
+    {
+      "slot": 2,
+      "aliases": [
+        {
+          "name": "QUOTE_IN_TROUBLE_SLASH_IN_BATTLE",
+          "meaning": "used when we spot an enemy and they significantly outnumber us",
+          "source_comment": "used when we spot an enemy and they significantly outnumber us"
+        }
+      ]
+    },
+    {
+      "slot": 3,
+      "aliases": [
+        {
+          "name": "QUOTE_SEE_CREATURE",
+          "meaning": "used when we spot a bug",
+          "source_comment": "used when we spot a bug"
+        }
+      ]
+    },
+    {
+      "slot": 4,
+      "aliases": [
+        {
+          "name": "QUOTE_FIRSTTIME_GAME_SEE_CREATURE",
+          "meaning": "used when we spot a bug for the first time",
+          "source_comment": "used when we spot a bug for the first time"
+        }
+      ]
+    },
+    {
+      "slot": 5,
+      "aliases": [
+        {
+          "name": "QUOTE_TRACES_OF_CREATURE_ATTACK",
+          "meaning": "randomly played during the bug quest in the tunnels",
+          "source_comment": "randomly played during the bug quest in the tunnels"
+        }
+      ]
+    },
+    {
+      "slot": 6,
+      "aliases": [
+        {
+          "name": "QUOTE_HEARD_SOMETHING",
+          "meaning": "we heard a suspicious sound",
+          "source_comment": "we heard a suspicious sound"
+        }
+      ]
+    },
+    {
+      "slot": 7,
+      "aliases": [
+        {
+          "name": "QUOTE_SMELLED_CREATURE",
+          "meaning": "randomly played during the bug quest in the tunnels",
+          "source_comment": "randomly played during the bug quest in the tunnels"
+        }
+      ]
+    },
+    {
+      "slot": 8,
+      "aliases": [
+        {
+          "name": "QUOTE_WEARY_SLASH_SUSPUCIOUS",
+          "meaning": "we are weary, because some non-militia NPC has a rocketlauncher or cannon",
+          "source_comment": "we are weary, because some non-militia NPC has a rocketlauncher or cannon"
+        }
+      ]
+    },
+    {
+      "slot": 9,
+      "aliases": [
+        {
+          "name": "QUOTE_WORRIED_ABOUT_CREATURE_PRESENCE",
+          "meaning": "randomly played during the bug quest in the tunnels",
+          "source_comment": "randomly played during the bug quest in the tunnels"
+        }
+      ]
+    },
+    {
+      "slot": 10,
+      "aliases": [
+        {
+          "name": "QUOTE_ATTACKED_BY_MULTIPLE_CREATURES",
+          "meaning": "used when we spot several bugs",
+          "source_comment": "used when we spot several bugs"
+        }
+      ]
+    },
+    {
+      "slot": 11,
+      "aliases": [
+        {
+          "name": "QUOTE_SPOTTED_SOMETHING_ONE",
+          "meaning": "spotted an item",
+          "source_comment": "spotted an item"
+        }
+      ]
+    },
+    {
+      "slot": 12,
+      "aliases": [
+        {
+          "name": "QUOTE_SPOTTED_SOMETHING_TWO",
+          "meaning": "spotted an item",
+          "source_comment": "spotted an item"
+        }
+      ]
+    },
+    {
+      "slot": 13,
+      "aliases": [
+        {
+          "name": "QUOTE_OUT_OF_AMMO",
+          "meaning": "gun is empty",
+          "source_comment": "gun is empty"
+        }
+      ]
+    },
+    {
+      "slot": 14,
+      "aliases": [
+        {
+          "name": "QUOTE_SERIOUSLY_WOUNDED",
+          "meaning": "lose life from bleeding below 15 HP",
+          "source_comment": "lose life from bleeding below 15 HP"
+        }
+      ]
+    },
+    {
+      "slot": 15,
+      "aliases": [
+        {
+          "name": "QUOTE_BUDDY_1_KILLED",
+          "meaning": "buddy 1 died",
+          "source_comment": "buddy 1 died"
+        }
+      ]
+    },
+    {
+      "slot": 16,
+      "aliases": [
+        {
+          "name": "QUOTE_BUDDY_2_KILLED",
+          "meaning": "buddy 2 died",
+          "source_comment": "buddy 2 died"
+        }
+      ]
+    },
+    {
+      "slot": 17,
+      "aliases": [
+        {
+          "name": "QUOTE_LEARNED_TO_LIKE_MERC_KILLED",
+          "meaning": "learn to like died",
+          "source_comment": "learn to like died"
+        }
+      ]
+    },
+    {
+      "slot": 18,
+      "aliases": [
+        {
+          "name": "QUOTE_FORGETFULL_SLASH_CONFUSED",
+          "meaning": "currently not used",
+          "source_comment": "currently not used"
+        }
+      ]
+    },
+    {
+      "slot": 19,
+      "aliases": [
+        {
+          "name": "QUOTE_JAMMED_GUN",
+          "meaning": "gun is jammed",
+          "source_comment": "gun is jammed"
+        }
+      ]
+    },
+    {
+      "slot": 20,
+      "aliases": [
+        {
+          "name": "QUOTE_UNDER_HEAVY_FIRE",
+          "meaning": "heavily suppressed",
+          "source_comment": "heavily suppressed"
+        }
+      ]
+    },
+    {
+      "slot": 21,
+      "aliases": [
+        {
+          "name": "QUOTE_TAKEN_A_BREATING",
+          "meaning": "took a lot of hits this turn",
+          "source_comment": "took a lot of hits this turn"
+        }
+      ]
+    },
+    {
+      "slot": 22,
+      "aliases": [
+        {
+          "name": "QUOTE_CLOSE_CALL",
+          "meaning": "almost hit by a projectile",
+          "source_comment": "almost hit by a projectile"
+        }
+      ]
+    },
+    {
+      "slot": 23,
+      "aliases": [
+        {
+          "name": "QUOTE_NO_LINE_OF_FIRE",
+          "meaning": "really bad chance to hit target",
+          "source_comment": "really bad chance to hit target"
+        }
+      ]
+    },
+    {
+      "slot": 24,
+      "aliases": [
+        {
+          "name": "QUOTE_STARTING_TO_BLEED",
+          "meaning": "we are bleeding",
+          "source_comment": "we are bleeding"
+        }
+      ]
+    },
+    {
+      "slot": 25,
+      "aliases": [
+        {
+          "name": "QUOTE_NEED_SLEEP",
+          "meaning": "going to sleep",
+          "source_comment": "going to sleep"
+        }
+      ]
+    },
+    {
+      "slot": 26,
+      "aliases": [
+        {
+          "name": "QUOTE_OUT_OF_BREATH",
+          "meaning": "very low on breath points",
+          "source_comment": "very low on breath points"
+        }
+      ]
+    },
+    {
+      "slot": 27,
+      "aliases": [
+        {
+          "name": "QUOTE_KILLED_AN_ENEMY",
+          "meaning": "killed an enemy",
+          "source_comment": "killed an enemy"
+        }
+      ]
+    },
+    {
+      "slot": 28,
+      "aliases": [
+        {
+          "name": "QUOTE_KILLED_A_CREATURE",
+          "meaning": "killed an bug",
+          "source_comment": "killed an bug"
+        }
+      ]
+    },
+    {
+      "slot": 29,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_1",
+          "meaning": "complain about hated 1",
+          "source_comment": "complain about hated 1"
+        }
+      ]
+    },
+    {
+      "slot": 30,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_2",
+          "meaning": "complain about hated 2",
+          "source_comment": "complain about hated 2"
+        }
+      ]
+    },
+    {
+      "slot": 31,
+      "aliases": [
+        {
+          "name": "QUOTE_LEARNED_TO_HATE_MERC",
+          "meaning": "complain about learn to hate",
+          "source_comment": "complain about learn to hate"
+        }
+      ]
+    },
+    {
+      "slot": 32,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_KILLED_MIKE",
+          "meaning": "AIM: killed Mike",
+          "source_comment": "AIM: killed Mike"
+        },
+        {
+          "name": "QUOTE_MERC_QUIT_LEARN_TO_HATE",
+          "meaning": "MERC: quit because of guy we learned to hate",
+          "source_comment": "MERC: quit because of guy we learned to hate"
+        }
+      ]
+    },
+    {
+      "slot": 33,
+      "aliases": [
+        {
+          "name": "QUOTE_HEADSHOT",
+          "meaning": "complain about head explosion/corpse being disgusting",
+          "source_comment": "complain about head explosion/corpse being disgusting"
+        }
+      ]
+    },
+    {
+      "slot": 34,
+      "aliases": [
+        {
+          "name": "QUOTE_PERSONALITY_TRAIT",
+          "meaning": "disability kicks in (forgetfulness, afraid of heights etc.)",
+          "source_comment": "disability kicks in (forgetfulness, afraid of heights etc.)"
+        }
+      ]
+    },
+    {
+      "slot": 35,
+      "aliases": [
+        {
+          "name": "QUOTE_ASSIGNMENT_COMPLETE",
+          "meaning": "assignment is complete, so we tell the player",
+          "source_comment": "assignment is complete, so we tell the player"
+        }
+      ]
+    },
+    {
+      "slot": 36,
+      "aliases": [
+        {
+          "name": "QUOTE_REFUSING_ORDER",
+          "meaning": "refuse to do action to target",
+          "source_comment": "refuse to do action to target"
+        }
+      ]
+    },
+    {
+      "slot": 37,
+      "aliases": [
+        {
+          "name": "QUOTE_KILLING_DEIDRANNA",
+          "meaning": "killed (or witnessed death of) Deidranna",
+          "source_comment": "killed (or witnessed death of) Deidranna"
+        }
+      ]
+    },
+    {
+      "slot": 38,
+      "aliases": [
+        {
+          "name": "QUOTE_KILLING_QUEEN",
+          "meaning": "killed (or witnessed death of) bug queen",
+          "source_comment": "killed (or witnessed death of) bug queen"
+        }
+      ]
+    },
+    {
+      "slot": 39,
+      "aliases": [
+        {
+          "name": "QUOTE_ANNOYING_PC",
+          "meaning": "we dislike the NPC we just talked to",
+          "source_comment": "we dislike the NPC we just talked to"
+        }
+      ]
+    },
+    {
+      "slot": 40,
+      "aliases": [
+        {
+          "name": "QUOTE_STARTING_TO_WHINE",
+          "meaning": "complain: low morale",
+          "source_comment": "complain: low morale"
+        }
+      ]
+    },
+    {
+      "slot": 41,
+      "aliases": [
+        {
+          "name": "QUOTE_NEGATIVE_COMPANY",
+          "meaning": "randomly played when we talk to a merc",
+          "source_comment": "randomly played when we talk to a merc"
+        }
+      ]
+    },
+    {
+      "slot": 42,
+      "aliases": [
+        {
+          "name": "QUOTE_AIR_RAID",
+          "meaning": "notify player of air raid / enemy helicopter spotted",
+          "source_comment": "notify player of air raid / enemy helicopter spotted"
+        }
+      ]
+    },
+    {
+      "slot": 43,
+      "aliases": [
+        {
+          "name": "QUOTE_WHINE_EQUIPMENT",
+          "meaning": "complain about quality of equipment",
+          "source_comment": "complain about quality of equipment"
+        }
+      ]
+    },
+    {
+      "slot": 44,
+      "aliases": [
+        {
+          "name": "QUOTE_SOCIAL_TRAIT",
+          "meaning": "randomly played when we talk to a merc",
+          "source_comment": "randomly played when we talk to a merc"
+        }
+      ]
+    },
+    {
+      "slot": 45,
+      "aliases": [
+        {
+          "name": "QUOTE_PASSING_DISLIKE",
+          "meaning": "randomly played when we talk to a merc",
+          "source_comment": "randomly played when we talk to a merc"
+        }
+      ]
+    },
+    {
+      "slot": 46,
+      "aliases": [
+        {
+          "name": "QUOTE_EXPERIENCE_GAIN",
+          "meaning": "gained stats",
+          "source_comment": "gained stats"
+        }
+      ]
+    },
+    {
+      "slot": 47,
+      "aliases": [
+        {
+          "name": "QUOTE_REFUSE_TO_EATFOOD",
+          "meaning": "refuse to eat food",
+          "source_comment": "refuse to eat food"
+        }
+      ]
+    },
+    {
+      "slot": 48,
+      "aliases": [
+        {
+          "name": "QUOTE_REFUSE_TO_SMOKE",
+          "meaning": "refuse to smoke",
+          "source_comment": "refuse to smoke"
+        }
+      ]
+    },
+    {
+      "slot": 49,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_1_ARRIVES",
+          "meaning": "AIM: hated 1 arrives",
+          "source_comment": "AIM: hated 1 arrives"
+        },
+        {
+          "name": "QUOTE_MERC_QUIT_HATED_1",
+          "meaning": "MERC/NPC: quit because of hated 1",
+          "source_comment": "MERC/NPC: quit because of hated 1"
+        }
+      ]
+    },
+    {
+      "slot": 50,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_2_ARRIVES",
+          "meaning": "AIM: hated 2 arrives",
+          "source_comment": "AIM: hated 2 arrives"
+        },
+        {
+          "name": "QUOTE_MERC_QUIT_HATED_2",
+          "meaning": "MERC/NPC: quit because of hated 2",
+          "source_comment": "MERC/NPC: quit because of hated 2"
+        }
+      ]
+    },
+    {
+      "slot": 51,
+      "aliases": [
+        {
+          "name": "QUOTE_BUDDY_1_GOOD",
+          "meaning": "compliment buddy 1",
+          "source_comment": "compliment buddy 1"
+        }
+      ]
+    },
+    {
+      "slot": 52,
+      "aliases": [
+        {
+          "name": "QUOTE_BUDDY_2_GOOD",
+          "meaning": "compliment buddy 2",
+          "source_comment": "compliment buddy 2"
+        }
+      ]
+    },
+    {
+      "slot": 53,
+      "aliases": [
+        {
+          "name": "QUOTE_LEARNED_TO_LIKE_WITNESSED",
+          "meaning": "compliment learn to like",
+          "source_comment": "compliment learn to like"
+        }
+      ]
+    },
+    {
+      "slot": 54,
+      "aliases": [
+        {
+          "name": "QUOTE_DELAY_CONTRACT_RENEWAL",
+          "meaning": "currently unused",
+          "source_comment": "currently unused"
+        },
+        {
+          "name": "QUOTE_NOT_GETTING_PAID",
+          "meaning": "MERC: complain about not being paid",
+          "source_comment": "MERC: complain about not being paid"
+        }
+      ]
+    },
+    {
+      "slot": 55,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_SEEN_MIKE",
+          "meaning": "AIM/MERC: see Mike",
+          "source_comment": "AIM/MERC: see Mike"
+        },
+        {
+          "name": "QUOTE_PC_DROPPED_OMERTA",
+          "meaning": "IMP: airdop in Omerta",
+          "source_comment": "IMP: airdop in Omerta"
+        },
+        {
+          "name": "QUOTE_NOT_GETTING_PAID_RPC",
+          "meaning": "RPC: complain about not being paid",
+          "source_comment": "RPC: complain about not being paid"
+        }
+      ]
+    },
+    {
+      "slot": 56,
+      "aliases": [
+        {
+          "name": "QUOTE_BLINDED",
+          "meaning": "an attack has blinded us",
+          "source_comment": "an attack has blinded us"
+        }
+      ]
+    },
+    {
+      "slot": 57,
+      "aliases": [
+        {
+          "name": "QUOTE_DEFINITE_CANT_DO",
+          "meaning": "we are hopeless at this skill check",
+          "source_comment": "we are hopeless at this skill check"
+        }
+      ]
+    },
+    {
+      "slot": 58,
+      "aliases": [
+        {
+          "name": "QUOTE_LISTEN_LIKABLE_PERSON",
+          "meaning": "we like the NPC we just talked to",
+          "source_comment": "we like the NPC we just talked to"
+        }
+      ]
+    },
+    {
+      "slot": 59,
+      "aliases": [
+        {
+          "name": "QUOTE_ENEMY_PRESENCE",
+          "meaning": "prior to combat, notify us of enemy presence",
+          "source_comment": "prior to combat, notify us of enemy presence"
+        }
+      ]
+    },
+    {
+      "slot": 60,
+      "aliases": [
+        {
+          "name": "QUOTE_WARNING_OUTSTANDING_ENEMY_AFTER_RT",
+          "meaning": "realtime has begun, but hostiles are still around",
+          "source_comment": "realtime has begun, but hostiles are still around"
+        }
+      ]
+    },
+    {
+      "slot": 61,
+      "aliases": [
+        {
+          "name": "QUOTE_FOUND_SOMETHING_SPECIAL",
+          "meaning": "we picked up an item we think is cool (once per day)",
+          "source_comment": "we picked up an item we think is cool (once per day)"
+        }
+      ]
+    },
+    {
+      "slot": 62,
+      "aliases": [
+        {
+          "name": "QUOTE_SATISFACTION_WITH_GUN_AFTER_KILL",
+          "meaning": "we are happy with the gun we are currently using (once per day)",
+          "source_comment": "we are happy with the gun we are currently using (once per day)"
+        }
+      ]
+    },
+    {
+      "slot": 63,
+      "aliases": [
+        {
+          "name": "QUOTE_SPOTTED_JOEY",
+          "meaning": "we spotted Joey during his quest",
+          "source_comment": "we spotted Joey during his quest"
+        }
+      ]
+    },
+    {
+      "slot": 64,
+      "aliases": [
+        {
+          "name": "QUOTE_RESPONSE_TO_MIGUEL_SLASH_QUOTE_MERC_OR_RPC_LETGO",
+          "meaning": "AIM: answer to Miguel speech, MERC/RPC: departing comment upon contract end",
+          "source_comment": "AIM: answer to Miguel speech, MERC/RPC: departing comment upon contract end"
+        }
+      ]
+    },
+    {
+      "slot": 65,
+      "aliases": [
+        {
+          "name": "QUOTE_SECTOR_SAFE",
+          "meaning": "we won the battle",
+          "source_comment": "we won the battle"
+        }
+      ]
+    },
+    {
+      "slot": 66,
+      "aliases": [
+        {
+          "name": "QUOTE_STUFF_MISSING_DRASSEN",
+          "meaning": "notice shipment in Drassen was stolen",
+          "source_comment": "notice shipment in Drassen was stolen"
+        }
+      ]
+    },
+    {
+      "slot": 67,
+      "aliases": [
+        {
+          "name": "QUOTE_KILLED_FACTORY_MANAGER",
+          "meaning": "killed Doreen",
+          "source_comment": "killed Doreen"
+        }
+      ]
+    },
+    {
+      "slot": 68,
+      "aliases": [
+        {
+          "name": "QUOTE_SPOTTED_BLOODCAT",
+          "meaning": "used when we spot a bloodcat",
+          "source_comment": "used when we spot a bloodcat"
+        }
+      ]
+    },
+    {
+      "slot": 69,
+      "aliases": [
+        {
+          "name": "QUOTE_END_GAME_COMMENT",
+          "meaning": "end speech after game is won",
+          "source_comment": "end speech after game is won"
+        }
+      ]
+    },
+    {
+      "slot": 70,
+      "aliases": [
+        {
+          "name": "QUOTE_ENEMY_RETREATED",
+          "meaning": "we won the battle due to enemy retreat",
+          "source_comment": "we won the battle due to enemy retreat"
+        }
+      ]
+    },
+    {
+      "slot": 71,
+      "aliases": [
+        {
+          "name": "QUOTE_GOING_TO_AUTO_SLEEP",
+          "meaning": "currently not used",
+          "source_comment": "currently not used"
+        }
+      ]
+    },
+    {
+      "slot": 72,
+      "aliases": [
+        {
+          "name": "QUOTE_WORK_UP_AND_RETURNING_TO_ASSIGNMENT",
+          "meaning": "woke up from auto sleep, going back to work",
+          "source_comment": "woke up from auto sleep, going back to work"
+        }
+      ]
+    },
+    {
+      "slot": 73,
+      "aliases": [
+        {
+          "name": "QUOTE_ME_TOO",
+          "meaning": "me too quote, in agreement with whatever the merc previous said",
+          "source_comment": "me too quote, in agreement with whatever the merc previous said"
+        }
+      ]
+    },
+    {
+      "slot": 74,
+      "aliases": [
+        {
+          "name": "QUOTE_USELESS_ITEM",
+          "meaning": "tried working the item in hand, and it's broken",
+          "source_comment": "tried working the item in hand, and it's broken"
+        }
+      ]
+    },
+    {
+      "slot": 75,
+      "aliases": [
+        {
+          "name": "QUOTE_BOOBYTRAP_ITEM",
+          "meaning": "item/door/etc. is boobytrapped",
+          "source_comment": "item/door/etc. is boobytrapped"
+        }
+      ]
+    },
+    {
+      "slot": 76,
+      "aliases": [
+        {
+          "name": "QUOTE_SUSPICIOUS_GROUND",
+          "meaning": "found mine etc. on floor tile",
+          "source_comment": "found mine etc. on floor tile"
+        }
+      ]
+    },
+    {
+      "slot": 77,
+      "aliases": [
+        {
+          "name": "QUOTE_DROWNING",
+          "meaning": "currently not used, intended upon drowning",
+          "source_comment": "currently not used, intended upon drowning"
+        }
+      ]
+    },
+    {
+      "slot": 78,
+      "aliases": [
+        {
+          "name": "QUOTE_MERC_REACHED_DESTINATION",
+          "meaning": "strategic travel: arrived at destination",
+          "source_comment": "strategic travel: arrived at destination"
+        }
+      ]
+    },
+    {
+      "slot": 79,
+      "aliases": [
+        {
+          "name": "QUOTE_JA2UB_LAPTOP_FIXED",
+          "meaning": "JA2UB: played when the laptop is fixed",
+          "source_comment": "JA2UB: played when the laptop is fixed"
+        }
+      ]
+    },
+    {
+      "slot": 80,
+      "aliases": [
+        {
+          "name": "QUOTE_REPUTATION_REFUSAL",
+          "meaning": "AIM: refuse to be hired due to bad player reputation",
+          "source_comment": "80\t\t\t\t\t\t\t\t// AIM: refuse to be hired due to bad player reputation"
+        },
+        {
+          "name": "QUOTE_NON_AIM_BUDDY_3_KILLED",
+          "meaning": "not AIM: buddy 3 died",
+          "source_comment": "not AIM: buddy 3 died"
+        }
+      ]
+    },
+    {
+      "slot": 81,
+      "aliases": [
+        {
+          "name": "QUOTE_DEATH_RATE_REFUSAL",
+          "meaning": "AIM: refuse to be hired due to high death rate",
+          "source_comment": "= 81,\t\t\t\t\t\t\t// AIM: refuse to be hired due to high death rate"
+        },
+        {
+          "name": "QUOTE_NON_AIM_BUDDY_4_KILLED",
+          "meaning": "not AIM: buddy 4 died",
+          "source_comment": "not AIM: buddy 4 died"
+        }
+      ]
+    },
+    {
+      "slot": 82,
+      "aliases": [
+        {
+          "name": "QUOTE_LAME_REFUSAL",
+          "meaning": "AIM: refuse to be hired due not being in the mood (hangover etc.)",
+          "source_comment": "= 82,\t\t\t\t\t\t\t\t\t// AIM: refuse to be hired due not being in the mood (hangover etc.)"
+        },
+        {
+          "name": "QUOTE_NON_AIM_BUDDY_5_KILLED",
+          "meaning": "not AIM: buddy 5 died",
+          "source_comment": "not AIM: buddy 5 died"
+        }
+      ]
+    },
+    {
+      "slot": 83,
+      "aliases": [
+        {
+          "name": "QUOTE_WONT_RENEW_CONTRACT_LAME_REFUSAL",
+          "meaning": "AIM: refuse to be renew contract due to already having signed elsewhere",
+          "source_comment": "=83,\t\t\t\t// AIM: refuse to be renew contract due to already having signed elsewhere"
+        },
+        {
+          "name": "QUOTE_NON_AIM_HATED_3",
+          "meaning": "not AIM: complain about hated 3",
+          "source_comment": "not AIM: complain about hated 3"
+        }
+      ]
+    },
+    {
+      "slot": 84,
+      "aliases": [
+        {
+          "name": "QUOTE_ANSWERING_MACHINE_MSG",
+          "meaning": "AIM: message that plays on the answering machine",
+          "source_comment": "= 84,\t\t\t\t\t\t\t\t// AIM: message that plays on the answering machine"
+        },
+        {
+          "name": "QUOTE_NON_AIM_HATED_4",
+          "meaning": "not AIM: complain about hated 4",
+          "source_comment": "not AIM: complain about hated 4"
+        }
+      ]
+    },
+    {
+      "slot": 85,
+      "aliases": [
+        {
+          "name": "QUOTE_DEPARTING_COMMENT_CONTRACT_NOT_RENEWED_OR_48_OR_MORE",
+          "meaning": "AIM: warn that contract is >= 48 hours, would like to renew",
+          "source_comment": "=85,\t// AIM: warn that contract is >= 48 hours, would like to renew"
+        },
+        {
+          "name": "QUOTE_NON_AIM_HATED_5",
+          "meaning": "not AIM: complain about hated 5",
+          "source_comment": "not AIM: complain about hated 5"
+        }
+      ]
+    },
+    {
+      "slot": 86,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_1_ON_TEAM",
+          "meaning": "AIM: played when we refuse to be hired because hated 1 is present and bHatedTime < 24 (else play QUOTE_HATED_1_ON_TEAM_LONGTIMETOHATE)",
+          "source_comment": "= 86,\t\t\t\t\t\t\t\t// AIM: played when we refuse to be hired because hated 1 is present and bHatedTime < 24 (else play QUOTE_HATED_1_ON_TEAM_LONGTIMETOHATE)"
+        },
+        {
+          "name": "QUOTE_NON_AIM_BUDDY_3_GOOD",
+          "meaning": "not AIM: compliment buddy 3",
+          "source_comment": "not AIM: compliment buddy 3"
+        }
+      ]
+    },
+    {
+      "slot": 87,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_2_ON_TEAM",
+          "meaning": "AIM: played when we refuse to be hired because hated 2 is present and bHatedTime < 24 (else play QUOTE_HATED_2_ON_TEAM_LONGTIMETOHATE)",
+          "source_comment": "= 87,\t\t\t\t\t\t\t\t// AIM: played when we refuse to be hired because hated 2 is present and bHatedTime < 24 (else play QUOTE_HATED_2_ON_TEAM_LONGTIMETOHATE)"
+        },
+        {
+          "name": "QUOTE_NON_AIM_BUDDY_4_GOOD",
+          "meaning": "not AIM: compliment buddy 4",
+          "source_comment": "not AIM: compliment buddy 4"
+        }
+      ]
+    },
+    {
+      "slot": 88,
+      "aliases": [
+        {
+          "name": "QUOTE_LEARNED_TO_HATE_MERC_ON_TEAM",
+          "meaning": "AIM: played when we refuse to be hired because learn to hate is present",
+          "source_comment": "= 88,\t\t\t\t\t// AIM: played when we refuse to be hired because learn to hate is present"
+        },
+        {
+          "name": "QUOTE_NON_AIM_BUDDY_5_GOOD",
+          "meaning": "not AIM: compliment buddy 5",
+          "source_comment": "not AIM: compliment buddy 5"
+        }
+      ]
+    },
+    {
+      "slot": 89,
+      "aliases": [
+        {
+          "name": "QUOTE_CONTRACTS_OVER",
+          "meaning": "tell player that contract is over",
+          "source_comment": "= 89,\t\t\t\t\t\t\t\t// tell player that contract is over"
+        },
+        {
+          "name": "QUOTE_MERC_QUIT_HATED_3",
+          "meaning": "MERC/RPC: quit because of hated 3",
+          "source_comment": "MERC/RPC: quit because of hated 3"
+        }
+      ]
+    },
+    {
+      "slot": 90,
+      "aliases": [
+        {
+          "name": "QUOTE_ACCEPT_CONTRACT_RENEWAL",
+          "meaning": "AIM: renew contract",
+          "source_comment": "=90,\t\t\t\t\t\t// AIM: renew contract"
+        },
+        {
+          "name": "QUOTE_MERC_QUIT_HATED_4",
+          "meaning": "MERC/RPC: quit because of hated 4",
+          "source_comment": "MERC/RPC: quit because of hated 4"
+        }
+      ]
+    },
+    {
+      "slot": 91,
+      "aliases": [
+        {
+          "name": "QUOTE_CONTRACT_ACCEPTANCE",
+          "meaning": "AIM: agree to contract",
+          "source_comment": "=91,\t\t\t\t\t\t\t// AIM: agree to contract"
+        },
+        {
+          "name": "QUOTE_MERC_QUIT_HATED_5",
+          "meaning": "MERC/RPC: quit because of hated 5",
+          "source_comment": "MERC/RPC: quit because of hated 5"
+        }
+      ]
+    },
+    {
+      "slot": 92,
+      "aliases": [
+        {
+          "name": "QUOTE_JOINING_CAUSE_BUDDY_1_ON_TEAM",
+          "meaning": "agree to contract because buddy 1 is here",
+          "source_comment": "= 92,\t\t\t\t// agree to contract because buddy 1 is here"
+        }
+      ]
+    },
+    {
+      "slot": 93,
+      "aliases": [
+        {
+          "name": "QUOTE_JOINING_CAUSE_BUDDY_2_ON_TEAM",
+          "meaning": "agree to contract because buddy 2 is here",
+          "source_comment": "= 93,\t\t\t\t// agree to contract because buddy 2 is here"
+        }
+      ]
+    },
+    {
+      "slot": 94,
+      "aliases": [
+        {
+          "name": "QUOTE_JOINING_CAUSE_LEARNED_TO_LIKE_BUDDY_ON_TEAM",
+          "meaning": "agree to contract because learn to like is here",
+          "source_comment": "= 94,\t// agree to contract because learn to like is here"
+        }
+      ]
+    },
+    {
+      "slot": 95,
+      "aliases": [
+        {
+          "name": "QUOTE_REFUSAL_RENEW_DUE_TO_MORALE",
+          "meaning": "AIM: refuse to be renew due to bad player reputation or morale",
+          "source_comment": "= 95,\t\t\t\t\t// AIM: refuse to be renew due to bad player reputation or morale"
+        }
+      ]
+    },
+    {
+      "slot": 96,
+      "aliases": [
+        {
+          "name": "QUOTE_PRECEDENT_TO_REPEATING_ONESELF",
+          "meaning": "say that you're repeating yourself",
+          "source_comment": "= 96,\t\t\t\t// say that you're repeating yourself"
+        }
+      ]
+    },
+    {
+      "slot": 97,
+      "aliases": [
+        {
+          "name": "QUOTE_REFUSAL_TO_JOIN_LACK_OF_FUNDS",
+          "meaning": "player can't afford hiring us",
+          "source_comment": "= 97,\t\t\t\t// player can't afford hiring us"
+        }
+      ]
+    },
+    {
+      "slot": 98,
+      "aliases": [
+        {
+          "name": "QUOTE_DEPART_COMMET_CONTRACT_NOT_RENEWED_OR_TERMINATED_UNDER_48",
+          "meaning": "AIM: warn that contract is < 48 hours, would like to renew",
+          "source_comment": "= 98,\t// AIM: warn that contract is < 48 hours, would like to renew"
+        }
+      ]
+    },
+    {
+      "slot": 99,
+      "aliases": [
+        {
+          "name": "QUOTE_DEATH_RATE_RENEWAL",
+          "meaning": "AIM: refuse to be renew due to high death rate",
+          "source_comment": "AIM: refuse to be renew due to high death rate"
+        }
+      ]
+    },
+    {
+      "slot": 100,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_1_ON_TEAM_WONT_RENEW",
+          "meaning": "AIM: refuse to renew contract because hated 1 is here",
+          "source_comment": "AIM: refuse to renew contract because hated 1 is here"
+        }
+      ]
+    },
+    {
+      "slot": 101,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_2_ON_TEAM_WONT_RENEW",
+          "meaning": "AIM: refuse to renew contract because hated 2 is here",
+          "source_comment": "AIM: refuse to renew contract because hated 2 is here"
+        }
+      ]
+    },
+    {
+      "slot": 102,
+      "aliases": [
+        {
+          "name": "QUOTE_LEARNED_TO_HATE_ON_TEAM_WONT_RENEW",
+          "meaning": "AIM: refuse to renew contract because learn to hate is here",
+          "source_comment": "AIM: refuse to renew contract because learn to hate is here"
+        }
+      ]
+    },
+    {
+      "slot": 103,
+      "aliases": [
+        {
+          "name": "QUOTE_RENEWING_CAUSE_BUDDY_1_ON_TEAM",
+          "meaning": "renew contract only because buddy 1 is around",
+          "source_comment": "renew contract only because buddy 1 is around"
+        }
+      ]
+    },
+    {
+      "slot": 104,
+      "aliases": [
+        {
+          "name": "QUOTE_RENEWING_CAUSE_BUDDY_2_ON_TEAM",
+          "meaning": "renew contract only because buddy 2 is around",
+          "source_comment": "renew contract only because buddy 2 is around"
+        }
+      ]
+    },
+    {
+      "slot": 105,
+      "aliases": [
+        {
+          "name": "QUOTE_RENEWING_CAUSE_LEARNED_TO_LIKE_BUDDY_ON_TEAM",
+          "meaning": "renew contract only because learn to like is around",
+          "source_comment": "renew contract only because learn to like is around"
+        }
+      ]
+    },
+    {
+      "slot": 106,
+      "aliases": [
+        {
+          "name": "QUOTE_PRECEDENT_TO_REPEATING_ONESELF_RENEW",
+          "meaning": "repeat yourself during renewal process",
+          "source_comment": "repeat yourself during renewal process"
+        }
+      ]
+    },
+    {
+      "slot": 107,
+      "aliases": [
+        {
+          "name": "QUOTE_UB_HANDLE_BLOODCATDEATHS",
+          "meaning": "JA2UB: kill bloodcat quest fulfilled",
+          "source_comment": "JA2UB: kill bloodcat quest fulfilled"
+        }
+      ]
+    },
+    {
+      "slot": 108,
+      "aliases": [
+        {
+          "name": "QUOTE_GREETING",
+          "meaning": "AIM hiring screen: greet the player",
+          "source_comment": "AIM hiring screen: greet the player"
+        }
+      ]
+    },
+    {
+      "slot": 109,
+      "aliases": [
+        {
+          "name": "QUOTE_SMALL_TALK",
+          "meaning": "AIM hiring screen: player says nothing, so do a bit of small talk",
+          "source_comment": "AIM hiring screen: player says nothing, so do a bit of small talk"
+        }
+      ]
+    },
+    {
+      "slot": 110,
+      "aliases": [
+        {
+          "name": "QUOTE_IMPATIENT_QUOTE",
+          "meaning": "AIM hiring screen: player says nothing, so get impatient / easter egg: female mercs complain about player trying to abuse the 'strip' command",
+          "source_comment": "AIM hiring screen: player says nothing, so get impatient / easter egg: female mercs complain about player trying to abuse the 'strip' command"
+        }
+      ]
+    },
+    {
+      "slot": 111,
+      "aliases": [
+        {
+          "name": "QUOTE_LENGTH_OF_CONTRACT",
+          "meaning": "AIM hiring screen: ask player what contract terms they want",
+          "source_comment": "AIM hiring screen: ask player what contract terms they want"
+        }
+      ]
+    },
+    {
+      "slot": 112,
+      "aliases": [
+        {
+          "name": "QUOTE_COMMENT_BEFORE_HANG_UP",
+          "meaning": "AIM hiring screen: player says nothing, we are fed up so end the call",
+          "source_comment": "AIM hiring screen: player says nothing, we are fed up so end the call"
+        }
+      ]
+    },
+    {
+      "slot": 113,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_1_ON_TEAM_LONGTIMETOHATE",
+          "meaning": "AIM: played when we refuse to be hired because hated 1 is present and bHatedTime >= 24 (else play QUOTE_HATED_1_ON_TEAM)",
+          "source_comment": "AIM: played when we refuse to be hired because hated 1 is present and bHatedTime >= 24 (else play QUOTE_HATED_1_ON_TEAM)"
+        }
+      ]
+    },
+    {
+      "slot": 114,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_2_ON_TEAM_LONGTIMETOHATE",
+          "meaning": "AIM: played when we refuse to be hired because hated 2 is present and bHatedTime >= 24 (else play QUOTE_HATED_2_ON_TEAM)",
+          "source_comment": "AIM: played when we refuse to be hired because hated 2 is present and bHatedTime >= 24 (else play QUOTE_HATED_2_ON_TEAM)"
+        }
+      ]
+    },
+    {
+      "slot": 115,
+      "aliases": [
+        {
+          "name": "QUOTE_MERC_LEAVING_ALSUCO_SOON",
+          "meaning": "tell player that contract will be over soon and we don't want to renew",
+          "source_comment": "tell player that contract will be over soon and we don't want to renew"
+        }
+      ]
+    },
+    {
+      "slot": 116,
+      "aliases": [
+        {
+          "name": "QUOTE_MERC_GONE_UP_IN_PRICE",
+          "meaning": "during contract renegotiation, inform the player of increased salary",
+          "source_comment": "during contract renegotiation, inform the player of increased salary"
+        }
+      ]
+    },
+    {
+      "slot": 117,
+      "aliases": [
+        {
+          "name": "QUOTE_ENTER_SECTOR_WITH_FAN_1",
+          "meaning": "special JA2UB dialogue about fan",
+          "source_comment": "special JA2UB dialogue about fan"
+        }
+      ]
+    },
+    {
+      "slot": 118,
+      "aliases": [
+        {
+          "name": "QUOTE_ENTER_SECTOR_WITH_FAN_2",
+          "meaning": "special JA2UB dialogue about fan",
+          "source_comment": "special JA2UB dialogue about fan"
+        }
+      ]
+    },
+    {
+      "slot": 119,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_BUDDY_3_KILLED",
+          "meaning": "AIM: buddy 3 died",
+          "source_comment": "AIM: buddy 3 died"
+        }
+      ]
+    },
+    {
+      "slot": 120,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_BUDDY_4_KILLED",
+          "meaning": "AIM: buddy 4 died",
+          "source_comment": "AIM: buddy 4 died"
+        }
+      ]
+    },
+    {
+      "slot": 121,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_BUDDY_5_KILLED",
+          "meaning": "AIM: buddy 5 died",
+          "source_comment": "AIM: buddy 5 died"
+        }
+      ]
+    },
+    {
+      "slot": 122,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_HATED_3",
+          "meaning": "AIM: complain about hated 3",
+          "source_comment": "AIM: complain about hated 3"
+        }
+      ]
+    },
+    {
+      "slot": 123,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_HATED_4",
+          "meaning": "AIM: complain about hated 4",
+          "source_comment": "AIM: complain about hated 4"
+        }
+      ]
+    },
+    {
+      "slot": 124,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_HATED_5",
+          "meaning": "AIM: complain about hated 5",
+          "source_comment": "AIM: complain about hated 5"
+        }
+      ]
+    },
+    {
+      "slot": 125,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_3_ARRIVES",
+          "meaning": "AIM: hated 3 arrives",
+          "source_comment": "AIM: hated 3 arrives"
+        }
+      ]
+    },
+    {
+      "slot": 126,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_4_ARRIVES",
+          "meaning": "AIM: hated 4 arrives",
+          "source_comment": "AIM: hated 4 arrives"
+        }
+      ]
+    },
+    {
+      "slot": 127,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_5_ARRIVES",
+          "meaning": "AIM: hated 5 arrives",
+          "source_comment": "AIM: hated 5 arrives"
+        }
+      ]
+    },
+    {
+      "slot": 128,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_BUDDY_3_GOOD",
+          "meaning": "AIM: compliment buddy 3",
+          "source_comment": "AIM: compliment buddy 3"
+        }
+      ]
+    },
+    {
+      "slot": 129,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_BUDDY_4_GOOD",
+          "meaning": "AIM: compliment buddy 4",
+          "source_comment": "AIM: compliment buddy 4"
+        }
+      ]
+    },
+    {
+      "slot": 130,
+      "aliases": [
+        {
+          "name": "QUOTE_AIM_BUDDY_5_GOOD",
+          "meaning": "AIM: compliment buddy 5",
+          "source_comment": "AIM: compliment buddy 5"
+        }
+      ]
+    },
+    {
+      "slot": 131,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_3_ON_TEAM",
+          "meaning": "AIM: played when we refuse to be hired because hated 3 is present and bHatedTime < 24 ( else play QUOTE_HATED_3_ON_TEAM_LONGTIMETOHATE )",
+          "source_comment": "AIM: played when we refuse to be hired because hated 3 is present and bHatedTime < 24 ( else play QUOTE_HATED_3_ON_TEAM_LONGTIMETOHATE )"
+        }
+      ]
+    },
+    {
+      "slot": 132,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_4_ON_TEAM",
+          "meaning": "AIM: played when we refuse to be hired because hated 4 is present and bHatedTime < 24 ( else play QUOTE_HATED_4_ON_TEAM_LONGTIMETOHATE )",
+          "source_comment": "AIM: played when we refuse to be hired because hated 4 is present and bHatedTime < 24 ( else play QUOTE_HATED_4_ON_TEAM_LONGTIMETOHATE )"
+        }
+      ]
+    },
+    {
+      "slot": 133,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_5_ON_TEAM",
+          "meaning": "AIM: played when we refuse to be hired because hated 5 is present and bHatedTime < 24 ( else play QUOTE_HATED_5_ON_TEAM_LONGTIMETOHATE )",
+          "source_comment": "AIM: played when we refuse to be hired because hated 5 is present and bHatedTime < 24 ( else play QUOTE_HATED_5_ON_TEAM_LONGTIMETOHATE )"
+        }
+      ]
+    },
+    {
+      "slot": 134,
+      "aliases": [
+        {
+          "name": "QUOTE_JOINING_CAUSE_BUDDY_3_ON_TEAM",
+          "meaning": "agree to contract because buddy 3 is here",
+          "source_comment": "agree to contract because buddy 3 is here"
+        }
+      ]
+    },
+    {
+      "slot": 135,
+      "aliases": [
+        {
+          "name": "QUOTE_JOINING_CAUSE_BUDDY_4_ON_TEAM",
+          "meaning": "agree to contract because buddy 4 is here",
+          "source_comment": "agree to contract because buddy 4 is here"
+        }
+      ]
+    },
+    {
+      "slot": 136,
+      "aliases": [
+        {
+          "name": "QUOTE_JOINING_CAUSE_BUDDY_5_ON_TEAM",
+          "meaning": "agree to contract because buddy 5 is here",
+          "source_comment": "agree to contract because buddy 5 is here"
+        }
+      ]
+    },
+    {
+      "slot": 137,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_3_ON_TEAM_WONT_RENEW",
+          "meaning": "AIM: refuse to renew contract because hated 3 is here",
+          "source_comment": "AIM: refuse to renew contract because hated 3 is here"
+        }
+      ]
+    },
+    {
+      "slot": 138,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_4_ON_TEAM_WONT_RENEW",
+          "meaning": "AIM: refuse to renew contract because hated 4 is here",
+          "source_comment": "AIM: refuse to renew contract because hated 4 is here"
+        }
+      ]
+    },
+    {
+      "slot": 139,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_5_ON_TEAM_WONT_RENEW",
+          "meaning": "AIM: refuse to renew contract because hated 5 is here",
+          "source_comment": "AIM: refuse to renew contract because hated 5 is here"
+        }
+      ]
+    },
+    {
+      "slot": 140,
+      "aliases": [
+        {
+          "name": "QUOTE_RENEWING_CAUSE_BUDDY_3_ON_TEAM",
+          "meaning": "renew contract only because buddy 3 is around",
+          "source_comment": "renew contract only because buddy 3 is around"
+        }
+      ]
+    },
+    {
+      "slot": 141,
+      "aliases": [
+        {
+          "name": "QUOTE_RENEWING_CAUSE_BUDDY_4_ON_TEAM",
+          "meaning": "renew contract only because buddy 4 is around",
+          "source_comment": "renew contract only because buddy 4 is around"
+        }
+      ]
+    },
+    {
+      "slot": 142,
+      "aliases": [
+        {
+          "name": "QUOTE_RENEWING_CAUSE_BUDDY_5_ON_TEAM",
+          "meaning": "renew contract only because buddy 5 is around",
+          "source_comment": "renew contract only because buddy 5 is around"
+        }
+      ]
+    },
+    {
+      "slot": 143,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_3_ON_TEAM_LONGTIMETOHATE",
+          "meaning": "AIM: played when we refuse to be hired because hated 3 is present and bHatedTime >= 24 (else play QUOTE_HATED_3_ON_TEAM)",
+          "source_comment": "AIM: played when we refuse to be hired because hated 3 is present and bHatedTime >= 24 (else play QUOTE_HATED_3_ON_TEAM)"
+        }
+      ]
+    },
+    {
+      "slot": 144,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_4_ON_TEAM_LONGTIMETOHATE",
+          "meaning": "AIM: played when we refuse to be hired because hated 4 is present and bHatedTime >= 24 (else play QUOTE_HATED_4_ON_TEAM)",
+          "source_comment": "AIM: played when we refuse to be hired because hated 4 is present and bHatedTime >= 24 (else play QUOTE_HATED_4_ON_TEAM)"
+        }
+      ]
+    },
+    {
+      "slot": 145,
+      "aliases": [
+        {
+          "name": "QUOTE_HATED_5_ON_TEAM_LONGTIMETOHATE",
+          "meaning": "AIM: played when we refuse to be hired because hated 5 is present and bHatedTime >= 24 (else play QUOTE_HATED_5_ON_TEAM)",
+          "source_comment": "AIM: played when we refuse to be hired because hated 5 is present and bHatedTime >= 24 (else play QUOTE_HATED_5_ON_TEAM)"
+        }
+      ]
+    }
+  ]
+}

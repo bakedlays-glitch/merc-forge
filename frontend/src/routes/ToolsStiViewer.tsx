@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
+import { formatApiError } from "../lib/api";
 import { pickFile, pickSaveFile } from "../lib/tauri";
 import {
   decodeStiMeta,
@@ -97,7 +98,7 @@ export default function ToolsStiViewer() {
       )}
       {meta.isError && (
         <div className="card border-rust-500/40 bg-rust-500/10 text-sm text-rust-200">
-          {String(meta.error instanceof Error ? meta.error.message : meta.error)}
+          {formatApiError(meta.error)}
         </div>
       )}
 
@@ -393,7 +394,7 @@ function FrameCard({
       </div>
       {save.isError && (
         <span className="text-[10px] text-rust-300">
-          {String(save.error instanceof Error ? save.error.message : save.error)}
+          {formatApiError(save.error)}
         </span>
       )}
       {save.data && !save.isError && (
@@ -427,7 +428,7 @@ function JsdViewerPanel({ stiPath }: { stiPath: string }) {
     return (
       <div className="card text-sm text-amber-300">
         Couldn't parse JSD:{" "}
-        {String(jsd.error instanceof Error ? jsd.error.message : jsd.error)}
+        {formatApiError(jsd.error)}
       </div>
     );
   }

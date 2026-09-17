@@ -98,7 +98,7 @@ import threading
 # is small but lxml parse + 255 AIM entries x findtext()  is non-trivial when
 # hit 16+ times in parallel on the roster grid.
 #
-# Lock added 2026-05-25: FastAPI's threadpool runs handlers in parallel.
+# Lock added: FastAPI's threadpool runs handlers in parallel.
 # A 16-cell roster mount fires 16 concurrent audits, all hitting this
 # cache. Without the lock, two concurrent threads can both miss + parse +
 # insert; if eviction trips between the `len()` check and `next(iter)`
@@ -242,7 +242,7 @@ def upsert(aim_xml_path: Path, binding: AimBinding) -> None:
     `_validate_upsert` for what's checked. Any mismatch raises
     `AIMAvailabilityWriteError`, bubbling up to the route's audit-and-
     rollback handler. Mirrors merc_availability's defensive pattern
-    (bug-review finding E7 — the AIM writer's silent-accept of round-
+    (the AIM writer's silent-accept of round-
     trip mismatches was the asymmetric gap given that AIM-website
     binding is mission-critical for hireability).
     """

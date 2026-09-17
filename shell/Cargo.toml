@@ -1,6 +1,6 @@
 [package]
 name = "mercwizard"
-version = "1.0.0"
+version = "1.0.0-beta.4"
 description = "Player-facing mercenary toolkit for Jagged Alliance 2 v1.13"
 authors = ["bakedlays-glitch"]
 edition = "2021"

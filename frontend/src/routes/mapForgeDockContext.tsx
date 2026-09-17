@@ -23,14 +23,14 @@ export type DockPanelId =
   | "canvas"
   // "assets" is the consolidated Brush Box (Favorites + Recent + the
   // searchable categorized grid). The old separate "palette" rail and
-  // "variants" sub-frame panels were folded in (R3 Brush Box, 2026-06-13).
+  // "variants" sub-frame panels were folded in.
   | "assets"
   | "tilesetViewer"
   | "inspector"
   | "history"
   // "minimap" is the in-editor overview navigator: a downscaled flat
   // top-down map of the whole sector + a draggable viewport rectangle
-  // that re-centers the main canvas (R6, 2026-06-13). NOT the in-game
+  // that re-centers the main canvas. NOT the in-game
   // radar STI (that's radar.py / generateRadar).
   | "minimap"
   | "log"

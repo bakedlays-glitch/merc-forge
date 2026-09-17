@@ -9,7 +9,7 @@ with OBS. UI changed? Edit the agenda, re-run, re-record.
 ## Run (one command)
 
 ```powershell
-cd "C:\AI Projects\The Wasteland\MercWizard2\frontend\tools\demo"
+cd "<your checkout>\MercWizard2\frontend\tools\demo"
 node start_demo_rig.mjs agenda_building_library.mjs
 ```
 

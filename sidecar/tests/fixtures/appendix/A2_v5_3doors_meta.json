@@ -1,0 +1,13 @@
+{
+  "source_path": "<your JA2 1.13 install>\\Data-1.13\\Maps\\A2.DAT",
+  "source_sha256": "9bce9f11ee9457fb8f965632edc7082c978edfed84bfddf3545cfc5461c57bc2",
+  "source_size": 324346,
+  "appendix_offset_in_source": 309874,
+  "tail_sha256": "bd6824d347aeb809b878206d8cedb57324ea6b68d02bf01c54964c44fbb1dad8",
+  "tail_size": 14472,
+  "major": 5.0,
+  "minor": 25,
+  "flags": 381,
+  "cols": 160,
+  "rows": 160
+}

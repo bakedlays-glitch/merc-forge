@@ -229,6 +229,18 @@ export interface RegionRender {
 
 /** Iso-projection metadata shared with the SVG overlay so the existing
  * grid/highlight/label code keeps working unchanged. */
+/** Result of pickSpriteAt: the tile OWNING the sprite under the cursor,
+ * which entry it is, and the sprite's canvas-pixel rect (for the
+ * selection outline overlay). */
+export interface SpriteHit {
+  x: number;
+  y: number;
+  slot: number;
+  sub: number;
+  layer: LayerName;
+  rect: { x: number; y: number; w: number; h: number };
+}
+
 export interface RenderMeta {
   ixMin: number;
   iyMin: number;
@@ -236,6 +248,22 @@ export interface RenderMeta {
   canvasH: number;
   tileW: number;
   tileH: number;
+}
+
+/** True when an entry anchored outside the tile crop still paints into its
+ * fixed canvas. The crop remains tile-derived; this only admits non-land
+ * sprite pixels whose real STI offset/extent crosses its edge. */
+export function spriteIntersectsCrop(
+  rawX: number,
+  rawY: number,
+  cell: Pick<AtlasCell, "ox" | "oy" | "w" | "h">,
+  yLift: number,
+  meta: RenderMeta,
+): boolean {
+  const x = rawX - meta.ixMin + cell.ox;
+  const y = rawY - meta.iyMin + cell.oy - yLift;
+  return x < meta.canvasW && x + cell.w > 0
+    && y < meta.canvasH && y + cell.h > 0;
 }
 
 export interface RenderOptions {
@@ -659,6 +687,132 @@ export class IsoRenderer {
     return true;
   }
 
+  /** 1x1 readback context for pickSpriteAt's per-pixel alpha test.
+   * Lazily created; willReadFrequently avoids the GPU-readback warning
+   * spam when the user sweeps the cursor across a dense area. */
+  private alphaCtx: CanvasRenderingContext2D | null = null;
+
+  private atlasAlphaAt(cell: AtlasCell, dx: number, dy: number): boolean {
+    if (!this.alphaCtx) {
+      const c = document.createElement("canvas");
+      c.width = 1;
+      c.height = 1;
+      this.alphaCtx = c.getContext("2d", { willReadFrequently: true });
+      if (!this.alphaCtx) return true;   // readback unavailable → bbox-only hit
+    }
+    const ctx = this.alphaCtx;
+    ctx.clearRect(0, 0, 1, 1);
+    ctx.drawImage(this.atlas, cell.x + dx, cell.y + dy, 1, 1, 0, 0, 1, 1);
+    return (ctx.getImageData(0, 0, 1, 1).data[3] ?? 0) > 8;
+  }
+
+  /** Sprite-aware picking: given a canvas-image pixel, find the struct
+   * whose DRAWN SPRITE covers that pixel (alpha-tested against the
+   * atlas), and return its OWNING tile. This is how a user selects a
+   * multi-tile-LOOKING object (cooling tower, vertibird, big machine)
+   * whose struct entry lives on one anchor tile the sprite extends far
+   * away from — clicking anywhere on the visible pixels resolves to
+   * the anchor.
+   *
+   * Iterates in the renderer's draw order (iso rows by tx+ty ascending;
+   * objs pass, then structs/roofs/onroofs) keeping the LAST hit, so of
+   * overlapping sprites the topmost-drawn wins — matching what the eye
+   * sees. Cost is one pass over the tile grid (~130k entry-list null
+   * checks) + a 1px readback per bbox candidate; fine per click and per
+   * hovered-tile change, not per mousemove. */
+  pickSpriteAt(
+    px: number, py: number, meta: RenderMeta,
+    opts: { layers?: LayerName[] } = {},
+  ): SpriteHit | null {
+    const rows = this.parsed.rows;
+    const cols = this.parsed.cols;
+    const hw = meta.tileW / 2;
+    const hh = meta.tileH / 2;
+    const wanted = opts.layers ?? ["objs", "structs", "roofs", "onroofs"];
+    let hit: SpriteHit | null = null;
+    const testTile = (tx: number, ty: number, layer: LayerName) => {
+      const entries = this.parsed[layer][ty * cols + tx];
+      if (!entries || entries.length === 0) return;
+      const sx = (tx - ty) * hw - meta.ixMin;
+      const sy = (tx + ty) * hh - meta.iyMin;
+      const yLift = LAYER_Y_LIFT[layer];
+      for (const e of entries) {
+        if (e.length < 2) continue;
+        const slot = e[0] as number;
+        const sub = e[1] as number;
+        const cell = this.cellMap.get((slot << 16) | (sub & 0xffff));
+        if (!cell) continue;
+        const rx = sx + cell.ox;
+        const ry = sy + cell.oy - yLift;
+        if (px < rx || px >= rx + cell.w || py < ry || py >= ry + cell.h) continue;
+        if (!this.atlasAlphaAt(cell, Math.floor(px - rx), Math.floor(py - ry))) continue;
+        hit = {
+          x: tx, y: ty, slot, sub, layer,
+          rect: { x: rx, y: ry, w: cell.w, h: cell.h },
+        };
+      }
+    };
+    const passLayers = wanted.filter((l) => l !== "land" && l !== "shadows");
+    for (let xy = 0; xy <= rows + cols - 2; xy++) {
+      const tyLo = Math.max(0, xy - cols + 1);
+      const tyHi = Math.min(rows - 1, xy);
+      for (const layer of passLayers) {
+        for (let ty = tyLo; ty <= tyHi; ty++) {
+          testTile(xy - ty, ty, layer);
+        }
+      }
+    }
+    return hit;
+  }
+
+  /** Every drawn sprite whose atlas-cell rect intersects `rect` (canvas
+   * px) — the marquee's sprite enumeration. Same iso-row walk as
+   * pickSpriteAt, bbox intersection instead of an alpha readback (a
+   * marquee is a coarse gesture; alpha precision is not worth ~100k
+   * readbacks). Draw order preserved; de-duplicated by anchor+entry. */
+  spritesInRect(
+    rect: { x: number; y: number; w: number; h: number },
+    meta: RenderMeta,
+    opts: { layers?: LayerName[] } = {},
+  ): SpriteHit[] {
+    const rows = this.parsed.rows;
+    const cols = this.parsed.cols;
+    const hw = meta.tileW / 2;
+    const hh = meta.tileH / 2;
+    const wanted = (opts.layers ?? ["objs", "structs", "roofs", "onroofs"])
+      .filter((l) => l !== "land" && l !== "shadows");
+    const out: SpriteHit[] = [];
+    const seen = new Set<string>();
+    const rx1 = rect.x + rect.w; const ry1 = rect.y + rect.h;
+    for (let xy = 0; xy <= rows + cols - 2; xy++) {
+      const tyLo = Math.max(0, xy - cols + 1);
+      const tyHi = Math.min(rows - 1, xy);
+      for (const layer of wanted) {
+        for (let ty = tyLo; ty <= tyHi; ty++) {
+          const tx = xy - ty;
+          const entries = this.parsed[layer][ty * cols + tx];
+          if (!entries || entries.length === 0) continue;
+          const sx = (tx - ty) * hw - meta.ixMin;
+          const sy = (tx + ty) * hh - meta.iyMin;
+          const yLift = LAYER_Y_LIFT[layer];
+          for (const e of entries) {
+            if (e.length < 2) continue;
+            const slot = e[0] as number; const sub = e[1] as number;
+            const cell = this.cellMap.get((slot << 16) | (sub & 0xffff));
+            if (!cell) continue;
+            const cx = sx + cell.ox; const cy = sy + cell.oy - yLift;
+            if (cx >= rx1 || cx + cell.w <= rect.x || cy >= ry1 || cy + cell.h <= rect.y) continue;
+            const k = `${tx},${ty},${layer},${slot},${sub}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            out.push({ x: tx, y: ty, slot, sub, layer, rect: { x: cx, y: cy, w: cell.w, h: cell.h } });
+          }
+        }
+      }
+    }
+    return out;
+  }
+
   /** Look up the (sub-count, has_jsd, sti_filename) triple for a slot
    * without touching the atlas image. Used by the subframe picker
    * to know how many sub thumbnails to render per slot. */
@@ -881,6 +1035,7 @@ export class IsoRenderer {
 
     // Iso row groups. Tiles with same (x + y) share one screen-Y row.
     // Within a row, left-to-right by (x - y).
+    const spill = this.collectCropSpill(rx0, ry0, rx1, ry1);
     const rowsByXy = new Map<number, [number, number][]>();
     for (let ty = ry0; ty <= ry1; ty++) {
       for (let tx = rx0; tx <= rx1; tx++) {
@@ -893,6 +1048,14 @@ export class IsoRenderer {
         row.push([tx, ty]);
       }
     }
+    for (const gn of spill.tiles) {
+      const tx = gn % this.parsed.cols;
+      const ty = Math.floor(gn / this.parsed.cols);
+      const k = tx + ty;
+      const row = rowsByXy.get(k);
+      if (row) row.push([tx, ty]);
+      else rowsByXy.set(k, [[tx, ty]]);
+    }
     for (const row of rowsByXy.values()) {
       row.sort((a, b) => (a[0] - a[1]) - (b[0] - b[1]));
     }
@@ -903,7 +1066,9 @@ export class IsoRenderer {
       for (const xy of orderedXy) {
         const row = rowsByXy.get(xy)!;
         for (const [tx, ty] of row) {
-          this.drawTileLayer(ctx, tx, ty, "land", false);
+          const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
+          this.drawTileLayer(ctx, tx, ty, "land", false,
+            inRegion ? undefined : (spill.entries.get("land")?.get(ty * this.parsed.cols + tx) ?? EMPTY_ENTRIES));
         }
       }
     }
@@ -912,7 +1077,9 @@ export class IsoRenderer {
       for (const xy of orderedXy) {
         const row = rowsByXy.get(xy)!;
         for (const [tx, ty] of row) {
-          this.drawTileLayer(ctx, tx, ty, "objs", false);
+          const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
+          this.drawTileLayer(ctx, tx, ty, "objs", false,
+            inRegion ? undefined : (spill.entries.get("objs")?.get(ty * this.parsed.cols + tx) ?? EMPTY_ENTRIES));
         }
       }
     }
@@ -921,7 +1088,9 @@ export class IsoRenderer {
       for (const xy of orderedXy) {
         const row = rowsByXy.get(xy)!;
         for (const [tx, ty] of row) {
-          this.drawTileLayer(ctx, tx, ty, "shadows", true);
+          const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
+          this.drawTileLayer(ctx, tx, ty, "shadows", true,
+            inRegion ? undefined : (spill.entries.get("shadows")?.get(ty * this.parsed.cols + tx) ?? EMPTY_ENTRIES));
         }
       }
     }
@@ -935,7 +1104,9 @@ export class IsoRenderer {
         const row = rowsByXy.get(xy)!;
         for (const layer of layers4) {
           for (const [tx, ty] of row) {
-            this.drawTileLayer(ctx, tx, ty, layer, false);
+            const inRegion = tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1;
+            this.drawTileLayer(ctx, tx, ty, layer, false,
+              inRegion ? undefined : (spill.entries.get(layer)?.get(ty * this.parsed.cols + tx) ?? EMPTY_ENTRIES));
           }
         }
       }
@@ -979,6 +1150,48 @@ export class IsoRenderer {
     return [(x - y) * TILE_HW, (x + y) * TILE_HH];
   }
 
+  /** Find out-of-region non-land entries whose projected sprite rectangles
+   * cross the already-computed crop. Land is evaluated independently, so
+   * a crop corner remains coherent even when no prop shares its anchor.
+   * Keeping these as entry lists (rather
+   * than widening the tile ring) preserves the camera while avoiding a
+   * whole-map draw. */
+  private collectCropSpill(rx0: number, ry0: number, rx1: number, ry1: number): {
+    tiles: Set<number>;
+    entries: Map<LayerName, Map<number, number[][]>>;
+  } {
+    const entries = new Map<LayerName, Map<number, number[][]>>();
+    const tiles = new Set<number>();
+    const layers: LayerName[] = ["land", "objs", "shadows", "structs", "roofs", "onroofs"];
+    for (const layer of layers) entries.set(layer, new Map());
+    for (let gn = 0; gn < this.parsed.rows * this.parsed.cols; gn++) {
+      const tx = gn % this.parsed.cols;
+      const ty = Math.floor(gn / this.parsed.cols);
+      if (tx >= rx0 && tx <= rx1 && ty >= ry0 && ty <= ry1) continue;
+      const [rawX, rawY] = this.tileToPixRaw(tx, ty);
+      for (const layer of layers) {
+        const source = layer === "shadows"
+          ? effectiveShadowEntries(this.parsed, gn, this.cellMap)
+          : this.parsed[layer][gn];
+        if (!source || source.length === 0) continue;
+        const selected: number[][] = [];
+        for (const entry of source) {
+          if (entry.length < 2) continue;
+          const cell = this.cellMap.get(((entry[0] as number) << 16)
+            | ((entry[1] as number) & 0xffff));
+          if (cell && spriteIntersectsCrop(rawX, rawY, cell, LAYER_Y_LIFT[layer], this.meta)) {
+            selected.push(entry);
+          }
+        }
+        if (selected.length > 0) {
+          entries.get(layer)!.set(gn, selected);
+          tiles.add(gn);
+        }
+      }
+    }
+    return { tiles, entries };
+  }
+
   private drawHighlight(
     ctx: CanvasRenderingContext2D,
     highlightTiles: Set<string>,
@@ -1016,13 +1229,14 @@ export class IsoRenderer {
     tx: number, ty: number,
     layer: LayerName,
     shadow: boolean,
+    entriesOverride?: number[][],
   ): void {
     const gn = ty * this.parsed.cols + tx;
     // Shadows: overlay the engine's auto-added buddy shadows so the editor
     // matches in-game (ephemeral — never written back to parsed/.dat).
-    const entries = layer === "shadows"
+    const entries = entriesOverride ?? (layer === "shadows"
       ? effectiveShadowEntries(this.parsed, gn, this.cellMap)
-      : this.parsed[layer][gn];
+      : this.parsed[layer][gn]);
     if (!entries || entries.length === 0) return;
     const [rawX, rawY] = this.tileToPixRaw(tx, ty);
     const px = rawX - this.meta.ixMin;

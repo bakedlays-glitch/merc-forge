@@ -743,7 +743,7 @@ fn read_ini_key(path: &Path, section: &str, key: &str) -> Result<Option<String>,
     Ok(None)
 }
 
-// ---- Presets (v1.8 — Phase B) ----
+// ---- Presets (v1.8) ----
 
 /// One key write that a preset wants to perform.
 /// target = "user" → writes to Data-User/<ini_file> (engine merges as top layer)

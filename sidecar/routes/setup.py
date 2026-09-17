@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from mercwizard_core import backup as backup_mod
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.graphics import graphics_status
 from mercwizard_core.ini_editor import (
     IniChange,
@@ -36,7 +36,7 @@ router = APIRouter()
 
 # Engine-verified SCREEN_RESOLUTION codes (the schema's list_values is
 # EMPTY — these are hardcoded by design; source: JA2.ini's own code
-# table, verified against the engine in the 2026-06-07 review).
+# table, verified against the engine in the review).
 RESOLUTION_CODES = [
     {"code": 4, "label": "1280 x 720"},
     {"code": 5, "label": "1024 x 768"},
@@ -215,7 +215,7 @@ def setup_apply(
         return {"ok": True, "dry_run": True, "plan": plan}
 
     # Stage 2: apply under one lock + one snapshot.
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         touched = []
         if ddraw is not None and ddraw_changes:
             touched.append(ddraw)

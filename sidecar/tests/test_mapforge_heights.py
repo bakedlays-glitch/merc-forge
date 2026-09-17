@@ -1,4 +1,4 @@
-"""Phase 2 (A5): heights backend — `set_height` op."""
+"""Heights backend — the `set_height` op."""
 import pytest
 
 from mercwizard_core.mapforge_engine.dat_edit_ops import set_height, EditOpError

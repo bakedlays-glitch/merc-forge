@@ -246,7 +246,7 @@ export function MapForgeLogPanel() {
  * `MapForgeLogPanel` (designed for inline flow under the canvas), this
  * fills whatever space the user gives the panel: no width cap, no
  * height cap, no auto-collapse — a dedicated panel should use its
- * space (user feedback 2026-06-10). Newest entries first.
+ * space (user feedback). Newest entries first.
  */
 export function MapForgeLogFull() {
   const log = useMapForgeLog();

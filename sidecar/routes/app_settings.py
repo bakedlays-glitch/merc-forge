@@ -7,8 +7,6 @@ Known keys (unknown keys round-trip untouched):
                            project's frozen base install is itself
                            modded; only the engine-mined schema defaults
                            are true stock values.
-  backup_mode            — forward-compat home for backup.py's
-                           documented-but-unenforced mode setting.
 """
 from __future__ import annotations
 
@@ -18,6 +16,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from mercwizard_core.voice_lab.recipes import ensure_workspace_is_external
+
 from .state import get_state
 
 router = APIRouter()
@@ -25,7 +25,12 @@ router = APIRouter()
 
 class SettingsPatch(BaseModel):
     baseline_install_path: Optional[str] = None
-    backup_mode: Optional[str] = None
+    # Voice Lab keeps authoring-only imports and immutable recipe history
+    # outside the game install.  Tool paths are explicit so ambient PATH is
+    # never trusted for audio/transcription work.
+    voice_authoring_workspace: Optional[str] = None
+    voice_ffmpeg_path: Optional[str] = None
+    voice_transcriber_python: Optional[str] = None
     # Install ids whose first-run setup offer has been shown/dismissed.
     # NOTE: this model is CLOSED — unknown keys sent by clients are
     # silently dropped (adversarial-review finding); every persisted
@@ -54,8 +59,40 @@ def put_settings(patch: SettingsPatch) -> dict:
             update["baseline_install_path"] = v
         else:
             update["baseline_install_path"] = None  # delete
-    if "backup_mode" in fields:
-        update["backup_mode"] = fields["backup_mode"] or None
     if "setup_offered_installs" in fields:
         update["setup_offered_installs"] = fields["setup_offered_installs"] or None
+    for key in ("voice_authoring_workspace", "voice_ffmpeg_path", "voice_transcriber_python"):
+        if key not in fields:
+            continue
+        value = fields[key]
+        if not value:
+            update[key] = None
+            continue
+        path = Path(value)
+        if key == "voice_authoring_workspace":
+            if not path.is_dir():
+                raise HTTPException(status_code=400, detail={
+                    "error": "VOICE_WORKSPACE_NOT_FOUND",
+                    "message": "Voice authoring workspace must be an existing directory",
+                })
+            try:
+                path = ensure_workspace_is_external(
+                    path, (install.path for install in get_state().list_installs()),
+                )
+            except ValueError as exc:
+                if str(exc).startswith("VOICE_WORKSPACE_IN_INSTALL:"):
+                    raise HTTPException(status_code=400, detail={
+                        "error": "VOICE_WORKSPACE_IN_INSTALL",
+                        "message": "Voice authoring workspace must be outside every registered game install",
+                    }) from exc
+                raise HTTPException(status_code=400, detail={
+                    "error": "VOICE_WORKSPACE_INVALID",
+                    "message": "Voice authoring workspace could not be resolved safely",
+                }) from exc
+        elif not path.is_file():
+            raise HTTPException(status_code=400, detail={
+                "error": "VOICE_TOOL_NOT_FOUND",
+                "message": "Configured Voice Lab tool is not an existing file",
+            })
+        update[key] = str(path)
     return get_state().update_settings(update)

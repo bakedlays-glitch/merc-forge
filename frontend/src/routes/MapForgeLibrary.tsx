@@ -1,5 +1,5 @@
 /**
- * MapForge STI library browser — Phase 4 UI for the
+ * MapForge STI library browser — the UI for the
  * `/mapforge/library/*` endpoints.
  *
  * Surfaces the 4000+ unique tile STIs that the Asset Browser has
@@ -360,7 +360,7 @@ export function MapForgeLibrary({
  * (or the user can dismiss manually).
  *
  * Exported so MapForgeSector can render it as a standalone modal
- * from the rail's "Just added" cards' View subs chip (Phase 3) — that
+ * from the rail's "Just added" cards' View subs chip — that
  * path opens the modal targeted at a known sha with importMode
  * pre-set to "subs". */
 export function AddStiToTilesetModal({
@@ -415,7 +415,7 @@ export function AddStiToTilesetModal({
   const [slotError, setSlotError] = useState<string | null>(null);
   const [success, setSuccess] = useState<{ slot: number; filename: string } | null>(null);
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
-  // ─── Phase 3: import-mode toggle ─────────────────────────────────
+  // ─── import-mode toggle ──────────────────────────────────────────
   // "whole" copies the source STI verbatim into one slot (today's
   // behavior). "subs" lets the user multi-select individual frames;
   // each selected sub becomes its own slot via the backend's
@@ -709,7 +709,7 @@ export function AddStiToTilesetModal({
                     }
                   }}
                 >
-                  {/* Phase 3 import-mode toggle — radios are visually
+                  {/* import-mode toggle — radios are visually
                       louder than a dropdown and the two options are
                       mutually exclusive. Disable the "Pick subs" radio
                       when the source has 1 frame (nothing to pick). */}
@@ -957,7 +957,7 @@ function SlotOccupantPreview({
 
 
 /** Grid of per-sub thumbnails for an STI. Click toggles selection.
- * Used inside AddStiToTilesetModal's "Pick subs" mode (Phase 3) to
+ * Used inside AddStiToTilesetModal's "Pick subs" mode to
  * let the user pick exactly which frames to import. The catalog
  * already has per-sub PNGs cached (Asset_Browser builds them during
  * its scan); we proxy them through the sidecar so the auth token

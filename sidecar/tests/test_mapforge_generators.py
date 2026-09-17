@@ -1,4 +1,4 @@
-"""Tests for the MapForge generator subsystem (bug-review task #114)."""
+"""Tests for the MapForge generator subsystem."""
 from __future__ import annotations
 
 import random
@@ -28,6 +28,8 @@ from mercwizard_core.mapforge.generators import (
     _normalize_region,
     _parse_int_csv,
     _parse_weighted_subs,
+    _structure_scatter_candidates,
+    _validate_structure_stamp,
     _validate_layer,
     get,
     list_all,
@@ -37,6 +39,33 @@ from mercwizard_core.mapforge.generators import (
 def _ops(gen, ctx, params):
     """Collect just the mutation ops (drop phase/progress events)."""
     return [e for e in gen.iter_ops(ctx, params) if "op" in e]
+
+
+def test_generic_scatter_excludes_multitile_and_unavailable_structures():
+    from mercwizard_core.mapforge_engine.jsd_structure import StructureIdentity
+
+    identities = {
+        (36, 1): StructureIdentity("a" * 64, 1, ((0, 0, 1),)),
+        (36, 2): StructureIdentity("b" * 64, 2, ((0, 0, 2), (1, 0, 2))),
+    }
+    ctx = GeneratorContext(
+        rows=10, cols=10, parsed={"rows": 10, "cols": 10},
+        structure_identity=lambda slot, sub: identities.get((slot, sub)),
+    )
+
+    assert _structure_scatter_candidates(ctx, "structs", 36, [(1, 2), (2, 5), (3, 7)]) == [(1, 2)]
+
+
+def test_explicit_structure_stamp_is_all_or_nothing_at_sector_edge():
+    from mercwizard_core.mapforge_engine.jsd_structure import StructureIdentity
+
+    identity = StructureIdentity(
+        "c" * 64, 1, ((0, 0, 1), (-1, 0, 1), (0, -1, 1))
+    )
+    ctx = GeneratorContext(rows=4, cols=4, parsed={"rows": 4, "cols": 4})
+
+    assert _validate_structure_stamp(ctx, 0, 0, identity) is None
+    assert _validate_structure_stamp(ctx, 2, 2, identity) == identity
 
 
 # Tileset-9-like metadata: the tree/bush shadow STIs exist and are
@@ -363,14 +392,16 @@ def test_rect_registered_in_registry():
 
 def test_registry_lists_all_phase_d_generators():
     """Registry sanity — wipe + fill + rect + the three scatter-family
-    generators + the corpus-driven building stamp (autoshadow retired
-    2026-05-31). Catches accidental double-registration or a forgotten
+    generators + the corpus-driven building stamp (autoshadow is
+    retired). Catches accidental double-registration or a forgotten
     REGISTRY entry."""
     names = {g.name for g in list_all()}
     assert names == {
         "wipe", "fill", "rect",
         "scatter", "cluster", "density-falloff",
         "building", "bank",
+        # engine-LUT socket smoothers
+        "smooth_terrain", "smooth_walls", "smooth_water", "smooth_caves",
     }
 
 
@@ -1807,6 +1838,30 @@ def test_density_falloff_variants_only_from_set():
     assert subs
 
 
+def test_density_falloff_excludes_multitile_structure_variants():
+    """Removing the structure filter must let sub 2 leak into output."""
+    from mercwizard_core.mapforge_engine.jsd_structure import StructureIdentity
+
+    identities = {
+        (36, 1): StructureIdentity("a" * 64, 1, ((0, 0, 1),)),
+        (36, 2): StructureIdentity("b" * 64, 2, ((0, 0, 2), (1, 0, 2))),
+    }
+    ctx = GeneratorContext(
+        rows=30,
+        cols=30,
+        parsed={"rows": 30, "cols": 30},
+        structure_identity=lambda slot, sub: identities.get((slot, sub)),
+    )
+
+    events = list(DensityFalloffGenerator().iter_ops(ctx, {
+        "center_x": 15, "center_y": 15, "radius": 10, "peak_density": 1.0,
+        "layer": "structs", "slot": 36, "sub": 1, "subs": "1,2", "seed": 2,
+    }))
+    subs = {event["sub"] for event in events if "op" in event}
+
+    assert subs == {1}
+
+
 def test_density_falloff_respects_mask():
     rows = cols = 40
     blocked = {(x, y) for x in range(18, 22) for y in range(rows)}  # vertical strip
@@ -1839,7 +1894,7 @@ def test_scatter_variant_subs_param_declared():
 
 
 def test_autoshadow_retired_from_registry():
-    # Retired 2026-05-31: the renderer overlays buddy shadows and the engine
+    # Retired: the renderer overlays buddy shadows and the engine
     # re-adds them at load, so baking via AutoShadow only doubled in-game.
     assert "autoshadow" not in REGISTRY
     # Class kept for reference; still serializes if instantiated directly.
@@ -2055,3 +2110,32 @@ def test_bank_escarpment_quadrants():
         (x, y) for y in range(12, 40) for x in range(10, 40)
     }
     assert faces == []
+
+
+def test_clamp_params_forces_declared_bounds():
+    """A typed-in count outside the declared range is clamped, not honoured.
+
+    Browsers enforce an input's min/max on the stepper arrows only, so a
+    typed value reaches the sidecar as-is. ScatterGenerator turns `count`
+    into `count * 30` attempts with a quadratic scan over placed points,
+    so an unclamped value wedges the process.
+    """
+    gen = ScatterGenerator()
+
+    clamped = gen.clamp_params({"count": 500_000_000, "min_distance": 0})
+    assert clamped["count"] == 10_000       # declared max
+    assert clamped["min_distance"] == 1      # declared min
+    assert isinstance(clamped["count"], int)
+
+    # In-range values, unbounded params and non-numerics pass through.
+    passthrough = {"count": 250, "layer": "objects", "use_corpus": True}
+    assert gen.clamp_params(passthrough) == passthrough
+
+    # Floats keep their type and their own bounds.
+    falloff = DensityFalloffGenerator()
+    assert falloff.clamp_params({"peak_density": 9.5})["peak_density"] == 1.0
+
+    # The caller's dict is not mutated.
+    original = {"count": -5}
+    gen.clamp_params(original)
+    assert original == {"count": -5}

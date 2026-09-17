@@ -304,7 +304,7 @@ def test_malformed_vfs_config_ini_raises(tmp_path: Path) -> None:
 
 
 def test_resolve_write_refuses_when_vfs_config_broken(tmp_path: Path) -> None:
-    """Bug-review #98: when the VFS config couldn't be parsed and we fell
+    """When the VFS config couldn't be parsed and we fell
     back to a legacy layout, writes must refuse rather than silently
     landing in `Data-1.13/` where the modded engine never reads them.
 
@@ -435,7 +435,7 @@ def test_mod_content_probing_picks_profile_with_merc_profiles_xml(tmp_path: Path
 
 
 # ─────────────────────────────────────────────────────────────────────
-#  compute_vfs_mismatch — bug-review B5
+#  compute_vfs_mismatch
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -524,7 +524,7 @@ def test_vfs_mismatch_false_case_insensitive_path(tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  PROFILE_ROOT + engine write profile (INI-editor Phase 1, Step 0)
+#  PROFILE_ROOT + engine write profile
 # ──────────────────────────────────────────────────────────────────────────
 
 

@@ -7,12 +7,20 @@ import json
 from pathlib import Path
 from typing import Callable, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from mercwizard_core import audit, backup, bundle as bundle_mod, relocator
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.body_types import (
+    BodyTypeWriteError,
+    body_types_for_install,
+    validate_body_type_write,
+)
+from mercwizard_core.cross_lock import (
+    cross_process_install_root_lock,
+    cross_process_install_roots_lock,
+)
 from mercwizard_core.install_context import make_install_context
 
 
@@ -33,6 +41,27 @@ from .roster import _resolve_install
 from .state import get_state
 
 router = APIRouter()
+
+
+@router.get("/merc/body-types")
+def get_body_types(install_id: str | None = Query(default=None)) -> dict:
+    """Return SoldierBodyTypes valid for the selected target installation."""
+    info = _resolve_install(install_id)
+    registry = body_types_for_install(info.path)
+    return {
+        "mod_id": registry.mod_id,
+        "source": registry.source,
+        "options": [
+            {
+                "id": option.id,
+                "name": option.name,
+                "sex": option.sex,
+                "category": option.category,
+                "authorable": option.authorable,
+            }
+            for _, option in sorted(registry.options.items())
+        ],
+    }
 
 
 class MercCreatePayload(BaseModel):
@@ -56,20 +85,56 @@ class MoveBody(BaseModel):
     force: bool = False
 
 
+def _http_body_type_write(error: BodyTypeWriteError) -> HTTPException:
+    return HTTPException(status_code=400, detail={
+        "error": error.code,
+        "body_type": error.body_type,
+        "message": str(error),
+    })
+
+
+def _existing_body_type(profiles_path: Path, slot: int) -> int | None:
+    """Read the current body type for a slot, if its profile is numeric."""
+    fields = profiles_xml.read_slot(profiles_path, slot)
+    try:
+        return int((fields or {}).get("ubBodyType", "").strip())
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _move_error_detail(error: relocator.MoveError, fallback: str) -> dict:
+    """Keep structured identity for typed same-install relocation failures."""
+    detail = {
+        "error": getattr(error, "code", None) or fallback,
+        "message": str(error),
+        "error_step": "move" if fallback == "MOVE_INVALID" else "copy",
+    }
+    body_type = getattr(error, "body_type", None)
+    if body_type is not None:
+        detail["body_type"] = body_type
+    return detail
+
+
 def _backup_before_write(
     info,
-    merc: Merc,
+    ui_index: int,
+    face_index: int,
     reason: str,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
 ) -> backup.BackupEntry:
     """Snapshot the files that would be affected by a write on this merc.
 
+    Takes the raw indices (not a Merc) so partial-payload updates — which
+    carry no Merc object but still mutate availability/gear XML — can
+    snapshot too. `face_index` only widens the set with face STIs; pass 0
+    when the write can't touch them.
+
     Returns the BackupEntry so callers can pass `backup_entry.id` to
     `backup.record_files_created` / `backup.restore` for rollback.
     `progress_cb` is forwarded to `backup.snapshot` for per-file progress
-    streaming from Phase 1.
+    streaming.
     """
-    files = backup.files_for_merc(info.path, merc.uiIndex, merc.ubFaceIndex)
+    files = backup.files_for_merc(info.path, ui_index, face_index)
     return backup.snapshot(
         install_root=info.path,
         install_id=info.id,
@@ -97,6 +162,21 @@ def create_merc(
     # Audit on payload data + live install state. Run outside the write
     # lock — it's pure validation. AIM-binding audit will fire later inside
     # the lock when we auto-derive the binding.
+    occupied = profiles_xml.is_slot_occupied(profiles_path, payload.merc.uiIndex)
+    if not payload.force:
+        # Preserve the established error precedence: a normal create into an
+        # occupied slot is rejected as SLOT_OCCUPIED inside the transaction.
+        # Observation still makes the ID auditable for this existing record,
+        # but it does not grant authoring authority to any writable path.
+        body_type_registry = body_types_for_install(info.path)
+    else:
+        try:
+            body_type_registry = validate_body_type_write(
+                info.path,
+                payload.merc.ubBodyType,
+            )
+        except BodyTypeWriteError as error:
+            raise _http_body_type_write(error)
     picker = build_slot_picker(info.path, vfs_config_path=info.vfs_config_path, ctx=ctx)
     slot_info = picker.slots[payload.merc.uiIndex] if 0 <= payload.merc.uiIndex < len(picker.slots) else None
     issues = audit.audit_full(
@@ -104,6 +184,7 @@ def create_merc(
         gear=payload.gear,
         aim_binding=payload.aim_binding,
         slot_info=slot_info,
+        body_types=body_type_registry.options,
     )
     if audit.has_errors(issues):
         raise HTTPException(status_code=400, detail={
@@ -111,19 +192,28 @@ def create_merc(
             "issues": [i.model_dump() for i in issues],
         })
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Inside the lock: slot-occupancy check + bio-id allocation + writes
         # are all atomic together. Earlier code did SLOT_OCCUPIED + compute_*
         # outside the lock — two concurrent requests could pass the same
         # checks (TOCTOU) and write to the same AimBioID/MercBioID offset,
         # silently overwriting each other's bios.
+        occupied = profiles_xml.is_slot_occupied(profiles_path, payload.merc.uiIndex)
+        existing_body_type = _existing_body_type(profiles_path, payload.merc.uiIndex)
         if not payload.force:
-            if profiles_xml.is_slot_occupied(profiles_path, payload.merc.uiIndex):
+            if occupied:
                 raise HTTPException(status_code=409, detail={
                     "error": "SLOT_OCCUPIED",
                     "slot": payload.merc.uiIndex,
                     "message": "Pass force=true to overwrite",
                 })
+        try:
+            validate_body_type_write(
+                info.path,
+                payload.merc.ubBodyType,
+            )
+        except BodyTypeWriteError as error:
+            raise _http_body_type_write(error)
 
         # Auto-fill the AIM binding when the frontend didn't supply one and
         # the merc is Type=AIM. AIM membership is purely XML-driven
@@ -159,13 +249,14 @@ def create_merc(
             except ValueError:
                 pass
 
-        # Phase 2.8: mirror deploy_import's `_rollback_and_raise` pattern.
+        # Mirror deploy_import's `_rollback_and_raise` pattern.
         # If any write between backup and the final EDT raises (lxml
         # serialization error, disk full, etc.), revert the install to its
         # pre-create state so the user doesn't end up with a half-created
         # merc that has a profile row but no bio (or vice versa).
         backup_entry = _backup_before_write(
-            info, payload.merc, reason=f"create_slot_{payload.merc.uiIndex}"
+            info, payload.merc.uiIndex, payload.merc.ubFaceIndex,
+            reason=f"create_slot_{payload.merc.uiIndex}",
         )
         files_written: list[Path] = []
         error_step: Optional[str] = None
@@ -245,6 +336,54 @@ def create_merc(
     }
 
 
+def _ndjson_worker_stream(run_worker) -> StreamingResponse:
+    """Shared NDJSON driver for the streaming merc ops (update / move /
+    duplicate) — this queue/emit/0.5s-timeout/synthetic-done block was
+    copy-pasted verbatim three times before. `run_worker(emit)` runs in
+    a worker thread; each emit(ev) becomes one NDJSON line; a worker
+    that dies without emitting a done event yields a synthetic
+    INTERNAL_ERROR done event so the client never hangs."""
+    async def event_stream():
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def emit(ev: dict) -> None:
+            # Threadsafe — run_worker executes via asyncio.to_thread.
+            loop.call_soon_threadsafe(queue.put_nowait, ev)
+
+        task = asyncio.create_task(asyncio.to_thread(run_worker, emit))
+        try:
+            while True:
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    # Worker may have finished or be mid-slow-op. If it is
+                    # done AND the queue drained, emit a synthetic done
+                    # (defensive — workers should always emit their own).
+                    if task.done() and queue.empty():
+                        exc = task.exception()
+                        msg = (f"{type(exc).__name__}: {exc}"
+                               if exc is not None else
+                               "Worker thread finished without emitting done event.")
+                        yield json.dumps({
+                            "done": True, "ok": False,
+                            "error": "INTERNAL_ERROR", "message": msg,
+                        }) + "\n"
+                        return
+                    continue
+                yield json.dumps(ev) + "\n"
+                if ev.get("done"):
+                    break
+        finally:
+            # Always wait on the task so unhandled exceptions don't leak.
+            try:
+                await task
+            except Exception:
+                pass  # Already surfaced via the stream.
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
 def _run_update(
     *,
     info,
@@ -274,7 +413,28 @@ def _run_update(
     error_step: Optional[str] = None
     steps_completed: list[str] = []
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
+        if payload.merc is not None:
+            existing_fields = profiles_xml.read_slot(profiles_path, slot)
+            try:
+                existing_body_type = int((existing_fields or {}).get("ubBodyType", "").strip())
+            except ValueError:
+                existing_body_type = None
+            try:
+                validate_body_type_write(
+                    info.path,
+                    payload.merc.ubBodyType,
+                    existing_body_type=existing_body_type,
+                )
+            except BodyTypeWriteError as error:
+                emit({
+                    "done": True,
+                    "ok": False,
+                    "error": error.code,
+                    "body_type": error.body_type,
+                    "message": str(error),
+                })
+                return
         # ── bio-id derivation (no I/O; same logic as the pre-streaming code) ──
         aim_binding_to_use = payload.aim_binding
         if (
@@ -317,29 +477,38 @@ def _run_update(
                 pass
 
         try:
+            # Step 1: backup snapshot — ALWAYS, not only when payload.merc
+            # is present. Steps 4-6 mutate AIMAvailability /
+            # MercAvailability / MercStartingGear even on a binding- or
+            # gear-only payload, and the rollback path below is a silent
+            # no-op without an entry (a mid-write failure would leave a
+            # half-mutated file with nothing on the Backups page).
+            # _backup_before_write returns the BackupEntry so the rollback
+            # path can target this specific snapshot.
+            error_step = "backup"
+            emit({"step": "backup", "status": "start", "label": "Backing up files..."})
+
+            def _backup_progress(idx: int, total: int, rel: str) -> None:
+                emit({
+                    "step": "backup",
+                    "status": "progress",
+                    "label": f"Backing up: {rel}",
+                    "index": idx,
+                    "total": total,
+                })
+
+            # face_index=0 on partial payloads: without a Merc the write
+            # can't touch face STIs; 0 just skips widening the file set.
+            backup_entry = _backup_before_write(
+                info, slot,
+                payload.merc.ubFaceIndex if payload.merc is not None else 0,
+                reason=f"edit_slot_{slot}",
+                progress_cb=_backup_progress,
+            )
+            emit({"step": "backup", "status": "done"})
+            steps_completed.append("backup")
+
             if payload.merc is not None:
-                # Step 1: backup snapshot. _backup_before_write returns the
-                # BackupEntry so the rollback path can target this specific
-                # snapshot.
-                error_step = "backup"
-                emit({"step": "backup", "status": "start", "label": "Backing up files..."})
-
-                def _backup_progress(idx: int, total: int, rel: str) -> None:
-                    emit({
-                        "step": "backup",
-                        "status": "progress",
-                        "label": f"Backing up: {rel}",
-                        "index": idx,
-                        "total": total,
-                    })
-
-                backup_entry = _backup_before_write(
-                    info, payload.merc, reason=f"edit_slot_{slot}",
-                    progress_cb=_backup_progress,
-                )
-                emit({"step": "backup", "status": "done"})
-                steps_completed.append("backup")
-
                 # Step 2: MercProfiles.xml
                 error_step = "profiles"
                 emit({"step": "profiles", "status": "start", "label": "Writing merc profile..."})
@@ -396,7 +565,7 @@ def _run_update(
             emit({"done": True, "ok": True, "slot": slot})
 
         except Exception as e:
-            # Phase 2.8: integrated partial-write rollback.
+            # Integrated partial-write rollback.
             #
             # Update semantics differ from deploy_import: we want
             # "revert the slot to its pre-edit contents" (the user was
@@ -470,6 +639,20 @@ async def update_merc(
 
     # Audit OUTSIDE the stream so AUDIT_FAILED returns as a normal 400.
     if payload.merc is not None:
+        body_type_registry = body_types_for_install(info.path)
+        existing_fields = profiles_xml.read_slot(profiles_path, slot)
+        try:
+            existing_body_type = int((existing_fields or {}).get("ubBodyType", "").strip())
+        except ValueError:
+            existing_body_type = None
+        try:
+            validate_body_type_write(
+                info.path,
+                payload.merc.ubBodyType,
+                existing_body_type=existing_body_type,
+            )
+        except BodyTypeWriteError as error:
+            raise _http_body_type_write(error)
         picker = build_slot_picker(info.path, vfs_config_path=info.vfs_config_path, ctx=ctx)
         slot_info = picker.slots[payload.merc.uiIndex] if 0 <= payload.merc.uiIndex < len(picker.slots) else None
         issues = audit.audit_full(
@@ -477,6 +660,7 @@ async def update_merc(
             gear=payload.gear,
             aim_binding=payload.aim_binding,
             slot_info=slot_info,
+            body_types=body_type_registry.options,
         )
         if audit.has_errors(issues):
             raise HTTPException(status_code=400, detail={
@@ -484,16 +668,8 @@ async def update_merc(
                 "issues": [i.model_dump() for i in issues],
             })
 
-    async def event_stream():
-        queue: asyncio.Queue[dict] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def emit(ev: dict) -> None:
-            # Threadsafe — _run_update runs in a worker thread via asyncio.to_thread.
-            loop.call_soon_threadsafe(queue.put_nowait, ev)
-
-        task = asyncio.create_task(asyncio.to_thread(
-            _run_update,
+    def _worker(emit):
+        _run_update(
             info=info,
             state=state,
             slot=slot,
@@ -504,47 +680,17 @@ async def update_merc(
             gear_path=gear_path,
             emit=emit,
             ctx=ctx,
-        ))
+        )
 
-        try:
-            while True:
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    # Worker may have finished or be still processing a slow op.
-                    # If task is done AND queue is empty, emit a synthetic done
-                    # event (defensive — _run_update should always emit one).
-                    if task.done() and queue.empty():
-                        exc = task.exception()
-                        if exc is not None:
-                            yield json.dumps({
-                                "done": True, "ok": False,
-                                "error": "INTERNAL_ERROR",
-                                "message": f"{type(exc).__name__}: {exc}",
-                            }) + "\n"
-                        else:
-                            yield json.dumps({
-                                "done": True, "ok": False,
-                                "error": "INTERNAL_ERROR",
-                                "message": "Worker thread finished without emitting done event.",
-                            }) + "\n"
-                        return
-                    continue
-                yield json.dumps(ev) + "\n"
-                if ev.get("done"):
-                    break
-        finally:
-            # Always wait on the task so unhandled exceptions don't leak.
-            try:
-                await task
-            except Exception:
-                pass  # Already surfaced via the stream (or in INTERNAL_ERROR above).
-
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    return _ndjson_worker_stream(_worker)
 
 
 @router.delete("/merc/{slot}")
-def delete_merc(slot: int, install_id: str | None = Query(default=None)) -> dict:
+def delete_merc(
+    slot: int,
+    install_id: str | None = Query(default=None),
+    force: bool = Query(default=False),
+) -> dict:
     info = _resolve_install(install_id)
     state = get_state()
 
@@ -558,18 +704,34 @@ def delete_merc(slot: int, install_id: str | None = Query(default=None)) -> dict
     if profiles_xml.read_slot(profiles_path, slot) is None:
         raise HTTPException(status_code=404, detail={"error": "SLOT_EMPTY"})
 
+    # Server-side mirror of the UI slot-lock modal: tiers stay advisory,
+    # but a risky delete needs the explicit force flag — otherwise any
+    # non-UI caller (script, curl, batch tooling) silently deletes a
+    # quest-bound/engine-named slot the UI would have warned about.
+    from mercwizard_core.slot_locks import SlotLockTier, slot_lock_info
+    lock = slot_lock_info(slot)
+    if lock.tier != SlotLockTier.SAFE and not force:
+        raise HTTPException(status_code=409, detail={
+            "error": "SLOT_LOCKED",
+            "tier": lock.tier.value,
+            "name": lock.name,
+            "message": (f"Slot {slot} ({lock.name or 'unnamed'}) is "
+                        f"{lock.tier.value}; pass force=true to delete "
+                        "anyway."),
+        })
+
     # Use the placeholder-aware lookup, not raw read_all — modded
     # AIMAvailability.xml files ship `<AimBioID>-1</AimBioID>` /
     # `<ProfilId>-1</ProfilId>` placeholder rows for every slot 0-254.
     # Reading raw and using `.AimBioID` here returns -1 for those slots,
     # which then trips edt.py:315's `0 <= aim_bio_id <= 199` guard with
     # a ValueError → the catch-all rollback at line 596 returns
-    # DELETE_FAILED 500. Bug-review finding C1 — broke delete on any
+    # DELETE_FAILED 500. This broke delete on any
     # empty slot of any modded install with placeholder rows.
     aim_bio_id = aim_availability.lookup_aim_bio_id(aim_path, slot)
     merc_bio_id = merc_availability.lookup_merc_bio_id(merc_xml_path, slot)
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         face_index = None
         existing = profiles_xml.read_slot(profiles_path, slot)
         if existing is not None:
@@ -640,7 +802,7 @@ def delete_merc(slot: int, install_id: str | None = Query(default=None)) -> dict
 # Hits skip the STI decode entirely — typical roster repaint goes from
 # ~3 s to ~10 ms. User feedback: "i want it to be fast".
 #
-# Lock added 2026-05-25: FastAPI runs each handler in a threadpool
+# Lock added: FastAPI runs each handler in a threadpool
 # worker. A 16-cell roster fetches 16 portraits in parallel, all
 # hitting this cache. Without the lock, concurrent inserts during
 # eviction can KeyError on `del first_key` (one thread evicted the
@@ -657,12 +819,25 @@ def _png_cache_get(key: tuple[str, int, str, str]) -> Optional[bytes]:
         return _PNG_CACHE.get(key)
 
 
+def _png_response(request: "Request", png_bytes: bytes) -> Response:
+    """PNG body with Cache-Control + ETag — answering If-None-Match with
+    a 304 so the ETag actually earns its keep (it was emitted for months
+    with no handler ever checking it; every revalidation re-sent the
+    full body)."""
+    etag = _etag_for_png(png_bytes)
+    headers = {"Cache-Control": "private, max-age=60", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=png_bytes, media_type="image/png",
+                    headers=headers)
+
+
 def _etag_for_png(png_bytes: bytes) -> str:
-    """Stable ETag derived from the PNG body. Cheap (md5 of first 4 KB
-    is enough — portrait STIs decode to a stable PNG byte stream when
-    the source hasn't changed). Quoted to match the HTTP ETag grammar."""
+    """Stable ETag derived from the FULL PNG body (a 4 KB prefix let a
+    same-length change past byte 4096 revalidate as a 304 — stale art).
+    Quoted to match the HTTP ETag grammar."""
     import hashlib
-    h = hashlib.md5(png_bytes[:4096]).hexdigest()[:16]
+    h = hashlib.md5(png_bytes).hexdigest()[:16]
     return f'"{h}-{len(png_bytes)}"'
 
 
@@ -680,6 +855,7 @@ def _png_cache_put(key: tuple[str, int, str, str], value: bytes) -> None:
 @router.get("/merc/{slot}/portrait")
 def get_merc_portrait(
     slot: int,
+    request: Request,
     install_id: str | None = Query(default=None),
     size: str = Query(default="smallface", description="smallface | face_65 | face_33 | bigface"),
 ) -> Response:
@@ -765,14 +941,7 @@ def get_merc_portrait(
         cache_key = (info.id, face_index, size, source_id)
         cached = _png_cache_get(cache_key)
         if cached is not None:
-            return Response(
-                content=cached,
-                media_type="image/png",
-                headers={
-                    "Cache-Control": "private, max-age=60",
-                    "ETag": _etag_for_png(cached),
-                },
-            )
+            return _png_response(request, cached)
         png_bytes = decode_sti_frame_to_png(sti_bytes, frame_index=0)
         if png_bytes is None:
             last_reason = (
@@ -781,14 +950,7 @@ def get_merc_portrait(
             )
             continue
         _png_cache_put(cache_key, png_bytes)
-        return Response(
-            content=png_bytes,
-            media_type="image/png",
-            headers={
-                "Cache-Control": "private, max-age=60",
-                "ETag": _etag_for_png(png_bytes),
-            },
-        )
+        return _png_response(request, png_bytes)
 
     # Type=5 vehicle: no FACES portrait — serve its Vehicles.xml StiFaceIcon
     # (INTERFACE\<vehicle>.sti), so a faceless vehicle (slot 199, or any with
@@ -800,13 +962,11 @@ def get_merc_portrait(
             vkey = (info.id, slot, "vehicle", vsource)
             vcached = _png_cache_get(vkey)
             if vcached is not None:
-                return Response(content=vcached, media_type="image/png", headers={
-                    "Cache-Control": "private, max-age=60", "ETag": _etag_for_png(vcached)})
+                return _png_response(request, vcached)
             vpng = decode_sti_frame_to_png(vbytes, frame_index=0)
             if vpng is not None:
                 _png_cache_put(vkey, vpng)
-                return Response(content=vpng, media_type="image/png", headers={
-                    "Cache-Control": "private, max-age=60", "ETag": _etag_for_png(vpng)})
+                return _png_response(request, vpng)
 
     # No candidate size resolved + decoded — the client renders a placeholder.
     raise HTTPException(status_code=404, detail={
@@ -821,6 +981,7 @@ def get_merc_portrait(
 @router.get("/merc/{slot}/animation-frames.png")
 def get_merc_animation_frames(
     slot: int,
+    request: Request,
     install_id: str | None = Query(default=None),
 ) -> Response:
     """One horizontal strip of every animation frame in the merc's SmallFace
@@ -898,11 +1059,7 @@ def get_merc_animation_frames(
     mouth_xy = (_coord("usMouthX"), _coord("usMouthY"))
 
     data = _composite_animation_strip(frames, eye_xy, mouth_xy)
-    return Response(
-        content=data,
-        media_type="image/png",
-        headers={"Cache-Control": "private, max-age=60", "ETag": _etag_for_png(data)},
-    )
+    return _png_response(request, data)
 
 
 def _composite_animation_strip(frames: list, eye_xy: tuple, mouth_xy: tuple) -> bytes:
@@ -970,7 +1127,7 @@ def _run_move_same_install(
     backup_entry: Optional[backup.BackupEntry] = None
     error_step: Optional[str] = None
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         try:
             error_step = "backup"
             emit({"step": "backup", "status": "start", "label": "Backing up files…"})
@@ -1009,6 +1166,17 @@ def _run_move_same_install(
             emit({"step": "move", "status": "start", "label": "Relocating merc data…"})
             try:
                 report = relocator.move(info.path, source_slot=source_slot, dest_slot=dest_slot)
+            except relocator.PreserveOnlyMoveError as e:
+                emit({
+                    "done": True, "ok": False,
+                    "error": e.code,
+                    "body_type": e.body_type,
+                    "message": str(e),
+                    "error_step": "move",
+                    "steps_completed": steps_completed,
+                    "backup_id": backup_entry.id if backup_entry else None,
+                })
+                return
             except relocator.MoveError as e:
                 emit({
                     "done": True, "ok": False,
@@ -1064,10 +1232,7 @@ def _run_move_cross_install(
     """Worker for the cross-install branch. Coarse-grained progress since
     `move_between_installs` is a self-contained export+import pipeline."""
     error_step: Optional[str] = None
-    _ids_sorted = sorted([info.id, target_info.id])
-    with cross_process_install_lock(_ids_sorted[0]), \
-         cross_process_install_lock(_ids_sorted[1]), \
-         state.write_lock:
+    with cross_process_install_roots_lock(info.path, target_info.path), state.write_lock:
         try:
             error_step = "move"
             emit({
@@ -1181,59 +1346,21 @@ async def move_merc(
                 },
             )
 
-    async def event_stream():
-        queue: asyncio.Queue[dict] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def emit(ev: dict) -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, ev)
-
+    def _worker(emit):
         if cross_install:
-            task = asyncio.create_task(asyncio.to_thread(
-                _run_move_cross_install,
+            _run_move_cross_install(
                 info=info, target_info=target_info, state=state,
                 source_slot=slot, dest_slot=body.to_slot, force=body.force,
                 emit=emit,
-            ))
+            )
         else:
-            task = asyncio.create_task(asyncio.to_thread(
-                _run_move_same_install,
+            _run_move_same_install(
                 info=info, state=state,
                 source_slot=slot, dest_slot=body.to_slot,
                 emit=emit,
-            ))
+            )
 
-        try:
-            while True:
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    if task.done() and queue.empty():
-                        exc = task.exception()
-                        if exc is not None:
-                            yield json.dumps({
-                                "done": True, "ok": False,
-                                "error": "INTERNAL_ERROR",
-                                "message": f"{type(exc).__name__}: {exc}",
-                            }) + "\n"
-                        else:
-                            yield json.dumps({
-                                "done": True, "ok": False,
-                                "error": "INTERNAL_ERROR",
-                                "message": "Worker thread finished without emitting done event.",
-                            }) + "\n"
-                        return
-                    continue
-                yield json.dumps(ev) + "\n"
-                if ev.get("done"):
-                    break
-        finally:
-            try:
-                await task
-            except Exception:
-                pass
-
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    return _ndjson_worker_stream(_worker)
 
 
 def _run_duplicate(
@@ -1259,7 +1386,7 @@ def _run_duplicate(
     backup_entry: Optional[backup.BackupEntry] = None
     error_step: Optional[str] = None
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         try:
             # Step 1: back up source AND dest (dest is mutated; source is
             # snapshotted as a safety net so the rollback can recover
@@ -1304,6 +1431,17 @@ def _run_duplicate(
             emit({"step": "copy", "status": "start", "label": "Copying merc data…"})
             try:
                 report = relocator.duplicate(info.path, source_slot=source_slot, dest_slot=dest_slot)
+            except relocator.PreserveOnlyMoveError as e:
+                emit({
+                    "done": True, "ok": False,
+                    "error": e.code,
+                    "body_type": e.body_type,
+                    "message": str(e),
+                    "error_step": "copy",
+                    "steps_completed": steps_completed,
+                    "backup_id": backup_entry.id if backup_entry else None,
+                })
+                return
             except relocator.MoveError as e:
                 emit({
                     "done": True, "ok": False,
@@ -1363,50 +1501,13 @@ async def duplicate_merc(
     info = _resolve_install(install_id)
     state = get_state()
 
-    async def event_stream():
-        queue: asyncio.Queue[dict] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def emit(ev: dict) -> None:
-            loop.call_soon_threadsafe(queue.put_nowait, ev)
-
-        task = asyncio.create_task(asyncio.to_thread(
-            _run_duplicate,
+    def _worker(emit):
+        _run_duplicate(
             info=info,
             state=state,
             source_slot=slot,
             dest_slot=body.to_slot,
             emit=emit,
-        ))
+        )
 
-        try:
-            while True:
-                try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    if task.done() and queue.empty():
-                        exc = task.exception()
-                        if exc is not None:
-                            yield json.dumps({
-                                "done": True, "ok": False,
-                                "error": "INTERNAL_ERROR",
-                                "message": f"{type(exc).__name__}: {exc}",
-                            }) + "\n"
-                        else:
-                            yield json.dumps({
-                                "done": True, "ok": False,
-                                "error": "INTERNAL_ERROR",
-                                "message": "Worker thread finished without emitting done event.",
-                            }) + "\n"
-                        return
-                    continue
-                yield json.dumps(ev) + "\n"
-                if ev.get("done"):
-                    break
-        finally:
-            try:
-                await task
-            except Exception:
-                pass
-
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    return _ndjson_worker_stream(_worker)

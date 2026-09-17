@@ -3,7 +3,7 @@
  * `vfs_config_path` disagrees with the VFS_CONFIG_INI line currently
  * written into the install's Ja2.ini.
  *
- * Bug-review B5 (CONFIRMED). After bug #11 removed the auto-apply on
+ * After bug #11 removed the auto-apply on
  * activation, the user can register the same install folder twice —
  * once bound to AIMNAS, once to Wildfire — and switch between them in
  * MercWizard without Ja2.ini following along. The game engine reads

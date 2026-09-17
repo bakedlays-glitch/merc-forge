@@ -8,8 +8,8 @@
 # unpacks dependencies to %TEMP%\_MEIxxxxx\ on each launch. Rationale:
 #   - Single file is easier for Tauri externalBin to bundle and ship
 #   - The cost (~3-5s cold start unpack) is acceptable for this app
-#   - kill_sidecar uses `taskkill /F /T` to walk the bootloader + child
-#     Python interpreter pair so neither is orphaned on shutdown
+#   - The shell holds an authenticated loopback lifeline; closing it makes the
+#     Python runtime exit, including the child interpreter of the one-file bootloader
 #
 # The Tauri shell expects the binary at `binaries/mercwizard_core-x86_64-pc-windows-msvc.exe`
 # (per tauri.conf.json's externalBin entry). The build script copies
@@ -35,6 +35,10 @@ a = Analysis(
         ('mercwizard_core/mapforge/corpus/coverage.json',
          'mercwizard_core/mapforge/corpus'),
         ('ja2py', 'ja2py'),
+        # Placement oracle's fence role table (routes/mapforge_placement.py) —
+        # without it the FROZEN build's /placement/tables returns an empty
+        # fence table (dev runs never hit this; the JSON sits next to the .py).
+        ('data/placement', 'data/placement'),
     ],
     hiddenimports=[
         'lxml.etree', 'lxml._elementpath',
@@ -100,4 +104,3 @@ exe = EXE(
     entitlements_file=None,
     icon=None,
 )
-

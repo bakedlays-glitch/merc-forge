@@ -11,6 +11,7 @@ from .. import audit as audit_mod
 from .. import backup as backup_mod
 from .. import gap as gap_mod
 from .. import voice as voice_mod
+from ..body_types import BodyTypeWriteError, body_types_for_install, validate_body_type_write
 from ..inject import aim_availability, merc_availability, profiles_xml, starting_gear
 from ..inject import edt as edt_mod
 from ..inject._atomic_xml import write_bytes_atomic
@@ -25,7 +26,7 @@ class WmercContents:
     """The unpacked contents of a .wmerc bundle, in memory."""
     manifest: WmercManifest
     files: dict[str, bytes] = field(default_factory=dict)  # filename → raw bytes
-    # Phase 2.2: entries we tried to extract but couldn't. List of
+    # Entries we tried to extract but couldn't. List of
     # `(arcname, error_type_name)` tuples. Surfaced to the user via
     # `ImportReport.partial_failures` so corrupt/permission-denied entries
     # don't silently disappear.
@@ -425,7 +426,13 @@ def deploy_import(
     from ..slot_picker import build_slot_picker
     picker = build_slot_picker(install_root, ctx=target_ctx)
     slot_info = picker.slots[resolved_slot] if 0 <= resolved_slot < len(picker.slots) else None
-    issues = audit_mod.audit_full(merc, gear=gear, aim_binding=aim_binding, slot_info=slot_info)
+    issues = audit_mod.audit_full(
+        merc,
+        gear=gear,
+        aim_binding=aim_binding,
+        slot_info=slot_info,
+        body_types=body_types_for_install(install_root).options,
+    )
     if audit_mod.has_errors(issues):
         raise ImportAuditError([i.model_dump() for i in issues])
 
@@ -441,11 +448,18 @@ def deploy_import(
     is_occupied = profiles_xml.is_slot_occupied(profiles_path, resolved_slot)
     if is_occupied and not force:
         raise SlotOccupiedError(resolved_slot)
+    try:
+        validate_body_type_write(
+            install_root,
+            merc.ubBodyType,
+        )
+    except BodyTypeWriteError as error:
+        raise ImportAuditError([error.issue()]) from error
 
     # ── Step 6: backup ──
     # MUST happen BEFORE the force-overwrite clear_bio below — otherwise the
     # snapshot captures the post-clear state and a step-7 rollback can't
-    # recover the previous occupant's bio (Phase 2.1 fix). The snapshot is
+    # recover the previous occupant's bio. The snapshot is
     # cheap if nothing's been touched yet, and idempotent.
     backup_files = backup_mod.files_for_merc(install_root, resolved_slot, merc.ubFaceIndex)
     backup_entry = backup_mod.snapshot(
@@ -482,7 +496,7 @@ def deploy_import(
     )
     # Surface the pre-write schema warnings on the report
     report.partial_failures.extend(pre_write_warnings)
-    # Phase 2.2: surface any zip-read errors so the user knows which
+    # Surface any zip-read errors so the user knows which
     # bundle entries couldn't be extracted instead of them silently
     # disappearing into nothing.
     for arc_name, err_type in contents.read_errors:
@@ -773,7 +787,7 @@ def _step8_portrait(
     # usMouthX/Y to position the strips at render time. If compile-crop
     # and engine-render coords don't match, the animation strips appear
     # at the wrong spot — a user saw this as "eyes and mouth floating" on
-    # Eskimo 2026-05-14.
+    # Eskimo.
     #
     # Priority for choosing the box:
     #   1. Explicit bundle portrait metadata (rare — most exports don't
@@ -1218,7 +1232,7 @@ def _install_table_rows(
     #                          that point past the target install's AIMBIOS.EDT.
     #
     #   MercAvailability.xml — same logic with `manifest.merc_binding`.
-    #                          Concrete failure mode observed 2026-05-14:
+    #                          Concrete failure mode observed:
     #                          Eskimo's import wrote MercBioID=42 (auto) into
     #                          a clean row, then table_rows processing
     #                          overwrote it with MercBioID=47 from the
@@ -1270,7 +1284,7 @@ def _install_table_rows(
         if filename in INTENTIONAL_SKIPS:
             # Surface in the partial-failures list with a clear "by
             # design" note so the import report makes the skip visible
-            # to the user (TODO #12). AIM/MERC availability bindings
+            # to the user. AIM/MERC availability bindings
             # are remapped via `manifest.aim_binding` / `merc_binding`
             # (not bundled XML); Vehicles.xml is unrelated to merc data.
             # Bundling the verbatim row would clobber the importer's
@@ -1304,15 +1318,8 @@ def _install_table_rows(
             )
             continue
 
-        # ── FaceGear.xml: NEVER round-trip through ElementTree. The engine's
-        # dual-entry "last wins" architecture is silently corrupted by an ET
-        # reflow (documented KGoggles boot-CTD — MercWizard2/CLAUDE.md
-        # "FaceGear is overlay, not portrait paint"; wasteland-facegear
-        # skill). The documented-safe mutation is to append a fresh <ITEM>
-        # block before the root close via byte-level string insertion +
-        # atomic write; every existing (stock + custom) entry stays
-        # byte-for-byte intact and the appended entry overrides any stock
-        # entry with the same uiIndex at runtime.
+        # FaceGear.xml is byte-spliced, never reserialized; see
+        # _upsert_facegear_row_text for why an ElementTree reflow corrupts it.
         if key == "face_gear":
             _upsert_facegear_row_text(
                 target_path, row_text, id_tag, target_slot, filename, report

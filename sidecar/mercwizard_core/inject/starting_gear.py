@@ -83,7 +83,7 @@ import threading
 # after the first call. This is the file the audit walks per-merc — without
 # the cache, a 16-cell roster mount re-parses MercStartingGear.xml 16 times.
 #
-# Lock added 2026-05-25 — see aim_availability for the rationale (FastAPI
+# Lock added — see aim_availability for the rationale (FastAPI
 # threadpool fan-out + race on FIFO eviction).
 _PARSE_CACHE: dict[tuple[str, int, int], dict[int, Gear]] = {}
 _PARSE_CACHE_MAX = 4
@@ -182,7 +182,7 @@ def _parse_mercgear(entry: etree._Element, ui_index: int) -> Gear:
         # writes refuse — see `upsert` below. Pre-fix the silent
         # substitution committed an empty default kit back on Edit →
         # save, permanently overwriting the malformed-but-recoverable
-        # original. Sweep bug-review finding.
+        # original.
         kits = [GearKit(mGearKitName=PARSE_FAILED_MARKER)]
     return Gear(mIndex=ui_index, mName=name, kits=kits)
 
@@ -205,8 +205,7 @@ def upsert(gear_xml_path: Path, gear: Gear) -> None:
     Without this guard, a roster read → Edit page → Save round-trip
     would silently overwrite the malformed-but-recoverable source bytes
     with the wizard's empty default kit. Surface ValueError instead so
-    the user knows the gear file needs manual repair. Sweep bug-review
-    finding.
+    the user knows the gear file needs manual repair.
     """
     for kit in gear.kits:
         if kit.mGearKitName == PARSE_FAILED_MARKER:

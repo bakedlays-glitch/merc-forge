@@ -25,7 +25,7 @@ def health() -> dict:
     Wizard — so this endpoint dropped the `scan_in_progress` /
     `last_scan_error` / `scan_progress` fields it used to expose.
 
-    `vfs_mismatch` (bug-review B5) reports whether the active install's
+    `vfs_mismatch` reports whether the active install's
     bound `vfs_config_path` disagrees with what Ja2.ini's VFS_CONFIG_INI
     line currently says. After bug #11 removed the auto-apply on
     activation, the user can switch between sibling registrations
@@ -41,7 +41,6 @@ def health() -> dict:
     # return None and 500 the endpoint on .id. The Tauri shell pings
     # /health every 2s and respawns on 3 consecutive failures, so a
     # 500 burst here triggers a sidecar respawn for a benign race.
-    # Sweep bug-review finding.
     active = state.active()
     vfs_mismatch: Optional[bool] = None
     if active is not None:
@@ -63,4 +62,4 @@ def health() -> dict:
 
 @router.get("/version")
 def version() -> dict:
-    return {"core": core_version, "tool": "MercWizard", "tool_version": "2.0.0"}
+    return {"core": core_version, "tool": "MercWizard", "tool_version": "1.0.0-beta.4"}

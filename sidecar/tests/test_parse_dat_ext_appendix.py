@@ -39,9 +39,14 @@ def _tail_32() -> bytes:
     return b"\x00" * 32
 
 
-def _exitgrid_section(count: int) -> bytes:
-    """uint16 count + count*12-byte exit grid records (all-zero records)."""
-    return struct.pack("<H", count) + b"\x00" * (12 * count)
+def _exitgrid_section(count: int, major: float = 5.0) -> bytes:
+    """uint16 count + count exit-grid records (all-zero records).
+    Record size is version-dependent: 12 bytes for major>=7.0, 7 bytes
+    (the _OLD_EXITGRID "2+5" read — Exit Grids.cpp:149-153) for older
+    maps. The fixture used to hardcode 12 for v5, encoding the very bug
+    the parser had."""
+    size = 12 if major >= 7.0 else 7
+    return struct.pack("<H", count) + b"\x00" * (size * count)
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +106,9 @@ class TestTailSize:
         the exitgrid section, and the cursor will land WRONG (either
         misreading the count, or overrunning). We verify the happy path
         passes cleanly so that any failure isolates to the tail size."""
-        # Build 100B tail + count=1 + 12B record — total 114 bytes
+        # Build 100B tail + count=1 + 7B legacy record — total 109 bytes
         data = _tail_100() + _exitgrid_section(1)
-        assert len(data) == 114
+        assert len(data) == 109
         out = parse_appendix_minimal(
             data=data,
             appendix_offset=0,
@@ -116,8 +121,8 @@ class TestTailSize:
     def test_v7_tail_size_32_unchanged(self):
         """v7+ tail = 32 bytes. This is already correct in the code; must
         remain correct after the fix (don't accidentally break it)."""
-        # 32B tail + count=2 + 24B records
-        data = _tail_32() + _exitgrid_section(2)
+        # 32B tail + count=2 + 24B records (12-byte modern layout)
+        data = _tail_32() + _exitgrid_section(2, major=7.0)
         out = parse_appendix_minimal(
             data=data,
             appendix_offset=0,

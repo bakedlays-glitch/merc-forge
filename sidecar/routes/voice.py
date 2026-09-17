@@ -1,16 +1,13 @@
 """Voice file management routes — list/upload/delete .wav clips per merc."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 
 from mercwizard_core import voice
-from mercwizard_core.cross_lock import cross_process_install_lock
 
 from .roster import _resolve_install
-from .state import get_state
 
 router = APIRouter()
 
@@ -95,7 +92,7 @@ def _probe_speech_slf(install_root, voice_index: int) -> int:
     # closes. Without this, every /voice/probe call leaked one Speech.slf
     # handle — on Windows that keeps the SLF exclusively-open so mod
     # managers / file replacers couldn't touch it until the sidecar
-    # restarted. Sweep bug-review finding.
+    # restarted.
     import os
     prefix_dir = f"/{voice_index}/"
     prefix_flat = f"{voice_index}_"
@@ -151,72 +148,16 @@ async def upload_voice_clips(
     barks: str | None = Form(default=None),
     install_id: str | None = Query(default=None),
 ) -> dict:
-    info = _resolve_install(install_id)
-    idx = _voice_index_for_slot(info, slot)
-    state = get_state()
-
-    # Optional auto-naming. `barks` is a JSON list parallel to `files`; each
-    # entry is the JA2 quote/bark number for that clip (or null to keep the
-    # uploaded filename). When set, the clip is written engine-correctly as
-    # `<voiceIndex:03d>_<bark:03d>.<ext>` so the user never has to name it.
-    bark_list: list = []
-    if barks:
-        import json
-        try:
-            parsed = json.loads(barks)
-            if isinstance(parsed, list):
-                bark_list = parsed
-        except (ValueError, TypeError):
-            bark_list = []
-
-    added: list[dict] = []
-    skipped: list[dict] = []
-    with cross_process_install_lock(info.id), state.write_lock:
-        for i, f in enumerate(files):
-            original = f.filename or "clip.wav"
-            try:
-                data = await f.read()
-                bark = bark_list[i] if i < len(bark_list) else None
-                if bark is not None:
-                    ext = Path(original).suffix
-                    if ext.lower() not in {".wav", ".ogg", ".mp3"}:
-                        ext = ".wav"
-                    name = f"{idx:03d}_{int(bark):03d}{ext}"
-                else:
-                    name = original
-                clip = voice.add_clip_bytes(info.path, idx, name, data)
-                added.append({"name": clip.name, "size_bytes": clip.size_bytes})
-            except (ValueError, TypeError) as e:
-                skipped.append({"name": original, "reason": str(e)})
-
-    return {
-        "ok": True,
-        "slot": slot,
-        "voice_index": idx,
-        "added": added,
-        "skipped": skipped,
-    }
+    raise HTTPException(status_code=409, detail=voice.legacy_mutation_detail(slot))
 
 
 @router.delete("/voice/{slot}/{filename}")
 def delete_voice_clip(
     slot: int, filename: str, install_id: str | None = Query(default=None)
 ) -> dict:
-    info = _resolve_install(install_id)
-    idx = _voice_index_for_slot(info, slot)
-    state = get_state()
-    with cross_process_install_lock(info.id), state.write_lock:
-        removed = voice.delete_clip(info.path, idx, filename)
-    if not removed:
-        raise HTTPException(status_code=404, detail={"error": "CLIP_NOT_FOUND"})
-    return {"ok": True, "removed": filename}
+    raise HTTPException(status_code=409, detail=voice.legacy_mutation_detail(slot))
 
 
 @router.delete("/voice/{slot}")
 def delete_all_voice_clips(slot: int, install_id: str | None = Query(default=None)) -> dict:
-    info = _resolve_install(install_id)
-    idx = _voice_index_for_slot(info, slot)
-    state = get_state()
-    with cross_process_install_lock(info.id), state.write_lock:
-        count = voice.delete_all_clips(info.path, idx)
-    return {"ok": True, "removed_count": count}
+    raise HTTPException(status_code=409, detail=voice.legacy_mutation_detail(slot))

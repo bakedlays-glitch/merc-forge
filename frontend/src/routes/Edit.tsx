@@ -5,21 +5,29 @@ import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  adoptRpcPlacement,
   compilePortrait,
   formatApiError,
   getApiBaseUrl,
+  getMediaToken,
   getSlot,
+  listRpcPlacements,
+  removeRpcPlacement,
+  saveRpcPortrait,
+  setRpcPlacement,
   updateMercStreaming,
   type SaveProgressEvent,
 } from "../lib/api";
-import { getServerToken } from "../lib/tauri";
 import AnimationFrameStrip from "../components/AnimationFrameStrip";
 import BackgroundPicker from "../components/BackgroundPicker";
 import EyeMouthPicker, { type SubframeBox } from "../components/EyeMouthPicker";
 import FaceGearCapacityBanner from "../components/FaceGearCapacityBanner";
 import FaceGearOverlayAuthor from "../components/FaceGearOverlayAuthor";
 import PortraitDropzone from "../components/PortraitDropzone";
+import RpcDialogueTab from "../components/RpcDialogueTab";
+import RpcReadinessRail from "../components/RpcReadinessRail";
 import SaveProgressBar from "../components/SaveProgressBar";
+import SectorTilePicker from "../components/SectorTilePicker";
 import SaveSnapshotBanner from "../components/SaveSnapshotBanner";
 import TraitPicker from "../components/TraitPicker";
 import VoiceFileManager from "../components/VoiceFileManager";
@@ -31,6 +39,8 @@ import type { AimBinding, Merc } from "../lib/schema";
 import { ATTITUDE_OPTIONS } from "../lib/attitudes";
 import { CHARACTER_TRAIT_OPTIONS } from "../lib/characterTraits";
 import { DISABILITY_OPTIONS } from "../lib/disabilities";
+import { VANILLA_VOICE_OPTIONS } from "../lib/voices";
+import VoiceIndexHint from "../components/VoiceIndexHint";
 
 const TYPE_OPTIONS: ReadonlyArray<readonly [number, string]> = [
   [1, "AIM"],
@@ -133,8 +143,8 @@ export default function Edit() {
   return <EditForm key={slot} slot={slot} onBack={() => setParams({})} />;
 }
 
-// EditPicker (the V1 simple-card "pick a merc" grid) was deleted
-// 2026-05-25. The /edit route now redirects to /merc-wizard when
+// EditPicker (the V1 simple-card "pick a merc" grid) was deleted.
+// The /edit route now redirects to /merc-wizard when
 // there's no ?slot=N param. See the Edit() function above.
 
 // Animated loading state for the Edit page. The static "Loading
@@ -210,8 +220,27 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
   const [merc, setMerc] = useState<Merc | null>(null);
   const [aim, setAim] = useState<AimBinding | null>(null);
 
+  // Baseline the form was last seeded from (serialized). Guards the seed
+  // effect below: React Query refetches ["slot", slot] on window focus
+  // (v5 default), and an unguarded `setMerc(initialMerc)` on every refetch
+  // silently replaced a minute of in-progress edits with server state the
+  // moment the user alt-tabbed to the game and back. Seed only a PRISTINE
+  // form (or first load); `save.onSuccess` clears the ref so the post-save
+  // refetch re-baselines to the server's canonical echo.
+  const baselineRef = useRef<string | null>(null);
   useEffect(() => {
-    if (initialMerc) setMerc(initialMerc);
+    if (!initialMerc) return;
+    const pristine =
+      merc === null ||
+      baselineRef.current === null ||
+      JSON.stringify(merc) === baselineRef.current;
+    if (pristine) {
+      setMerc(initialMerc);
+      baselineRef.current = JSON.stringify(initialMerc);
+    }
+    // `merc` deliberately not a dep: the guard reads it, but only a NEW
+    // baseline (refetch/slot change) should trigger a seed decision.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMerc]);
   useEffect(() => {
     if (slotData.data) setAim(slotData.data.aim_binding);
@@ -234,7 +263,7 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
   const [saveEvents, setSaveEvents] = useState<SaveProgressEvent[] | null>(null);
   const [saveDone, setSaveDone] = useState(false);
   // Track the success-fade timeout so we can cancel it on unmount.
-  // Bug-review #113 — without this the setState after the fade fires
+  // Without this the setState after the fade fires
   // on an unmounted component when the user navigates away.
   const fadeTimeoutRef = useRef<number | null>(null);
   useEffect(() => {
@@ -281,15 +310,20 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
     },
     onSuccess: () => {
       setSaveDone(true);
+      // The save succeeded, so the form's current state IS the new
+      // baseline — clear the seed guard so the ["slot", slot] refetch
+      // below re-seeds the form from the server's canonical echo.
+      baselineRef.current = null;
       qc.invalidateQueries({ queryKey: ["roster"] });
       qc.invalidateQueries({ queryKey: ["slot", slot] });
+      qc.invalidateQueries({ queryKey: ["rpc-readiness", slot] });
       // Edit can change usVoiceIndex — invalidate so VoiceFileManager
       // shows the new folder badge if the user changed which voice the
       // merc points at.
       qc.invalidateQueries({ queryKey: ["voice", slot] });
       // Slot picker — Edit can change merc Type, Name, ubFaceIndex,
       // any of which the picker surfaces in its tooltip/category
-      // chips. Bug-review finding E4.
+      // chips.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
       // Fade the progress bar out after 2 seconds so the user gets a
       // beat to read "Saved." before it clears.
@@ -353,6 +387,10 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
           case for freshly-created mercs). See SaveSnapshotBanner. */}
       <SaveSnapshotBanner slot={slot} action="edit" />
 
+      {merc.Type === 3 && (
+        <RpcReadinessRail profile={merc.uiIndex} onNavigate={setTab} />
+      )}
+
       <nav className="flex gap-1 border-b border-wasteland-700">
         {(
           [
@@ -360,6 +398,8 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
             ["portrait", "Portrait"],
             ["voice", "Voice"],
             ["facegear", "FaceGear"],
+            ["placement", "Placement"],
+            ["recruitment", "Recruit"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -405,12 +445,15 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
           </p>
           <FaceGearCapacityBanner faceIndex={merc.ubFaceIndex} />
           <FaceGearOverlayAuthor
+            slot={merc.uiIndex}
             faceIndex={merc.ubFaceIndex}
             eyeX={merc.usEyesX}
             eyeY={merc.usEyesY}
           />
         </section>
       )}
+      {tab === "placement" && <EditPlacementTab merc={merc} />}
+      {tab === "recruitment" && <RpcDialogueTab merc={merc} />}
 
       {tab === "profile" && (
         <>
@@ -425,7 +468,7 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
           />
         </label>
         <label className="block">
-          <span className="text-sm font-medium text-wasteland-100">Nickname (max 9)</span>
+          <span className="text-sm font-medium text-wasteland-100">Nickname (max 9 chars)</span>
           <input
             className="input mt-1"
             value={merc.zNickname}
@@ -456,16 +499,31 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
             <option value={1}>Female</option>
           </select>
         </label>
-        <label className="block">
-          <span className="text-sm font-medium text-wasteland-100">Voice index</span>
-          <input
-            type="number"
+        <label className="block col-span-2">
+          <span className="text-sm font-medium text-wasteland-100">
+            Voice donor (which merc's voice files this merc plays in-game)
+          </span>
+          <select
             className="input mt-1"
             value={merc.usVoiceIndex}
-            min={0}
-            max={255}
-            onChange={setNum("usVoiceIndex")}
-          />
+            onChange={(e) => set("usVoiceIndex", Number(e.target.value))}
+          >
+            {/* Keep the current value selectable even when it's a custom /
+                out-of-range index (a mod install or a hand-edited profile
+                can carry a voice index past the vanilla 0-39 range) — else
+                the controlled <select> would silently snap to option 0. */}
+            {!VANILLA_VOICE_OPTIONS.some(([idx]) => idx === merc.usVoiceIndex) && (
+              <option value={merc.usVoiceIndex}>
+                Slot {merc.usVoiceIndex} — (current)
+              </option>
+            )}
+            {VANILLA_VOICE_OPTIONS.map(([idx, name]) => (
+              <option key={idx} value={idx}>
+                Slot {idx} — {name}
+              </option>
+            ))}
+          </select>
+          <VoiceIndexHint voiceIndex={merc.usVoiceIndex} />
         </label>
       </section>
 
@@ -546,7 +604,7 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
       </section>
 
       {/* ── Demographics: race, nationality, body type ────────────────
-          Was missing from Edit pre-2026-05-24 (user feedback: "edit seems to be
+          Was missing from Edit (user feedback: "edit seems to be
           missing a bunch of stuff you could edit"). Shared component
           with Create.tsx via components/forms/. */}
       <section className="card space-y-3">
@@ -604,7 +662,7 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
         <div className="flex items-center justify-between">
           <button
             className="btn-primary"
-            disabled={save.isPending}
+            disabled={save.isPending || !merc.zName.trim() || !merc.zNickname.trim()}
             onClick={() => save.mutate()}
           >
             {save.isPending ? "Saving..." : "Save changes"}
@@ -613,6 +671,14 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
             <span className="text-sm text-rust-400">Saved.</span>
           )}
         </div>
+        {(!merc.zName.trim() || !merc.zNickname.trim()) && (
+          <p className="text-xs text-rust-300">
+            {/* Match Create's guard: the engine keys UI + saves on a
+                non-empty name/nickname, and a blank one renders as an
+                empty slot in-game. */}
+            Fill in both Full name and Nickname to save.
+          </p>
+        )}
         <SaveProgressBar
           events={saveEvents}
           done={saveDone}
@@ -634,7 +700,7 @@ function EditForm({ slot, onBack }: { slot: number; onBack: () => void }) {
   );
 }
 
-type EditTab = "profile" | "portrait" | "voice" | "facegear";
+type EditTab = "profile" | "portrait" | "voice" | "facegear" | "placement" | "recruitment";
 
 /** Skeleton block sized to the bigface portrait (106×122). Used both
  * pre-URL (while the api base + token resolve) and while the IMG is
@@ -779,13 +845,19 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
   // that the merc already had art — which made it hard to tell what
   // they were about to overwrite.
   //
-  // Built with a `?_t=<token>` query param because `<img>` tags can't
-  // attach the X-MercWizard-Token header. See mediaUrl() docstring.
+  // Built with a `?_t=` query param because `<img>` tags can't attach
+  // the X-MercWizard-Token header. That param carries the GET-only
+  // media token, never the session token. See mediaUrl() docstring.
   const [portraitUrls, setPortraitUrls] = useState<Record<string, string> | null>(null);
   const [animFramesUrl, setAnimFramesUrl] = useState<string | null>(null);
+  // Bumped by recompile.onSuccess so the previews rebuild with a fresh
+  // cache-bust — the `v` below was frozen at mount, so a successful
+  // recompile kept showing the OLD art and users re-ran the destructive
+  // overwrite thinking it had failed.
+  const [previewGen, setPreviewGen] = useState(0);
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getApiBaseUrl(), getServerToken()]).then(([base, token]) => {
+    Promise.all([getApiBaseUrl(), getMediaToken()]).then(([base, token]) => {
       if (cancelled) return;
       const tokenQs = token ? `&_t=${encodeURIComponent(token)}` : "";
       // Cache-bust on every mount so a fresh recompile shows new art
@@ -806,7 +878,7 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
       // still works for picking a new file.
     });
     return () => { cancelled = true; };
-  }, [merc.uiIndex]);
+  }, [merc.uiIndex, previewGen]);
 
   useEffect(() => {
     return () => {
@@ -817,10 +889,9 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
   const recompile = useMutation({
     mutationFn: async () => {
       if (!portrait) throw new Error("Pick a portrait first");
-      return compilePortrait(portrait, merc.ubFaceIndex, {
+      const portraitOptions = {
         eye_x: eyeBox.x, eye_y: eyeBox.y, eye_w: eyeBox.w, eye_h: eyeBox.h,
         mouth_x: mouthBox.x, mouth_y: mouthBox.y, mouth_w: mouthBox.w, mouth_h: mouthBox.h,
-        skip_animation: true,
         bigface_image: bigfaceImage ?? undefined,
         anim_eye_1: eyeFrames[0] ?? undefined,
         anim_eye_2: eyeFrames[1] ?? undefined,
@@ -829,10 +900,24 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
         anim_mouth_1: mouthFrames[0] ?? undefined,
         anim_mouth_2: mouthFrames[1] ?? undefined,
         anim_mouth_3: mouthFrames[2] ?? undefined,
+      };
+      if (merc.Type === 3) {
+        return saveRpcPortrait(portrait, "edit", merc, undefined, portraitOptions);
+      }
+      return compilePortrait(portrait, merc.ubFaceIndex, {
+        ...portraitOptions,
+        skip_animation: true,
+        rpc_talkface: false,
       });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["roster"] });
+      qc.invalidateQueries({ queryKey: ["slot", merc.uiIndex] });
+      qc.invalidateQueries({ queryKey: ["rpc-small-face", merc.uiIndex] });
+      qc.invalidateQueries({ queryKey: ["rpc-readiness", merc.uiIndex] });
+      // Rebuild the "current portraits on disk" previews with a fresh
+      // cache-bust so the tab shows the art that was just written.
+      setPreviewGen((g) => g + 1);
     },
   });
 
@@ -845,8 +930,9 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
         Writes new <code className="font-mono">BigFace</code>, <code className="font-mono">SmallFace</code>,
         <code className="font-mono">65Face</code>, and <code className="font-mono">33Face</code> STIs at
         face index <code className="font-mono">{merc.ubFaceIndex}</code> in the active install. The
-        merc's <code className="font-mono">usEyesX/Y</code> + <code className="font-mono">usMouthX/Y</code>{" "}
-        in MercProfiles.xml are NOT updated by this tab — save the Profile tab to change those.
+        {merc.Type === 3
+          ? " RPC talk-panel face and both coordinate systems are updated together."
+          : " profile eye and mouth coordinates are not changed by this tab."}
       </p>
 
       {/* Current portrait on disk — shows what's there before the user
@@ -968,5 +1054,219 @@ function EditPortraitTab({ merc }: { merc: Merc }) {
         )}
       </div>
     </section>
+  );
+}
+
+function EditPlacementTab({ merc }: { merc: Merc }) {
+  const qc = useQueryClient();
+  const profile = merc.uiIndex;
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["rpc-placements"],
+    queryFn: () => listRpcPlacements(),
+  });
+
+  const managedHere = data?.managed.find((p) => p.profile === profile);
+  const handHere = data?.handAuthored.find((p) => p.profile === profile);
+
+  const [sector, setSector] = useState("");
+  const [gridno, setGridno] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const [showPicker, setShowPicker] = useState(false);
+
+  // Seed the form from an existing placement once it loads.
+  const seedSector = managedHere?.sector ?? handHere?.sector;
+  const seedGridno = managedHere?.gridno ?? handHere?.gridno;
+  useEffect(() => {
+    if (seedSector !== undefined) setSector(seedSector);
+    if (seedGridno !== undefined) setGridno(String(seedGridno));
+  }, [seedSector, seedGridno]);
+
+  const gridnoNum = Number(gridno);
+  const gridnoValid =
+    gridno.trim() !== "" && Number.isInteger(gridnoNum) && gridnoNum >= 0 && gridnoNum <= 25599;
+  const sectorValid = /^[A-Pa-p]\s*\d{1,2}$/.test(sector.trim());
+
+  const save = useMutation({
+    mutationFn: () =>
+      setRpcPlacement({
+        profile,
+        sector: sector.trim(),
+        gridno: gridnoNum,
+        label: merc.zNickname || merc.zName || "",
+      }),
+    onSuccess: (res) => {
+      setWarnings(res.warnings);
+      setMsg(`Placed at ${res.placement.sector}, gridno ${res.placement.gridno}.`);
+      qc.invalidateQueries({ queryKey: ["rpc-placements"] });
+      qc.invalidateQueries({ queryKey: ["rpc-readiness", profile] });
+    },
+    onError: (e) => {
+      setWarnings([]);
+      setMsg(formatApiError(e));
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: () => removeRpcPlacement(profile),
+    onSuccess: () => {
+      setWarnings([]);
+      setMsg("Placement removed.");
+      qc.invalidateQueries({ queryKey: ["rpc-placements"] });
+      qc.invalidateQueries({ queryKey: ["rpc-readiness", profile] });
+    },
+    onError: (e) => setMsg(formatApiError(e)),
+  });
+
+  const adopt = useMutation({
+    mutationFn: () => adoptRpcPlacement(profile),
+    onSuccess: (res) => {
+      setWarnings(res.warnings);
+      setMsg(`Adopted the hand-authored placement into the managed block (${res.placement.sector}).`);
+      qc.invalidateQueries({ queryKey: ["rpc-placements"] });
+      qc.invalidateQueries({ queryKey: ["rpc-readiness", profile] });
+    },
+    onError: (e) => setMsg(formatApiError(e)),
+  });
+
+  const typeLabel = TYPE_OPTIONS.find(([v]) => v === merc.Type)?.[1] ?? String(merc.Type);
+
+  return (
+    <div className="space-y-4">
+      <section className="card space-y-3">
+        <h2 className="text-sm font-semibold uppercase text-wasteland-400">RPC map placement</h2>
+        <p className="text-xs text-wasteland-400">
+          Drop this merc onto a sector as an on-map RPC. Writes an{" "}
+          <code className="font-mono">InitialProfile(...)</code> line into a Merc-Wizard-managed
+          block in <code className="font-mono">Scripts/GameInit.lua</code>; hand-authored lines are
+          left untouched.
+        </p>
+        <p className="text-xs text-rust-300">
+          Takes effect on a <strong>new game</strong> only — <code className="font-mono">InitNPCs()</code>{" "}
+          runs at game start.
+        </p>
+
+        {merc.Type !== 3 && (
+          <div className="rounded border border-rust-700/60 bg-rust-950/30 p-2 text-xs text-rust-200">
+            This merc is <strong>Type {typeLabel}</strong>. An on-map placement only spawns for{" "}
+            <strong>RPC (Type 3)</strong>. Set <strong>Type → RPC</strong> in the Profile tab, save,
+            then place.
+          </div>
+        )}
+
+        {isLoading && <p className="text-xs text-wasteland-500">Loading placements…</p>}
+        {error && <p className="text-xs text-rust-300">{formatApiError(error)}</p>}
+
+        <div className="grid grid-cols-2 gap-4">
+          <label className="text-xs text-wasteland-400">
+            Sector
+            <input
+              className="input mt-1"
+              placeholder="A9"
+              value={sector}
+              onChange={(e) => setSector(e.target.value)}
+            />
+            <span className="mt-1 block text-[10px] text-wasteland-500">
+              Letter = row (A–P), number = column (1–16).
+            </span>
+          </label>
+          <label className="text-xs text-wasteland-400">
+            Grid number
+            <input
+              className="input mt-1"
+              type="number"
+              min={0}
+              max={25599}
+              placeholder="5672"
+              value={gridno}
+              onChange={(e) => setGridno(e.target.value)}
+            />
+            <span className="mt-1 block text-[10px] text-wasteland-500">
+              0–25599 — the exact tile, or pick it on the map below.
+            </span>
+          </label>
+        </div>
+
+        <div>
+          <button
+            className="btn-ghost text-xs"
+            disabled={!sectorValid}
+            onClick={() => setShowPicker(true)}
+            title={sectorValid ? "" : "Enter a valid sector (e.g. A9) first"}
+          >
+            📍 Pick tile on map
+          </button>
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            className="btn-primary text-sm"
+            disabled={!sectorValid || !gridnoValid || save.isPending}
+            onClick={() => save.mutate()}
+          >
+            {managedHere ? "Update placement" : "Place on map"}
+          </button>
+          {managedHere && (
+            <button
+              className="btn-secondary text-sm"
+              disabled={remove.isPending}
+              onClick={() => remove.mutate()}
+            >
+              Remove placement
+            </button>
+          )}
+        </div>
+
+        {msg && <p className="text-xs text-wasteland-200">{msg}</p>}
+        {warnings.map((w, i) => (
+          <p key={i} className="text-xs text-rust-300">
+            ⚠ {w}
+          </p>
+        ))}
+        {handHere && !managedHere && (
+          <div className="rounded border border-rust-700/60 bg-rust-950/30 p-2 text-xs text-rust-200">
+            <p>
+              Already placed by a hand-authored line at {handHere.sector}, gridno {handHere.gridno}.
+              Saving a managed placement on top would duplicate it. Adopt moves that line into the
+              managed block so the tool owns it.
+            </p>
+            <button
+              className="btn-secondary text-xs mt-2"
+              disabled={adopt.isPending}
+              onClick={() => adopt.mutate()}
+            >
+              Adopt into managed block
+            </button>
+          </div>
+        )}
+      </section>
+
+      {data && data.managed.length > 0 && (
+        <section className="card">
+          <h3 className="text-xs font-semibold uppercase text-wasteland-500 mb-2">
+            Managed placements ({data.managed.length})
+          </h3>
+          <ul className="space-y-0.5 font-mono text-xs text-wasteland-300">
+            {data.managed.map((p) => (
+              <li key={p.profile} className={p.profile === profile ? "text-rust-200" : ""}>
+                #{p.profile} → {p.sector} @ {p.gridno}
+                {p.label ? `  (${p.label})` : ""}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 break-all font-mono text-[10px] text-wasteland-600">{data.lua_path}</p>
+        </section>
+      )}
+
+      {showPicker && sectorValid && (
+        <SectorTilePicker
+          sector={sector}
+          currentGridno={gridnoValid ? gridnoNum : undefined}
+          onPick={(g) => setGridno(String(g))}
+          onClose={() => setShowPicker(false)}
+        />
+      )}
+    </div>
   );
 }

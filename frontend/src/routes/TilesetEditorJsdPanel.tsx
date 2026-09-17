@@ -18,6 +18,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { formatApiError } from "../lib/api";
+import { useDialog } from "../components/DialogProvider";
 import {
   getStiJsd,
   updateStiJsd,
@@ -92,7 +93,7 @@ export function TilesetEditorJsdPanel({
 
   if (jsd.isLoading) {
     return (
-      <div className="rounded border border-gray-800 p-2 text-xs text-gray-500">
+      <div className="rounded border border-wasteland-800 p-2 text-xs text-wasteland-500">
         Loading JSD…
       </div>
     );
@@ -108,9 +109,9 @@ export function TilesetEditorJsdPanel({
   const parsed = jsd.data;
 
   return (
-    <div className="rounded border border-gray-800 bg-gray-900/40 p-2 text-xs">
+    <div className="rounded border border-wasteland-800 bg-wasteland-900/40 p-2 text-xs">
       <div className="mb-1 flex items-baseline justify-between gap-2">
-        <h4 className="font-semibold text-gray-200">JSD</h4>
+        <h4 className="font-semibold text-wasteland-200">JSD</h4>
         <div className="flex items-center gap-2 text-[10px]">
           {savedAt && (
             <span className="rounded bg-emerald-950/60 px-1.5 py-0.5 text-emerald-200">
@@ -124,7 +125,7 @@ export function TilesetEditorJsdPanel({
                 setDraft(draftFromParsed(parsed));
                 setEditing(true);
               }}
-              className="rounded border border-gray-700 px-2 py-0.5 text-gray-300 hover:border-gray-500"
+              className="rounded border border-wasteland-700 px-2 py-0.5 text-wasteland-300 hover:border-wasteland-500"
             >
               Edit
             </button>
@@ -137,7 +138,7 @@ export function TilesetEditorJsdPanel({
                   setEditing(false);
                 }}
                 disabled={update.isPending}
-                className="rounded border border-gray-700 px-2 py-0.5 text-gray-300 hover:border-gray-500 disabled:opacity-50"
+                className="rounded border border-wasteland-700 px-2 py-0.5 text-wasteland-300 hover:border-wasteland-500 disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -159,7 +160,7 @@ export function TilesetEditorJsdPanel({
           )}
         </div>
       </div>
-      <div className="mb-2 truncate font-mono text-[10px] text-gray-500" title={parsed.jsd_path}>
+      <div className="mb-2 truncate font-mono text-[10px] text-wasteland-500" title={parsed.jsd_path}>
         {parsed.jsd_path}
       </div>
 
@@ -179,7 +180,7 @@ export function TilesetEditorJsdPanel({
 
       {/* Footprint tiles */}
       <details open className="mt-2">
-        <summary className="cursor-pointer text-gray-300">
+        <summary className="cursor-pointer text-wasteland-300">
           Footprint tiles ({parsed.tiles.length})
         </summary>
         <div className="mt-1 space-y-1.5">
@@ -222,8 +223,8 @@ function HeaderSection({
     <div className="space-y-2">
       {/* Flag chip checklist */}
       <div>
-        <div className="text-[10px] uppercase tracking-wider text-gray-500">
-          Flags <span className="font-mono normal-case text-gray-600">
+        <div className="text-[10px] uppercase tracking-wider text-wasteland-500">
+          Flags <span className="font-mono normal-case text-wasteland-600">
             0x{fflags.toString(16).padStart(4, "0").toUpperCase()}
           </span>
         </div>
@@ -244,8 +245,8 @@ function HeaderSection({
                 className={`rounded border px-1.5 py-0.5 text-[10px] ${
                   set
                     ? "border-emerald-600 bg-emerald-900/50 text-emerald-200"
-                    : "border-gray-700 bg-gray-900 text-gray-500"
-                } ${editing ? "cursor-pointer hover:border-gray-500" : "cursor-default opacity-80"}`}
+                    : "border-wasteland-700 bg-wasteland-900 text-wasteland-500"
+                } ${editing ? "cursor-pointer hover:border-wasteland-500" : "cursor-default opacity-80"}`}
               >
                 {name}
               </button>
@@ -290,16 +291,16 @@ function HeaderSection({
         />
       </div>
       {/* Read-only structural fields. Editing these is out of scope. */}
-      <div className="grid grid-cols-2 gap-2 text-[10px] text-gray-500">
+      <div className="grid grid-cols-2 gap-2 text-[10px] text-wasteland-500">
         <div>
           ubNumberOfTiles:{" "}
-          <span className="font-mono text-gray-300">{parsed.ubNumberOfTiles}</span>{" "}
-          <span className="text-gray-600">(read-only)</span>
+          <span className="font-mono text-wasteland-300">{parsed.ubNumberOfTiles}</span>{" "}
+          <span className="text-wasteland-600">(read-only)</span>
         </div>
         <div>
           struct_data_size:{" "}
-          <span className="font-mono text-gray-300">{parsed.struct_data_size}</span>{" "}
-          <span className="text-gray-600">(derived)</span>
+          <span className="font-mono text-wasteland-300">{parsed.struct_data_size}</span>{" "}
+          <span className="text-wasteland-600">(derived)</span>
         </div>
       </div>
     </div>
@@ -316,7 +317,7 @@ function U8Field({
 }) {
   return (
     <label className="block">
-      <span className="block text-[10px] uppercase tracking-wider text-gray-500">
+      <span className="block text-[10px] uppercase tracking-wider text-wasteland-500">
         {label}
       </span>
       <input
@@ -328,7 +329,7 @@ function U8Field({
           const v = parseInt(e.target.value, 10);
           if (Number.isFinite(v)) onChange(Math.max(0, Math.min(255, v)));
         }}
-        className="w-full rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 font-mono text-[11px] disabled:opacity-70"
+        className="w-full rounded border border-wasteland-700 bg-wasteland-900 px-1.5 py-0.5 font-mono text-[11px] disabled:opacity-70"
       />
     </label>
   );
@@ -344,7 +345,7 @@ function I8Field({
 }) {
   return (
     <label className="block">
-      <span className="block text-[10px] uppercase tracking-wider text-gray-500">
+      <span className="block text-[10px] uppercase tracking-wider text-wasteland-500">
         {label}
       </span>
       <input
@@ -356,7 +357,7 @@ function I8Field({
           const v = parseInt(e.target.value, 10);
           if (Number.isFinite(v)) onChange(Math.max(-128, Math.min(127, v)));
         }}
-        className="w-full rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 font-mono text-[11px] disabled:opacity-70"
+        className="w-full rounded border border-wasteland-700 bg-wasteland-900 px-1.5 py-0.5 font-mono text-[11px] disabled:opacity-70"
       />
     </label>
   );
@@ -387,9 +388,9 @@ function TileRow({
   }
 
   return (
-    <div className="rounded border border-gray-800 bg-gray-950/60 p-1.5">
+    <div className="rounded border border-wasteland-800 bg-wasteland-900/60 p-1.5">
       <div className="flex items-baseline gap-2 text-[10px]">
-        <span className="font-mono text-gray-400">tile {index}</span>
+        <span className="font-mono text-wasteland-400">tile {index}</span>
         <Field
           label="bX"
           value={cur.bXPos}
@@ -435,7 +436,7 @@ function Field({
 }) {
   return (
     <label className="flex items-center gap-1">
-      <span className="text-gray-500">{label}</span>
+      <span className="text-wasteland-500">{label}</span>
       <input
         type="number"
         min={min} max={max}
@@ -445,7 +446,7 @@ function Field({
           const v = parseInt(e.target.value, 10);
           if (Number.isFinite(v)) onChange(Math.max(min, Math.min(max, v)));
         }}
-        className="w-14 rounded border border-gray-700 bg-gray-900 px-1 py-0 font-mono text-[10px] disabled:opacity-70"
+        className="w-14 rounded border border-wasteland-700 bg-wasteland-900 px-1 py-0 font-mono text-[10px] disabled:opacity-70"
       />
     </label>
   );
@@ -458,11 +459,12 @@ function ProfileGrid({
   editing: boolean;
   onChange: (g: number[][]) => void;
 }) {
+  const { prompt } = useDialog();
   // 5x5 grid of byte values. View mode: colored cells (intensity from
-  // value). Edit mode: same but click to enter value via prompt() —
-  // keeps the markup small. A nicer popover could replace prompt later.
+  // value). Edit mode: click a cell to enter a 0-255 value via the app's
+  // themed prompt dialog (validated), instead of the native window.prompt.
   return (
-    <div className="inline-grid grid-cols-5 gap-px rounded border border-gray-700 bg-gray-900 p-px">
+    <div className="inline-grid grid-cols-5 gap-px rounded border border-wasteland-700 bg-wasteland-900 p-px">
       {grid.flatMap((row, r) =>
         row.map((v, c) => {
           const intensity = Math.min(255, v) / 255;
@@ -472,12 +474,19 @@ function ProfileGrid({
               key={`${r}-${c}`}
               type="button"
               disabled={!editing}
-              onClick={() => {
+              onClick={async () => {
                 if (!editing) return;
-                const raw = window.prompt(
-                  `profile[${r}][${c}] (0-255)`,
-                  String(v),
-                );
+                const raw = await prompt({
+                  title: "Edit profile cell",
+                  label: `profile[${r}][${c}] (0-255)`,
+                  defaultValue: String(v),
+                  validate: (s) => {
+                    const n = parseInt(s, 10);
+                    return Number.isFinite(n) && n >= 0 && n <= 255
+                      ? null
+                      : "Enter a whole number from 0 to 255.";
+                  },
+                });
                 if (raw === null) return;
                 const nv = parseInt(raw, 10);
                 if (!Number.isFinite(nv) || nv < 0 || nv > 255) return;
@@ -489,7 +498,7 @@ function ProfileGrid({
               }}
               title={`profile[${r}][${c}] = ${v}`}
               style={{ backgroundColor: bg }}
-              className={`flex h-5 w-5 items-center justify-center font-mono text-[8px] text-gray-200 ${
+              className={`flex h-5 w-5 items-center justify-center font-mono text-[8px] text-wasteland-200 ${
                 editing ? "cursor-pointer hover:ring-1 hover:ring-emerald-400" : "cursor-default"
               }`}
             >

@@ -9,7 +9,7 @@ import type { Merc } from "../../lib/schema";
  * code can punch it in via the raw XML or by editing MercProfiles.xml
  * directly — round-tripping preserves unknown codes.
  *
- * Extracted from Create.tsx 2026-05-24 so Edit.tsx can use the same
+ * Extracted from Create.tsx so Edit.tsx can use the same
  * fieldset without duplicating the palette enum. User feedback: "edit
  * seems to be missing a bunch of stuff you could edit?"
  */

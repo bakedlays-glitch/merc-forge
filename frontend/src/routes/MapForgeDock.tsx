@@ -1,7 +1,7 @@
 /**
  * dockview-backed rearrangeable layout for the MapForge editor — the
  * ONLY editor layout (the legacy fixed grid was removed in the IA
- * cleanup, 2026-06-10).
+ * cleanup).
  *
  * Thin, generic shell: every panel renders through the same `DockSlot`,
  * which looks up its content by panel id in the render-function map

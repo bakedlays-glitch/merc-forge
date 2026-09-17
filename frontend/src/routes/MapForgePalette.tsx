@@ -233,6 +233,8 @@ export function MapForgePalette({
       // them directly — surfacing them clutters the palette.
       if (!showShadowSlots && isShadowOnlySlot(s.slot)) continue;
       if (needle && !s.sti_filename.toLowerCase().includes(needle)
+          && !(s.display_name ?? "").toLowerCase().includes(needle)
+          && !(s.origin ?? "").toLowerCase().includes(needle)
           && !String(s.slot).includes(needle)
           && !s.category.includes(needle)) {
         continue;
@@ -544,9 +546,12 @@ function SubframePicker({
   return (
     <div className="mt-1 rounded border border-blue-700 bg-blue-950/40 p-1.5">
       <div className="mb-1 flex items-center justify-between text-[10px]">
-        <span className="font-mono text-blue-200">
-          {slot.sti_filename} · slot {slot.slot} · {subCount} frame
-          {subCount === 1 ? "" : "s"}
+        <span className="text-blue-200">
+          {slot.display_name
+            ? <>{slot.display_name}{slot.origin ? ` · ${slot.origin}` : ""}{" "}
+                <span className="font-mono text-blue-400">({slot.sti_filename})</span></>
+            : <span className="font-mono">{slot.sti_filename}</span>}
+          {" · "}slot {slot.slot} · {subCount} frame{subCount === 1 ? "" : "s"}
         </span>
         <button
           type="button"
@@ -562,12 +567,13 @@ function SubframePicker({
           {Array.from({ length: subCount }, (_, i) => i + 1).map((sub) => {
             const isPicked = activeBrush?.slot === slot.slot
                               && activeBrush?.sub === sub;
+            const subLabel = slot.sub_names?.[sub];
             return (
               <button
                 key={sub}
                 type="button"
                 onClick={() => onPickSub(sub)}
-                title={`Pick sub ${sub}`}
+                title={subLabel ? `${subLabel} (sub ${sub})` : `Pick sub ${sub}`}
                 className={`flex flex-col items-center rounded border p-0.5 hover:bg-gray-800 ${
                   isPicked
                     ? "border-emerald-500 bg-emerald-950/50"
@@ -580,8 +586,11 @@ function SubframePicker({
                   sub={sub}
                   size={40}
                 />
-                <span className={`text-[9px] ${isPicked ? "text-emerald-300" : "text-gray-500"}`}>
-                  sub {sub}
+                <span
+                  className={`w-full truncate text-center text-[9px] ${isPicked ? "text-emerald-300" : subLabel ? "text-gray-300" : "text-gray-500"}`}
+                  title={subLabel ?? `sub ${sub}`}
+                >
+                  {subLabel ?? `sub ${sub}`}
                 </span>
               </button>
             );
@@ -669,7 +678,9 @@ const SlotTile = memo(function SlotTile({
   // click into the whole footprint via the JSD manifest).
   const opensPicker = !isSingleFrame && !isMultiTile;
   const titleParts = [
-    slot.sti_filename,
+    slot.display_name ?? slot.sti_filename,
+    ...(slot.origin ? [slot.origin] : []),
+    ...(slot.display_name ? [slot.sti_filename] : []),
     `slot ${slot.slot}`,
     `${slot.frame_count} frame${slot.frame_count === 1 ? "" : "s"}`,
   ];
@@ -733,8 +744,11 @@ const SlotTile = memo(function SlotTile({
           {slot.frame_count}f
         </span>
       ) : null}
-      <div className="mt-0.5 truncate text-gray-400" style={{ maxWidth: 64 }}>
-        {slot.sti_filename.replace(/\.sti$/i, "")}
+      <div
+        className={`mt-0.5 truncate ${slot.display_name ? "text-gray-200" : "text-gray-400"}`}
+        style={{ maxWidth: 64 }}
+      >
+        {slot.display_name ?? slot.sti_filename.replace(/\.sti$/i, "")}
       </div>
       <div className="text-gray-600">s{slot.slot}</div>
     </button>

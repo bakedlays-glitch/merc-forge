@@ -143,7 +143,7 @@ async function jsonPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 function qs(params: Record<string, string | number | boolean | undefined>): string {
-  // Widened to accept boolean per TODO #18 — a future caller passing
+  // Widened to accept boolean — a future caller passing
   // `qs({ flag: true })` was previously excluded from the type union,
   // which would compile-pass and then drop the param at runtime
   // (silent bug). Booleans serialize as "true" / "false" to match
@@ -261,8 +261,7 @@ export async function streamExtractSlf(
         // got rethrown into the same catch that handled JSON.parse
         // failures — the surfaced error swallowed it and the function
         // returned the generic "stream closed without 'done' event"
-        // instead of the real backend error message. Found by the
-        // 2026-05-25 code review (HIGH).
+        // instead of the real backend error message. Found in review.
         let evt: SlfExtractEvent | null = null;
         try {
           evt = JSON.parse(line) as SlfExtractEvent;

@@ -1,0 +1,140 @@
+{
+  "_doc": "Tileset 72 (GECKO) fence family roles — APPROVED by Will on review card #708, 2026-09-02 (proposed from fences_t72_sheet_proposed_v101.png). ns/ew = the straight run sub (NS = upper-left-to-lower-right art on screen; EW = upper-right-to-lower-left); nw/ne/sw/se = corner subs per sitekit place.fence convention (neighbours E+S->nw, S+W->ne, E+N->sw, N+W->se). corners:false = no distinct corner art; the corner keys repeat the ns run piece as a fallback. Identified by contact sheet, never by filename (memory reference_fence_subs_sti_specific). notes = non-role subs MapForge never wires. corner subs are identical per family by design — one corner post covers all four orientations; corners:false families repeat the ns piece.",
+  "fences": {
+    "15": {
+      "ns": 9,
+      "ew": 4,
+      "nw": 9,
+      "ne": 9,
+      "sw": 9,
+      "se": 9,
+      "corners": false
+    },
+    "77": {
+      "ns": 2,
+      "ew": 1,
+      "nw": 2,
+      "ne": 2,
+      "sw": 2,
+      "se": 2,
+      "corners": false
+    },
+    "86": {
+      "ns": 7,
+      "ew": 6,
+      "nw": 2,
+      "ne": 2,
+      "sw": 2,
+      "se": 2,
+      "corners": true
+    },
+    "89": {
+      "ns": 1,
+      "ew": 4,
+      "nw": 17,
+      "ne": 17,
+      "sw": 17,
+      "se": 17,
+      "corners": true
+    },
+    "104": {
+      "ns": 10,
+      "ew": 15,
+      "nw": 5,
+      "ne": 5,
+      "sw": 5,
+      "se": 5,
+      "corners": true
+    }
+  },
+  "notes": {
+    "15": {
+      "1": "post/bollard",
+      "2": "post/bollard",
+      "3": "sparse tall pole — signpost or gate-arm, not a run piece",
+      "5": "alt NS style: narrow reed/wattle wall (unmatched, no EW pair)",
+      "6": "alt NS style: wide wedge reed/wattle wall (unmatched)",
+      "7": "alt NS style: full reed/wattle wall panel (unmatched)",
+      "8": "alt EW rail (duplicate of 4)",
+      "10": "alt NS rail (duplicate of 9)"
+    },
+    "77": {
+      "3": "junk-decor NS (hanging sack)",
+      "4": "junk-decor NS (hanging crate)",
+      "5": "junk-decor EW (small box)",
+      "6": "plain NS (dup style of 2)",
+      "7": "junk-decor EW",
+      "8": "junk-decor EW",
+      "9": "junk-decor NS",
+      "10": "junk-decor EW",
+      "11": "junk-decor EW",
+      "12": "sign \"KEEP OUT\" EW",
+      "13": "sign \"DANGER\" NS",
+      "14": "sign (partial, \"...ER!\") NS",
+      "15": "sign \"CAME.../JUNK\" EW",
+      "16": "sign \"...DEPOT\" EW",
+      "17": "damaged/short NS",
+      "18": "damaged/short EW",
+      "19": "damaged/broken EW (staggered slats)",
+      "20": "damaged/jagged NS",
+      "21": "plain EW (dup style of 1)",
+      "22": "junk-decor damaged EW"
+    },
+    "86": {
+      "1": "narrow mesh strip, role unclear",
+      "3": "narrow mesh strip, role unclear",
+      "4": "corner-post variant, denser mesh (alt of 2)",
+      "5": "clean EW (dup style of 6)",
+      "8": "clean EW (dup of 6)",
+      "9": "clean EW (dup of 6)",
+      "10": "torn/damaged NS",
+      "11": "torn/damaged NS",
+      "12": "clean NS (dup style of 7, lighter mesh)",
+      "13": "clean EW (dup style of 6, lighter mesh)",
+      "14": "torn EW",
+      "15": "torn EW",
+      "16": "torn NS",
+      "17": "torn NS",
+      "18": "heavily torn (near-gone)",
+      "19": "heavily torn EW",
+      "20": "heavily torn EW",
+      "21": "heavily torn EW (frame only)"
+    },
+    "89": {
+      "2": "dup NS (post-left)",
+      "3": "plain EW (dup of 4)",
+      "5": "post-left EW variant",
+      "6": "post-left EW variant",
+      "7": "plain NS (dup of 1)",
+      "8": "damaged/broken (angled crossing boards)",
+      "9": "dup NS",
+      "10": "corner-post-ish, unconfirmed",
+      "11": "corner-post-ish, unconfirmed",
+      "12": "post-right NS, weak slope",
+      "13": "corner-post variant (dup of 17)",
+      "14": "corner-post-ish EW",
+      "15": "corner-post variant (dup, small)",
+      "16": "corner-post-ish EW",
+      "18": "corner-post variant (dup, dense)",
+      "19": "corner-post-ish, mild NS",
+      "20": "corner-post variant (dup, thin)",
+      "21": "plain EW, no post",
+      "22": "corner-post-ish EW",
+      "23": "corner-post variant (dup)"
+    },
+    "104": {
+      "1": "short/flat variant EW",
+      "2": "post/flat variant, role unclear",
+      "3": "short/flat variant NS",
+      "4": "post/flat variant (dup of 5)",
+      "6": "clean EW (dup style of 15, narrower)",
+      "7": "clean NS (dup style of 10, narrower)",
+      "8": "post/flat variant (dup of 5)",
+      "9": "post/flat variant (dup of 5)",
+      "11": "NS dup (alt shade of 10)",
+      "12": "NS dup (alt shade of 10)",
+      "13": "EW dup (alt shade of 15)",
+      "14": "EW dup (alt shade of 15)"
+    }
+  }
+}

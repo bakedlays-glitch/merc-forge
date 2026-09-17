@@ -26,6 +26,15 @@ from . import gap
 WAV_EXTENSIONS = (".wav", ".WAV", ".ogg", ".mp3")  # JA2 mostly uses .wav, but be permissive on read
 
 
+def legacy_mutation_detail(slot: int) -> dict[str, str]:
+    """Return the stable redirect payload for retired HTTP voice mutations."""
+    return {
+        "error": "VOICE_LAB_REQUIRED",
+        "message": "Voice changes require preview and verified deployment in Voice Lab.",
+        "voice_lab_path": f"/voice-lab?profile={slot}",
+    }
+
+
 @dataclass
 class VoiceClip:
     name: str

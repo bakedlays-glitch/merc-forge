@@ -15,7 +15,7 @@ source install's maps by biome before rolling up subframe distributions.
 The shipped corpus JSON carries the resolved biome as a key, so the sidecar
 never imports this module — it's dev-side only.
 
-Fine taxonomy (locked with user 2026-05-31):
+Fine taxonomy (locked with user):
     urban, desert, tropical, temperate, farm, swamp, cave, cliff, arctic,
     wasteland   (+ "unknown" fallback for unused / unrecognized tilesets)
 """

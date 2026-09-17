@@ -97,7 +97,7 @@ def main() -> int:
             # exception surface. (Pre-fix the comment continuation
             # broke the `if` block's suite — `shutil.rmtree` ran
             # unconditionally and raised FileNotFoundError on first-
-            # run, sweep bug-review.)
+            # run.)
             shutil.rmtree(cache_dir)
             if cache_dir.exists():
                 print(f"ERROR: failed to delete cache dir {cache_dir}", file=sys.stderr)

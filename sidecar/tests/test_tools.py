@@ -1,5 +1,5 @@
-"""Tests for the standalone STI Viewer + SLF Extractor routes added
-2026-05-25 (sidecar/routes/tools.py).
+"""Tests for the standalone STI Viewer + SLF Extractor routes
+(sidecar/routes/tools.py).
 
 Both surfaces are file-pick driven — no install / tileset context — so
 these tests synthesize fixture STI and SLF byte streams in tmp_path and

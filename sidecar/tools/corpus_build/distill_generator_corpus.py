@@ -58,8 +58,12 @@ DEFAULT_OUT = WASTELAND_ROOT / "MercWizard2" / "sidecar" / "mercwizard_core" / "
 
 # source key -> exact install name in installs.json
 SOURCE_INSTALLS = {
-    "stock": "Jagged Alliance 2 Gold 1.13_2025",
-    "redux": "Jagged Alliance 2 Redux",
+    # Current folder names. The originals ("Jagged Alliance 2 Gold 1.13_2025",
+    # "Jagged Alliance 2 Redux") were renamed on disk, which would silently match
+    # ZERO installs and ship an empty catalog -- the same rename that broke the
+    # test fixtures and mod_corpus's engine_family join.
+    "stock": "JA2 1.13 2025",
+    "redux": "JA2 Redux 2009",
 }
 
 # generator layer name -> scan_map record field holding its {slot:{sub:count}}
@@ -74,6 +78,25 @@ LAYER_CATALOGS = {
 
 POS_CLASSES = ("NW", "N", "NE", "W", "Interior", "E", "SW", "S", "SE")
 TOP_N_SUBS = 24  # cap distinct subs per (source,biome,layer,slot) in the shipped file
+CANDIDATE_FIELDS = (
+    "source_ref", "tileset_id", "biome_ref", "layer_ref", "slot", "sub",
+    "weight", "sti_ref", "frame_ref", "jsd_ref", "structure_ref",
+    "exclusion_ref", "map_refs",
+)
+
+
+def iter_candidate_records(corpus: dict):
+    """Mirror of schema-2's compact-row decoding contract.
+
+    The operational identity join and atomic publisher remain in the parent
+    Headless_Compiler copy; this repository mirror records the shipped format.
+    """
+    fields = corpus.get("candidate_fields")
+    for candidate in corpus.get("candidates") or []:
+        if isinstance(candidate, dict):
+            yield candidate
+        elif isinstance(fields, list) and isinstance(candidate, list) and len(candidate) == len(fields):
+            yield dict(zip(fields, candidate))
 
 
 # ── small dict-merge helpers ────────────────────────────────────────────────
@@ -126,12 +149,24 @@ def scan_source_maps(install: dict) -> dict[str, tuple[str, dict]]:
                 continue
             data = dat_or_err
             try:
-                parsed = parse_dat_full(data, f"{name}/{dat_name}", items_table=None)
+                # No items_table kwarg: this script was written against a later
+                # parse_dat_ext that took one, and the restored parser does not.
+                # The old call raised TypeError into the catch-all below, so EVERY
+                # map was silently skipped and the shipped catalog had 0 maps --
+                # buildings populated, subframe catalogs empty. Passing None was a
+                # no-op anyway (the world-items appendix is still unparsed).
+                parsed = parse_dat_full(data, f"{name}/{dat_name}")
                 rec = scan_map(parsed, {
                     "install": name, "source_kind": kind,
                     "source_path": str(path), "dat_name": dat_name,
                 }, data)
-            except (DatParseError, Exception):
+            except DatParseError:
+                continue
+            except Exception as e:
+                # Loud: a catch-all that hides a signature mismatch is exactly how
+                # this shipped empty in the first place.
+                print("   [skip] %s/%s: %s: %s"
+                      % (name, dat_name, type(e).__name__, e), file=sys.stderr)
                 continue
             sha = rec["sha1"]
             if sha in out:
@@ -173,13 +208,30 @@ def load_source_buildings() -> dict[str, dict]:
     if not BUILDINGS_PATH.is_file():
         print(f"   WARN: {BUILDINGS_PATH} missing — building corpus will be empty")
         return out
+    # Drop buildings citing art that conflicts with the pooling cohort. This tool
+    # reads building_positional.jsonl DIRECTLY and never touches placement_tables,
+    # so the exclusion aggregate_buildings.py applies does NOT protect it --
+    # without this, MapForge's shipped catalog re-imports the contamination the
+    # pooled tables were cleaned of. Per-(tileset, type, sub) when the subframe
+    # census is built, else the coarse (install, tileset) quarantine.
+    import overlay_contamination
+    fine = overlay_contamination.subframe_census_available()
+    dirty3 = overlay_contamination.dirty_subframe_triples() if fine else None
+    dirty2 = None if fine else overlay_contamination.dirty_pairs()
+    n_dropped = 0
     with open(BUILDINGS_PATH, "r", encoding="utf-8") as f:
         for line in f:
             b = json.loads(line)
             src = name_to_source.get(b.get("install"))
             if src is None:
                 continue
+            if overlay_contamination.building_is_dirty(b, dirty3, dirty2):
+                n_dropped += 1
+                continue
             out[src][_building_key(b)] = b
+    if n_dropped:
+        print("   dropped %d building(s) on conflicting art (%s granularity)"
+              % (n_dropped, "subframe" if fine else "install/tileset"))
     return out
 
 

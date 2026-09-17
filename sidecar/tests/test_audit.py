@@ -11,6 +11,7 @@ from mercwizard_core.audit import (
     audit_merc,
     has_errors,
 )
+from mercwizard_core.body_types import BodyTypeDef
 from mercwizard_core.models import AimBinding, Gear, GearKit, Merc
 
 
@@ -98,48 +99,39 @@ def test_audit_eye_spacing_too_wide_warns() -> None:
     assert issues[0].code == "EYE_SPACING_TOO_WIDE"
 
 
-def test_audit_emoji_in_bio_warns_about_unencodable_chars() -> None:
-    """Bug-review #99: emoji + supplementary-plane chars get silently
-    clamped to U+FFFE by the EDT bio encoder. Audit must surface them
-    BEFORE save so the user can decide whether to remove them."""
-    # 🔥 is U+1F525 (supplementary plane). The ROT+1 still puts it above
-    # 0xFFFE, so encode_field would clamp it.
+def test_audit_previews_normalized_edt_values_for_bio_fields() -> None:
     m = Merc(
         uiIndex=10, ubFaceIndex=160, zName="Spark", zNickname="Spark",
         Type=1,
-        biographyText="Hot stuff 🔥 with some emoji 🎯",
-        additionalInfoText="Plain text only.",
+        biographyText="Hot stuff 🔥 — “quoted”…",
+        additionalInfoText="Seen near 中.",
     )
     issues = audit_merc(m)
-    unencodable = [i for i in issues if i.code == "CONTAINS_UNENCODABLE"]
-    assert len(unencodable) == 1
-    assert unencodable[0].field == "biographyText"
-    assert unencodable[0].severity == Severity.WARN
-    assert "2" in unencodable[0].message  # 2 emoji found
-    assert "🔥" in unencodable[0].message  # sample char shown
+    normalized = [i for i in issues if i.code == "NORMALIZED_FOR_EDT"]
+    assert [i.field for i in normalized] == ["biographyText", "additionalInfoText"]
+    assert all(i.severity == Severity.INFO for i in normalized)
+    assert normalized[0].suggested_fix == 'Hot stuff ? - "quoted"...'
+    assert normalized[1].suggested_fix == "Seen near ?."
+    assert all("render as garbage" not in i.message for i in normalized)
 
 
-def test_audit_ascii_only_bio_no_unencodable_warning() -> None:
-    """Plain ASCII text shouldn't trigger the surrogate check."""
+def test_audit_ascii_only_bio_needs_no_edt_normalization() -> None:
     m = Merc(
         uiIndex=10, ubFaceIndex=160, zName="Carter", zNickname="Carter",
         Type=1,
         biographyText="A boring biography with no special characters.",
     )
     issues = audit_merc(m)
-    assert [i for i in issues if i.code == "CONTAINS_UNENCODABLE"] == []
+    assert [i for i in issues if i.code == "NORMALIZED_FOR_EDT"] == []
 
 
-def test_audit_nickname_with_emoji_flags_field() -> None:
-    """The nickname field gets the same encoder; emoji there should also flag."""
+def test_audit_does_not_apply_edt_policy_to_xml_only_names() -> None:
     m = Merc(
-        uiIndex=10, ubFaceIndex=160, zName="Plain", zNickname="🎯",
+        uiIndex=10, ubFaceIndex=160, zName="D’Arcy", zNickname="中",
         Type=1,
     )
     issues = audit_merc(m)
-    unencodable = [i for i in issues if i.code == "CONTAINS_UNENCODABLE"]
-    assert len(unencodable) == 1
-    assert unencodable[0].field == "zNickname"
+    assert [i for i in issues if i.code == "NORMALIZED_FOR_EDT"] == []
 
 
 def test_audit_full_combines_all_checks(sample_merc, sample_gear, sample_aim_binding) -> None:
@@ -153,3 +145,17 @@ def test_audit_full_combines_all_checks(sample_merc, sample_gear, sample_aim_bin
     # isn't in canonical AIM ranges) and FACE_INDEX_LOW (220 is < typical custom face index)
     # No ERRORs
     assert not has_errors(issues)
+
+
+def _issues_for(merc: Merc, body_types: dict[int, BodyTypeDef], code: str):
+    return [issue for issue in audit_full(merc, body_types=body_types) if issue.code == code]
+
+
+def test_wasteland_audit_accepts_marcus_and_rejects_totalbodytypes() -> None:
+    wasteland_registry = {
+        41: BodyTypeDef(id=41, name="MARCUS", sex="male", category="humanoid"),
+    }
+    merc_fields = {"uiIndex": 220, "ubFaceIndex": 220, "zName": "Marcus", "zNickname": "Marcus"}
+
+    assert not _issues_for(Merc(**merc_fields, ubBodyType=41), wasteland_registry, "BODY_TYPE_UNKNOWN")
+    assert _issues_for(Merc(**merc_fields, ubBodyType=44), wasteland_registry, "BODY_TYPE_UNKNOWN")

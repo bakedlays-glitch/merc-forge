@@ -19,7 +19,7 @@
  * palette (they're not user-pickable — they ride along with their
  * struct).
  *
- * Pairs derived 2026-05-22 by walking the enum positions in the
+ * Pairs derived by walking the enum positions in the
  * 1.13 engine source. Update if Flugente reorders TileDat.h (very
  * rare).
  */

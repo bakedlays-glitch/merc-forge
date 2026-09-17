@@ -118,3 +118,48 @@ def decode_subimage_to_rgba(images, frame_index: int) -> Image.Image:
             pixels.append((r, g, b, 255))
     rgba.putdata(pixels)
     return rgba
+
+
+def atomic_save_sti(images, sti_path: Path) -> None:
+    """Atomic STI write: serialize to a tempfile in the same directory,
+    then os.replace() onto the target path.
+
+    Without this, a crash or process kill mid-save leaves the STI half-
+    written; the next load raises a struct error and the user loses the
+    gear/face. Mirrors `inject/_atomic_xml.py::save_atomic` so every
+    game-file writer has the same crash-safety guarantee. Same-directory
+    tempfile keeps the replace a same-volume rename (atomic on Windows
+    AND POSIX; cross-volume degrades to copy+unlink and loses that).
+
+    Shared by facegear.py and portrait/sti.py — `images` is a ja2py
+    Images8Bit (untyped here so this module stays import-light).
+    """
+    import os
+    import sys
+    import tempfile
+
+    _here = Path(__file__).resolve().parent.parent
+    if str(_here) not in sys.path:
+        sys.path.insert(0, str(_here))
+    from ja2py.fileformats.Sti import save_8bit_sti
+
+    sti_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path_str = tempfile.mkstemp(
+        prefix=f".{sti_path.stem}.",
+        suffix=".sti.tmp",
+        dir=str(sti_path.parent),
+    )
+    tmp_path = Path(tmp_path_str)
+    try:
+        # Close fd; ja2py's save_8bit_sti opens its own file handle.
+        os.close(fd)
+        with open(tmp_path, "wb") as f:
+            save_8bit_sti(images, f)
+        os.replace(tmp_path_str, str(sti_path))
+    except Exception:
+        # Clean up tempfile if anything went wrong before the replace.
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise

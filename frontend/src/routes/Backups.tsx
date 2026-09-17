@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
-import { deleteBackup, formatApiError, listBackups, restoreBackup, takeSnapshot } from "../lib/api";
+import { deleteBackup, listBackups, restoreBackup, takeSnapshot } from "../lib/api";
 import ConfirmModal from "../components/ConfirmModal";
 
 function humanSize(bytes: number): string {
@@ -57,7 +57,6 @@ export default function Backups() {
       qc.invalidateQueries({ queryKey: ["backups"] });
       // Restore can roll back any number of slots — invalidate the
       // picker so the next Create/Edit sees the restored state.
-      // Bug-review finding E4.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
       setRestorePrompt(null);
     },
@@ -76,6 +75,22 @@ export default function Backups() {
   // styling, focus-on-Cancel by default, type-to-confirm for Restore.
   const [restorePrompt, setRestorePrompt] = useState<BackupEntryView | null>(null);
   const [deletePrompt, setDeletePrompt] = useState<BackupEntryView | null>(null);
+  const openRestorePrompt = (backup: BackupEntryView) => {
+    restore.reset();
+    setRestorePrompt(backup);
+  };
+  const dismissRestorePrompt = () => {
+    restore.reset();
+    setRestorePrompt(null);
+  };
+  const openDeletePrompt = (backup: BackupEntryView) => {
+    del.reset();
+    setDeletePrompt(backup);
+  };
+  const dismissDeletePrompt = () => {
+    del.reset();
+    setDeletePrompt(null);
+  };
 
   // Group by age bucket for the timeline view. Computed once per
   // backups.data change; the now-bucket reference is stable for the
@@ -214,14 +229,14 @@ export default function Backups() {
                       <div className="flex items-center gap-2 shrink-0">
                         <button
                           className="btn-secondary text-sm"
-                          onClick={() => setRestorePrompt(view)}
+                          onClick={() => openRestorePrompt(view)}
                           disabled={restore.isPending || isDeleting}
                         >
                           {isRestoring ? "Restoring..." : "Restore"}
                         </button>
                         <button
                           className="btn-ghost text-sm text-rust-400 hover:text-rust-300"
-                          onClick={() => setDeletePrompt(view)}
+                          onClick={() => openDeletePrompt(view)}
                           disabled={isDeleting || restore.isPending}
                         >
                           {isDeleting ? "Deleting..." : "Delete"}
@@ -241,17 +256,6 @@ export default function Backups() {
           Restored {restore.data?.files_restored} files.
         </div>
       )}
-      {restore.isError && (
-        <div className="mt-4 text-sm text-rust-400">
-          Restore failed: {formatApiError(restore.error)}
-        </div>
-      )}
-      {del.isError && (
-        <div className="mt-4 text-sm text-rust-400">
-          Delete failed: {formatApiError(del.error)}
-        </div>
-      )}
-
       {/* Restore confirmation — the most consequential op in the app.
           Type-to-confirm gate ("restore") prevents a stray Enter from
           overwriting current files. */}
@@ -262,6 +266,9 @@ export default function Backups() {
         confirmLabel="Restore"
         typeToConfirm="restore"
         busy={restore.isPending}
+        error={restore.isError
+          ? "The backup could not be restored. Try again or cancel."
+          : null}
         body={
           restorePrompt ? (
             <div className="space-y-2">
@@ -282,7 +289,7 @@ export default function Backups() {
             </div>
           ) : null
         }
-        onCancel={() => setRestorePrompt(null)}
+        onCancel={dismissRestorePrompt}
         onConfirm={() => restorePrompt && restore.mutate(restorePrompt.id)}
       />
 
@@ -295,6 +302,9 @@ export default function Backups() {
         title="Delete this backup snapshot?"
         confirmLabel="Delete snapshot"
         busy={del.isPending}
+        error={del.isError
+          ? "The backup could not be deleted. Try again or cancel."
+          : null}
         body={
           deletePrompt ? (
             <div className="space-y-2">
@@ -311,7 +321,7 @@ export default function Backups() {
             </div>
           ) : null
         }
-        onCancel={() => setDeletePrompt(null)}
+        onCancel={dismissDeletePrompt}
         onConfirm={() => deletePrompt && del.mutate(deletePrompt.id)}
       />
     </div>

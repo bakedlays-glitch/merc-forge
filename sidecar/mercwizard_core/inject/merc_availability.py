@@ -73,7 +73,7 @@ import threading
 # Hit by every roster cell and every audit; per-call lxml parse is ~50-150 ms
 # on Vengeance's 52-row file when the user mounts the 16-cell roster grid.
 #
-# Lock added 2026-05-25 — see aim_availability for the rationale (FastAPI
+# Lock added — see aim_availability for the rationale (FastAPI
 # threadpool fan-out + race on FIFO eviction).
 _PARSE_CACHE: dict[tuple[str, int, int], dict[int, MercBinding]] = {}
 _PARSE_CACHE_MAX = 4
@@ -183,7 +183,7 @@ def lookup_merc_bio_id(merc_xml_path: Optional[Path], profil_id: int) -> Optiona
     placeholder convention some mods use; slot_picker._merc_row_present
     treats it the same way, and the two presence checks must agree or
     the wizard's slot picker and EDT writer disagree on whether a slot
-    is empty (bug-review finding E6).
+    is empty.
 
     Prefers live MercAvailability.xml; falls back to the canonical 40–50
     table for vanilla MERC slots.
@@ -272,15 +272,14 @@ def upsert(merc_xml_path: Path, binding: MercBinding) -> None:
 
     Post-write the file is re-parsed and verified — see `_validate_upsert`
     for what's checked. Any mismatch raises `MercAvailabilityWriteError`,
-    bubbling up to the route's audit-and-rollback handler. Bug-review #96.
+    bubbling up to the route's audit-and-rollback handler.
 
     Schema-aware: detects which fields the install's existing rows
     carry and only writes those (plus the always-write core
     `_ALWAYS_WRITE_FIELDS`). On a fresh file with no precedent, writes
     the full canonical set. Mirrors profiles_xml._write_block; without
     this, a stripped mod that ships without `usMoneyPaid` / `usDay`
-    columns would silently gain them on every upsert. Bug-review
-    finding C8.
+    columns would silently gain them on every upsert.
     """
     tree = _parse(merc_xml_path)
     if tree is None:
@@ -405,7 +404,7 @@ def _validate_upsert(
     # snapshots have these in the wild). Count XML <MERC> elements from
     # the on-disk file directly so the comparison is apples-to-apples
     # with `expected_row_count = len(root.findall("MERC"))` taken
-    # pre-save. Bug-review finding A2.
+    # pre-save.
     persisted_tree = _parse(path)
     actual_rows = (
         len(persisted_tree.getroot().findall("MERC")) if persisted_tree is not None else 0
@@ -452,7 +451,7 @@ def compute_ui_index(merc_xml_path: Optional[Path]) -> int:
     # seed every slot 0-254 with `<uiIndex>-1</uiIndex>` placeholders, so
     # `live` is non-empty but the filtered iterator is. Plain `max()` of
     # an empty iterator raises ValueError, which the create handler
-    # propagates as 500 INTERNAL_ERROR mid-save. Bug-review finding A3.
+    # propagates as 500 INTERNAL_ERROR mid-save.
     assigned = [b.uiIndex for b in live.values() if b.uiIndex >= 0]
     if not assigned:
         return 0

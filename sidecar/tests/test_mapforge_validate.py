@@ -80,6 +80,35 @@ def test_contiguous_rooms_no_gap():
     assert "ROOM_ID_GAP" not in _codes(validate_parsed(d))
 
 
+
+def test_room_id_shared_across_detached_buildings_is_warn():
+    # Two 2x2 buildings on a 6x6 map, both on room id 1, nothing between them.
+    d = _mk(world_max=36, cols=6, rows=6)
+    for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1), (4, 4), (5, 4), (4, 5), (5, 5)]:
+        d["rooms"][y * 6 + x] = 1
+        d["roofs"][y * 6 + x] = [(64, 9)]
+    f = _by_code(validate_parsed(d), "ROOM_ID_SHARED")
+    assert f.severity == SEVERITY_WARN
+    assert f.count == 1                      # one id (1) spans 2 components
+    assert 0 in f.tiles and 28 in f.tiles    # a gridno from each building
+    # give the second building its own id -> clean
+    for (x, y) in [(4, 4), (5, 4), (4, 5), (5, 5)]:
+        d["rooms"][y * 6 + x] = 2
+    assert "ROOM_ID_SHARED" not in _codes(validate_parsed(d))
+
+
+def test_room_id_unroofed_hole_is_one_building():
+    # One 4x4 building on id 3 with an unroofed 2x2 interior hole: roofed-only
+    # connectivity would split it; the roof-or-room flood keeps it whole.
+    d = _mk(world_max=36, cols=6, rows=6)
+    for y in range(1, 5):
+        for x in range(1, 5):
+            d["rooms"][y * 6 + x] = 3
+            if not (2 <= x <= 3 and 2 <= y <= 3):
+                d["roofs"][y * 6 + x] = [(64, 9)]
+    assert "ROOM_ID_SHARED" not in _codes(validate_parsed(d))
+
+
 def test_layer_count_desync_is_error():
     d = _mk()
     d["n_per_tile"]["struct"][0] = 1  # claims 1 struct, array has 0

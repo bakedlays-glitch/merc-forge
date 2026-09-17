@@ -119,6 +119,28 @@ def test_exit_grids_after_tail_when_no_soldiers():
                                   "dest_gridno": 13000, "sx": 9, "sy": 1, "sz": 0}]
 
 
+def test_exit_grids_legacy_7_byte_records():
+    """major<7.0 exit grids are the 7-byte _OLD_EXITGRID layout — the
+    engine's EXITGRID::Load reads EXACTLY '2+5' bytes per record (Exit
+    Grids.cpp:149-153, with a 'never use sizeof' warning). A fixed
+    12-byte stride over-advanced the cursor on legacy maps, cascading
+    misparse into every section behind the exit grids."""
+    import struct as _s
+    data = bytes(100)                       # legacy 100-byte MAPCREATE tail
+    data += _s.pack("<H", 2)                # 2 exit grids
+    data += _s.pack("<hhBBB", 12880, 13000, 9, 1, 0)
+    data += _s.pack("<hhBBB", 320, 480, 2, 3, 1)
+    out = extract_appendix_entities(
+        data, _parsed(AW.MAP_EXITGRIDS_SAVED, major=5.0, minor=25))
+    assert out["blocked_at"] is None
+    assert "exitgrids" in out["reached"]
+    assert [g["gridno"] for g in out["exit_grids"]] == [12880, 320]
+    assert out["exit_grids"][0]["dest_gridno"] == 13000
+    assert out["exit_grids"][1] == {"gridno": 320, "x": 320 % COLS,
+                                    "y": 320 // COLS, "dest_gridno": 480,
+                                    "sx": 2, "sy": 3, "sz": 1}
+
+
 from routes.mapforge import MapForgeSession, _session_store, session_appendix
 
 def _fake_session(data, parsed):
@@ -126,6 +148,9 @@ def _fake_session(data, parsed):
     s = object.__new__(MapForgeSession)
     s.id = "testsess123456"
     s.original_bytes = data
+    s.disk_baseline = data
+    s.mutation_seq = 0
+    s.autosaved_seq = 0
     s.parsed = parsed
     return s
 
@@ -268,10 +293,9 @@ def test_soldier_records_overrun_degrades_gracefully():
 
 from mercwizard_core.mapforge_engine.parse_dat_ext import parse_dat_full
 
-_A6 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
-       r"\Data-1.13\Maps\A6.DAT")
-_A2 = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
-       r"\Data-1.13\Maps\A2.DAT")
+_INSTALL = os.environ.get("JA2_INSTALL", "")
+_A6 = os.path.join(_INSTALL, "Data-1.13", "Maps", "A6.DAT") if _INSTALL else ""
+_A2 = os.path.join(_INSTALL, "Data-1.13", "Maps", "A2.DAT") if _INSTALL else ""
 
 @pytest.mark.skipif(not os.path.exists(_A6), reason="canonical install not present")
 def test_real_a6_soldiers():
@@ -285,8 +309,7 @@ def test_real_a6_soldiers():
     assert all(s["soldier_class"] == 3 for s in out["soldiers"])  # ARMY
 
 
-_MAPS_DIR = (r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
-             r"\Data-1.13\Maps")
+_MAPS_DIR = os.path.join(_INSTALL, "Data-1.13", "Maps") if _INSTALL else ""
 
 @pytest.mark.skipif(not os.path.exists(_MAPS_DIR), reason="canonical install not present")
 @pytest.mark.parametrize("name,count,template", [
@@ -345,7 +368,7 @@ def test_appendix_endpoint_returns_lights():
 
 
 # ---------------------------------------------------------------------------
-# Door table + edgepoint tests (Task 1)
+# Door table + edgepoint tests
 # ---------------------------------------------------------------------------
 
 def _door_record(gridno, locked=1):
@@ -436,7 +459,7 @@ def test_edgepoint_overrun_degrades_gracefully():
 
 
 # ---------------------------------------------------------------------------
-# Schedule tests (Task 1 â€” schedules)
+# Schedule tests
 # ---------------------------------------------------------------------------
 
 def _schedule_record(usdata1, actions, schedule_id=1):

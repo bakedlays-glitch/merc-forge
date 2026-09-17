@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from PIL import Image
 
@@ -48,7 +48,7 @@ _SHEET_CACHE: dict[tuple[str, int, str], tuple[bytes, dict]] = {}
 # single install populating bigface + smallface + an install switch would
 # thrash, evicting the roster grid's entry and forcing a disk re-read.
 _SHEET_CACHE_MAX = 8
-# Lock added 2026-05-25: FastAPI runs each handler in a threadpool
+# Lock added: FastAPI runs each handler in a threadpool
 # worker. Concurrent roster mounts (e.g. user switches installs while
 # the previous install's bake is still running) can race here. Lock
 # spans the eviction + insert window so dict can't mutate mid-iter.
@@ -123,7 +123,7 @@ def _portrait_sheet_cache_put(
 # The in-memory _SHEET_CACHE above is empty on every sidecar launch, so
 # the FIRST roster view after each launch always paid the full bake
 # (~4 s smallface / ~9 s bigface on a ~250-merc install, measured
-# 2026-06-14 — bigface is slower because most NPCs lack one and exhaust
+# bigface is slower because most NPCs lack one and exhaust
 # the fallback chain's SLF probes). Persist the baked
 # (png, manifest) under %APPDATA%/MercWizard/cache/portrait_sheets/ keyed
 # on the SAME (install_id, MercProfiles.xml mtime_ns, size) tuple, so the
@@ -143,7 +143,7 @@ def _sheet_cache_dir() -> Path:
 # Bump whenever the bake's face-resolution / compositing logic changes, so old
 # on-disk sheets (keyed by install+size+MercProfiles-mtime, which do NOT change
 # when the sidecar CODE does) get ignored instead of served stale.
-_PORTRAIT_CACHE_VERSION = 5  # v5: IMPFACES probe + Type=5 vehicle StiFaceIcon fallback (2026-06-20)
+_PORTRAIT_CACHE_VERSION = 5  # v5: IMPFACES probe + Type=5 vehicle StiFaceIcon fallback
 
 
 def _disk_key_prefix(install_id: str, size: str) -> str:
@@ -295,7 +295,7 @@ def _bake_portrait_sheet(ctx, size: str) -> tuple[bytes, dict]:
     Decode failures (16-bit STI, missing palette, etc.) are logged and
     EXCLUDED from `cells` — the frontend falls back to the slot-number
     placeholder for those, instead of the garbled multicolor pixels
-    a user hit on slots 26/200/201/etc. 2026-05-24.
+    a user hit on slots 26/200/201/etc..
     """
     from mercwizard_core.sti_decode import decode_sti_frame_to_png
 
@@ -537,7 +537,9 @@ def warm_install(install_id: str, install_path, size: str = "bigface") -> None:
 
 
 def _portrait_sheet_etag(png_bytes: bytes) -> str:
-    h = hashlib.md5(png_bytes[:4096]).hexdigest()[:16]
+    # FULL body — a 4 KB prefix let a same-length change past byte 4096
+    # (one edited portrait deep in the sheet) revalidate as a 304.
+    h = hashlib.md5(png_bytes).hexdigest()[:16]
     return f'"{h}-{len(png_bytes)}"'
 
 
@@ -564,6 +566,7 @@ def get_roster(install_id: str | None = Query(default=None)) -> list[dict]:
 
 @router.get("/roster/portrait-sheet.png")
 def get_roster_portrait_sheet(
+    request: Request,
     install_id: str | None = Query(default=None),
     size: str = Query(
         default="smallface",
@@ -582,19 +585,23 @@ def get_roster_portrait_sheet(
     png_bytes, _manifest = _portrait_sheet_bytes_and_meta(
         info.id, info.path, size,
     )
-    return Response(
-        content=png_bytes,
-        media_type="image/png",
-        headers={
-            # 5 min — the sheet's fingerprint is keyed on every face STI's
-            # mtime via _portrait_sheet_bytes_and_meta, so any merc edit
-            # invalidates the on-disk cache anyway. 60 s was overly cautious;
-            # the only thing 60-300 s adds is a revalidate roundtrip after a
-            # minute of scroll.
-            "Cache-Control": "private, max-age=300, must-revalidate",
-            "ETag": _portrait_sheet_etag(png_bytes),
-        },
-    )
+    etag = _portrait_sheet_etag(png_bytes)
+    headers = {
+        # 5 min — the sheet's fingerprint is keyed on every face STI's
+        # mtime via _portrait_sheet_bytes_and_meta, so any merc edit
+        # invalidates the on-disk cache anyway. 60 s was overly cautious;
+        # the only thing 60-300 s adds is a revalidate roundtrip after a
+        # minute of scroll.
+        "Cache-Control": "private, max-age=300, must-revalidate",
+        "ETag": etag,
+    }
+    # Answer the revalidation the must-revalidate above invites — the
+    # ETag was emitted with no If-None-Match handler, so every
+    # revalidation re-sent the full multi-MB sheet body.
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=png_bytes, media_type="image/png",
+                    headers=headers)
 
 
 @router.get("/roster/portrait-sheet.json")

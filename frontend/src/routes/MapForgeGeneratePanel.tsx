@@ -1,6 +1,6 @@
 /**
  * Generate dock panel — the live-preview home of the MapForge generator
- * subsystem (UX Phase 2).
+ * subsystem.
  *
  * Unlike the old modal wizard (deleted — it covered the canvas), this
  * is a DOCK panel: the map stays visible while you configure, so the flow is
@@ -42,6 +42,7 @@ import {
 import { isShadowOnlySlot } from "../lib/jaSlotPairs";
 import type { IsoRenderer } from "../lib/IsoRenderer";
 import { useMapForgeLog } from "./MapForgeLog";
+import { useDialog } from "../components/DialogProvider";
 import type { ActiveBrush } from "./MapForgePalette";
 
 interface XY { x: number; y: number }
@@ -239,7 +240,7 @@ function hiddenParams(scheme: RegionScheme | null): Set<string> {
 // `building` stamp is intentionally ABSENT — its card is removed (the
 // Building Library above is the real flow); the backend generator stays
 // registered so the `:gen building` console command still works.
-type GenGroup = "Scatter" | "Shapes" | "Terrain" | "Utilities";
+type GenGroup = "Scatter" | "Shapes" | "Terrain" | "Smoothing" | "Utilities";
 const GEN_META: Record<string, { icon: string; title: string; blurb: string; order: number; group: GenGroup }> = {
   scatter: { icon: "∴", title: "Scatter", blurb: "Random spread with spacing", order: 1, group: "Scatter" },
   cluster: { icon: "⁂", title: "Cluster", blurb: "Groves & clumped patches", order: 2, group: "Scatter" },
@@ -247,10 +248,14 @@ const GEN_META: Record<string, { icon: string; title: string; blurb: string; ord
   fill: { icon: "▦", title: "Fill layer", blurb: "Flood one layer with a tile", order: 4, group: "Shapes" },
   rect: { icon: "▭", title: "Rectangle", blurb: "Outline or filled box", order: 5, group: "Shapes" },
   bank: { icon: "⛰", title: "Cliff / bank", blurb: "Raised plateau or escarpment", order: 6, group: "Terrain" },
+  smooth_terrain: { icon: "▒", title: "Smooth terrain", blurb: "Auto-fringe blocky texture edges", order: 9, group: "Smoothing" },
+  smooth_walls: { icon: "▤", title: "Smooth walls", blurb: "Fix wall orientation to engine axis", order: 10, group: "Smoothing" },
+  smooth_water: { icon: "≈", title: "Smooth water", blurb: "Auto-shore water edges (hand touch-ups expected)", order: 11, group: "Smoothing" },
+  smooth_caves: { icon: "◊", title: "Smooth caves", blurb: "Auto-perimeter cave walls (cave tilesets only)", order: 12, group: "Smoothing" },
   autoshadow: { icon: "◐", title: "Auto-shadow", blurb: "Add shadows to placed art", order: 7, group: "Utilities" },
   wipe: { icon: "⌫", title: "Wipe sector", blurb: "Clear every tile, every layer", order: 8, group: "Utilities" },
 };
-const GEN_GROUP_ORDER: GenGroup[] = ["Scatter", "Shapes", "Terrain", "Utilities"];
+const GEN_GROUP_ORDER: GenGroup[] = ["Scatter", "Shapes", "Terrain", "Smoothing", "Utilities"];
 
 // ─── Named "don't place on" masks ─────────────────────────────────────
 // Mirrors NAMED_MASKS in sidecar/mercwizard_core/mapforge/generators.py
@@ -278,6 +283,7 @@ export function MapForgeGeneratePanel({
   onOp, onComplete,
 }: GeneratePanelProps) {
   const log = useMapForgeLog();
+  const { confirm } = useDialog();
   const list = useQuery({
     queryKey: ["mapforge-generators"],
     queryFn: listGenerators,
@@ -590,7 +596,12 @@ export function MapForgeGeneratePanel({
     if (!sessionId || !selected || !renderer || running) return;
     // Wipe nukes the sector with one click — make it a deliberate act.
     if (selected.name === "wipe"
-        && !window.confirm("Wipe ALL layers across the whole sector?")) {
+        && !(await confirm({
+          title: "Wipe sector?",
+          body: "Wipe ALL layers across the whole sector?",
+          confirmLabel: "Wipe",
+          destructive: true,
+        }))) {
       return;
     }
     previewAbortRef.current?.abort();
@@ -639,7 +650,7 @@ export function MapForgeGeneratePanel({
       setPreviewCount(null);
     }
   }, [sessionId, selected, renderer, running, values, clearGhost, onOp,
-      onComplete, log]);
+      onComplete, log, confirm]);
 
   // ── Form param split ────────────────────────────────────────────────
   const hidden = useMemo(() => hiddenParams(scheme), [scheme]);
@@ -1219,6 +1230,10 @@ function BuildingLibrarySection({
   );
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // Escape-cancel must beat the input's onBlur: unmounting the focused
+  // input fires a native blur, which would otherwise commit the draft
+  // the user just asked to discard.
+  const renameCancelled = useRef(false);
 
   const entries = useMemo(() => library.data?.entries ?? [], [library.data]);
   const selected = entries.find((e) => e.id === selectedId) ?? null;
@@ -1493,10 +1508,19 @@ function BuildingLibrarySection({
                         type="text"
                         value={renameDraft}
                         onChange={(ev) => setRenameDraft(ev.target.value)}
-                        onBlur={() => commitRename(e.id)}
+                        onBlur={() => {
+                          if (renameCancelled.current) {
+                            renameCancelled.current = false;
+                            return;
+                          }
+                          commitRename(e.id);
+                        }}
                         onKeyDown={(ev) => {
                           if (ev.key === "Enter") commitRename(e.id);
-                          if (ev.key === "Escape") setRenamingId(null);
+                          if (ev.key === "Escape") {
+                            renameCancelled.current = true;
+                            setRenamingId(null);
+                          }
                           ev.stopPropagation();
                         }}
                         className="w-full rounded border border-sky-600 bg-gray-950 px-1 py-0.5 text-center text-[10px] text-gray-100"
@@ -1964,6 +1988,22 @@ export function ParamRow({
               const raw = e.target.value;
               const n = param.type === "int" ? parseInt(raw, 10) : parseFloat(raw);
               onChange(Number.isFinite(n) ? n : raw);
+            }}
+            onBlur={(e) => {
+              // The browser enforces min/max on the stepper arrows only, so
+              // a typed value reaches the generator as-is. Clamp when the
+              // field is left rather than on each keystroke, which would
+              // fight anyone typing "50" into a field whose minimum is 10.
+              // The sidecar clamps again — this is just so the number the
+              // user sees matches the number that runs.
+              const n = param.type === "int"
+                ? parseInt(e.target.value, 10)
+                : parseFloat(e.target.value);
+              if (!Number.isFinite(n)) return;
+              const lo = param.min ?? -Infinity;
+              const hi = param.max ?? Infinity;
+              const clamped = Math.min(hi, Math.max(lo, n));
+              if (clamped !== n) onChange(clamped);
             }}
             className="w-20 rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1 text-sm text-wasteland-100 font-mono"
           />

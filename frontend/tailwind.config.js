@@ -26,7 +26,9 @@ export default {
       },
       fontFamily: {
         sans: ["Inter", "system-ui", "-apple-system", "Segoe UI", "Roboto", "sans-serif"],
-        mono: ["JetBrains Mono", "ui-monospace", "Menlo", "Consolas", "monospace"],
+        help: ['"IBM Plex Sans"', "Segoe UI", "system-ui", "sans-serif"],
+        serif: ['"IBM Plex Serif"', "Georgia", "Times New Roman", "serif"],
+        mono: ["IBM Plex Mono", "JetBrains Mono", "ui-monospace", "Menlo", "Consolas", "monospace"],
       },
     },
   },

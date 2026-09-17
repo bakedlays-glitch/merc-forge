@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from mercwizard_core import backup as backup_mod
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.ini_editor import IniEditorError
 from mercwizard_core.ini_presets import (
     Preset,
@@ -91,7 +91,7 @@ def apply_preset(
                 "batches": results, "effect_timing": preset.effect_timing,
                 "savegame_risk": preset.savegame_risk}
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # One snapshot covering every file any target-batch will touch.
         targets = []
         try:
@@ -144,7 +144,7 @@ def create_preset(
         raise HTTPException(status_code=400, detail={
             "error": "BAD_PRESET", "message": "Preset needs a name"})
     state = get_state()
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         path = install_preset_path(info.path)
         if path.is_file():
             backup_mod.snapshot(
@@ -174,7 +174,7 @@ def delete_preset(
             "error": "BUILTIN_PRESET",
             "message": "Built-in presets can't be deleted"})
     state = get_state()
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         path = install_preset_path(info.path)
         if path.is_file():
             backup_mod.snapshot(

@@ -80,7 +80,7 @@ The Pydantic model is `WmercManifest` in [`sidecar/mercwizard_core/bundle/manife
 {
   "wmerc_version": 1,
   "tool": "MercWizard",
-  "tool_version": "2.0.0",
+  "tool_version": "1.0.0-beta.4",
   "exported_at": "2026-05-14T19:31:00+00:00",
 
   "author":   { "name": "modder", "contact": null },
@@ -151,7 +151,7 @@ The Pydantic model is `WmercManifest` in [`sidecar/mercwizard_core/bundle/manife
   "schema_fingerprint": {
     "source_mod":            "Vengeance Reloaded",
     "source_vfs_config":     "vfs_config.Vengeance.ini",
-    "source_install_path":   "C:\\Games\\JA2 1.13 Vengeance",
+    "source_install_path":   "<the exporting install's root>",
     "profile_fields":        ["bAgility", "bAttitude", "bBuddy1", ...],
     "has_bEvolution":        true,
     "has_fRegresses":        false,

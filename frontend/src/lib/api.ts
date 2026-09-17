@@ -15,6 +15,30 @@ import type {
   Merc,
   RosterEntry,
 } from "./schema";
+import {
+  parseVoiceBanks,
+  parseVoiceFindings,
+  parseVoiceLabJob,
+  parseVoiceLabStatus,
+  parseVoiceWaveform,
+  parseVoiceLineDetail,
+  parseImportedVoiceAsset,
+  parseVoiceDeployPlan,
+  parseVoiceDeployments,
+  parseVoiceUndoResult,
+  type EditRecipeDraft,
+  type ImportedVoiceAsset,
+  type VoiceWaveform,
+  type VoiceLineDetail,
+  type VoiceBank,
+  type VoiceFinding,
+  type VoiceFindingState,
+  type VoiceLabJob,
+  type VoiceLabStatus,
+  type VoiceDeployPlan,
+  type VoiceDeployment,
+  type VoiceUndoResult,
+} from "./voiceLabSchema";
 
 // ───────────────────────────────────────────────────────────────────────
 //  Error type
@@ -85,7 +109,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   PORTRAIT_NOT_FOUND: "The slot's portrait STI is missing from disk. Re-export the merc or pick a different face index.",
   PORTRAIT_DECODE_FAILED: "Couldn't decode the slot's portrait STI",
 
-  // ── Move / Duplicate (streaming since 2026-05-23) ────────────────────
+  // ── Move / Duplicate (streaming) ─────────────────────────────────────
   // *_INVALID is a pre-write rejection — the sidecar's `message` field carries
   // the exact reason (e.g. "Source slot 5 is empty", "Destination slot 198 is
   // occupied"). Keep the friendly text as a bare label so formatApiError
@@ -106,6 +130,12 @@ const ERROR_MESSAGES: Record<string, string> = {
 
   // ── Voice ────────────────────────────────────────────────────────────
   CLIP_NOT_FOUND: "Voice clip not found.",
+  VOICE_LAB_REQUIRED: "Voice changes are managed in Voice Lab. Review a preview before deployment.",
+  VOICE_SOURCE_CHANGED: "The reviewed voice source changed. Create a fresh preview before deployment.",
+  VOICE_TOOLCHAIN_UNAVAILABLE: "The Voice Lab audio toolchain is unavailable. Configure FFmpeg in Settings.",
+  VOICE_RECOVERY_REQUIRED: "Voice Lab recovery must be reviewed before another deployment or Undo.",
+  VOICE_GAME_RUNNING: "Close JA2 before changing Voice Lab files.",
+  VOICE_UNDO_CONFLICT: "Undo conflict: a deployed target changed. Review recovery before restoring anything.",
 
   // ── Save / Create rollback ───────────────────────────────────────────
   SAVE_FAILED: "Save failed partway through. The install was rolled back to its previous state — check the Backups page if anything looks wrong in-game.",
@@ -270,18 +300,37 @@ export function getApiBaseUrl(): Promise<string> {
 /**
  * Build an authenticated media URL for `<img>` / `<audio>` / `<video>`
  * elements. These can't attach the X-MercWizard-Token header (browser
- * limitation on element-driven loads), so the token rides as a
- * `?_t=<token>` query param that the sidecar's auth middleware also
- * accepts. A user-reported bug: roster portraits + Edit BigFace + voice
- * playback all 401'd silently before this existed.
+ * limitation on element-driven loads), so they carry a `?_t=` query
+ * param instead. That param is NOT the session token: a URL is copied
+ * into the WebView's disk cache and into any access log, so it carries
+ * a separate GET-only secret that cannot write to the install. A
+ * user-reported bug: roster portraits + Edit BigFace + voice playback
+ * all 401'd silently before this existed.
  *
  * `pathWithQs` should already include any non-auth query params the
  * route needs (e.g. `?size=bigface&v=...`). The helper appends `_t`
  * with the right separator.
  */
+let cachedMediaToken: string | null = null;
+
+/** The GET-only secret the sidecar issues for element-driven loads.
+ * Resolved once per launch and cached; the sidecar mints a fresh one
+ * each time it starts, so a stale copy in the WebView cache is inert.
+ * Empty in browser-dev mode, where the sidecar runs without auth. */
+export async function getMediaToken(): Promise<string> {
+  if (cachedMediaToken !== null) return cachedMediaToken;
+  if (!(await getServerToken())) {
+    cachedMediaToken = "";
+    return cachedMediaToken;
+  }
+  const { token } = await request<{ token: string }>("/auth/media-token");
+  cachedMediaToken = token;
+  return cachedMediaToken;
+}
+
 export async function mediaUrl(pathWithQs: string): Promise<string> {
   const base = await getBaseUrl();
-  const token = await getServerToken();
+  const token = await getMediaToken();
   if (!token) return `${base}${pathWithQs}`;
   const sep = pathWithQs.includes("?") ? "&" : "?";
   return `${base}${pathWithQs}${sep}_t=${encodeURIComponent(token)}`;
@@ -361,6 +410,30 @@ export function getSlotLocks() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
+//  Target-aware SoldierBodyTypes
+// ───────────────────────────────────────────────────────────────────────
+
+export interface BodyTypeOptionApi {
+  id: number;
+  name: string;
+  sex?: "male" | "female" | null;
+  category?: string;
+  /** False means this ID is shown only to preserve an existing merc's value. */
+  authorable?: boolean;
+}
+
+export interface BodyTypesResponseApi {
+  mod_id: string;
+  source: "engine-known" | "engine-unverified" | "observed-extension";
+  options: BodyTypeOptionApi[];
+}
+
+export function getBodyTypes(install_id?: string) {
+  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+  return request<BodyTypesResponseApi>(`/merc/body-types${qs}`);
+}
+
+// ───────────────────────────────────────────────────────────────────────
 //  Slot picker (engine-faithful — joins live XML rows + named-slot table)
 // ───────────────────────────────────────────────────────────────────────
 
@@ -413,6 +486,218 @@ export function getSlotPicker(install_id?: string) {
 }
 
 // ───────────────────────────────────────────────────────────────────────
+//  RPC on-map placement (InitNPCs / GameInit.lua)
+// ───────────────────────────────────────────────────────────────────────
+
+export interface RpcPlacement {
+  profile: number;
+  sector: string;
+  col: number;
+  row: number;
+  z: number;
+  gridno: number;
+  label: string;
+  managed: boolean;
+}
+
+export interface RpcPlacementsResponse {
+  install_id: string;
+  lua_path: string;
+  lua_exists: boolean;
+  managed: RpcPlacement[];
+  handAuthored: RpcPlacement[];
+}
+
+export interface SetRpcPlacementResponse {
+  placement: RpcPlacement;
+  warnings: string[];
+  backup_id: string | null;
+}
+
+function installQs(install_id?: string): string {
+  return install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+}
+
+export function listRpcPlacements(install_id?: string) {
+  return request<RpcPlacementsResponse>(`/rpc/placements${installQs(install_id)}`);
+}
+
+export function setRpcPlacement(
+  body: { profile: number; sector: string; gridno: number; z?: number; label?: string },
+  install_id?: string,
+) {
+  return request<SetRpcPlacementResponse>(`/rpc/placements${installQs(install_id)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function removeRpcPlacement(profile: number, install_id?: string) {
+  return request<SetRpcPlacementResponse>(
+    `/rpc/placements/${profile}${installQs(install_id)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function adoptRpcPlacement(profile: number, install_id?: string) {
+  return request<SetRpcPlacementResponse>(
+    `/rpc/placements/${profile}/adopt${installQs(install_id)}`,
+    { method: "POST" },
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────────
+//  RPC recruitment + dialogue (.NPC / .EDT)
+// ───────────────────────────────────────────────────────────────────────
+
+export interface RpcBranch {
+  approach: number;                 // 4 = leadership recruit, 6 = give-item
+  opinion_required: number;
+  required_item: number;
+  fact_must_be_true: number | null;
+  accept_quote: number;
+}
+
+export interface RpcDialogue {
+  profile: number;
+  voice_index: number;
+  standard_quote_labels: string[];
+  branches: RpcBranch[];
+  pre_quotes: string[];
+  post_quotes: string[];
+  npc_exists: boolean;
+  lossy: boolean;
+  warnings: string[];
+  backup_id: string | null;
+}
+
+function buildQs(params: Record<string, string | number | boolean | undefined>): string {
+  const u = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== "" && v !== false) u.set(k, String(v));
+  }
+  const s = u.toString();
+  return s ? `?${s}` : "";
+}
+
+export function getRpcDialogue(profile: number, voice_index: number, install_id?: string) {
+  return request<RpcDialogue>(`/rpc/dialogue/${profile}${buildQs({ install_id, voice_index })}`);
+}
+
+export type RpcReadinessStatus = "ready" | "blocked" | "advisory";
+
+export interface RpcReadinessStage {
+  status: RpcReadinessStatus;
+  detail: string;
+  [key: string]: unknown;
+}
+
+export interface RpcReadiness {
+  profile: number;
+  face_index?: number;
+  voice_index?: number;
+  ready: boolean;
+  stages: Record<string, RpcReadinessStage>;
+}
+
+export function getRpcReadiness(profile: number, install_id?: string) {
+  return request<RpcReadiness>(`/rpc/readiness/${profile}${installQs(install_id)}`);
+}
+
+export function putRpcDialogue(
+  profile: number,
+  body: {
+    voice_index: number;
+    branches: RpcBranch[];
+    pre_quotes: string[];
+    post_quotes: string[];
+  },
+  install_id?: string,
+  force?: boolean,
+) {
+  return request<RpcDialogue>(`/rpc/dialogue/${profile}${buildQs({ install_id, force })}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+// Carried-item -> fact triggers (strategicmap.lua)
+
+export interface RpcFactSetter {
+  profile: number;
+  sector: string;
+  col: number;
+  row: number;
+  z: number;
+  item: number;
+  fact: number;
+}
+
+export interface RpcFactSetters {
+  install_id: string;
+  lua_path: string;
+  setters: RpcFactSetter[];
+  backup_id: string | null;
+}
+
+export function listRpcFactSetters(install_id?: string) {
+  return request<RpcFactSetters>(`/rpc/fact-setters${installQs(install_id)}`);
+}
+
+export function setRpcFactSetter(
+  body: { profile: number; sector: string; item: number; fact: number; z?: number },
+  install_id?: string,
+) {
+  return request<RpcFactSetter>(`/rpc/fact-setters${installQs(install_id)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function removeRpcFactSetter(profile: number, install_id?: string) {
+  return request<RpcFactSetters>(`/rpc/fact-setters/${profile}${installQs(install_id)}`, {
+    method: "DELETE",
+  });
+}
+
+// RPC small-face coord override (RPCFacesSmall.xml)
+
+export interface RpcSmallFaceOverride {
+  name: string;
+  eyesX: number;
+  eyesY: number;
+  mouthX: number;
+  mouthY: number;
+}
+
+export interface RpcSmallFaceResponse {
+  profile: number;
+  override: RpcSmallFaceOverride | null;
+  backup_id: string | null;
+}
+
+export function getRpcSmallFace(profile: number, install_id?: string) {
+  return request<RpcSmallFaceResponse>(`/rpc/small-face/${profile}${installQs(install_id)}`);
+}
+
+export function setRpcSmallFace(
+  profile: number,
+  body: RpcSmallFaceOverride,
+  install_id?: string,
+) {
+  return request<RpcSmallFaceResponse>(`/rpc/small-face/${profile}${installQs(install_id)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export function removeRpcSmallFace(profile: number, install_id?: string) {
+  return request<RpcSmallFaceResponse>(`/rpc/small-face/${profile}${installQs(install_id)}`, {
+    method: "DELETE",
+  });
+}
+
+// ───────────────────────────────────────────────────────────────────────
 //  Health
 // ───────────────────────────────────────────────────────────────────────
 
@@ -422,7 +707,7 @@ export function getHealth() {
     version: string;
     install_count: number;
     active_install_id: string | null;
-    /** Bug-review B5: true when the active install's bound
+    /** True when the active install's bound
      * `vfs_config_path` doesn't match the VFS_CONFIG_INI line currently
      * in its Ja2.ini. Null when no install is active or the sidecar
      * couldn't compute the comparison. Drives the Hub's
@@ -491,6 +776,15 @@ export function scanVfsConfigs(path: string) {
   });
 }
 
+/** Unregister an install. This only forgets the folder — nothing inside
+ * the game install is touched, and the same folder can be added again. */
+export function removeInstall(install_id: string) {
+  return request<{ removed: boolean }>(
+    `/installs/${encodeURIComponent(install_id)}`,
+    { method: "DELETE" },
+  );
+}
+
 export function setActiveInstall(install_id: string) {
   return request<{ active_install_id: string | null }>("/installs/active", {
     method: "POST",
@@ -522,13 +816,14 @@ export function applyVfsConfig(install_id: string) {
   );
 }
 
+/** Re-validate the registered installs: each path is re-checked and its
+ * engine revision re-read. This does NOT search the disks — whole-disk
+ * auto-detection was removed, so an install that is not registered stays
+ * unknown until it is added by hand. */
 export function refreshInstalls() {
-  // The install scan synchronously walks every fixed disk for `Jagged
-  // Alliance*` folders, validates each, reads multiple vfs_configs per
-  // install, and parses each install's PE / changelog for the engine
-  // revision. On a many-drive / many-mod setup this can take 20-30s,
-  // which trips the 30s default timeout. Use LONG_OP_TIMEOUT_MS (5 min)
-  // so the request waits for the real scan to finish instead of
+  // Re-reading each install parses its PE / changelog for the engine
+  // revision, which on a slow disk or a long list can outlast the 30s
+  // default. LONG_OP_TIMEOUT_MS keeps the request waiting rather than
   // aborting with "signal is aborted without reason".
   return request<InstallInfo[]>("/installs/refresh", { method: "POST" }, LONG_OP_TIMEOUT_MS);
 }
@@ -604,10 +899,17 @@ export async function getRosterPortraitSheet(opts?: {
   if (token) headers["X-MercWizard-Token"] = token;
 
   // Fetch both in parallel — they share the same on-disk cache so the
-  // second call hits the in-memory cache without re-baking.
+  // second call hits the in-memory cache without re-baking. 60s timeout:
+  // the documented slow path is a 4-9s first bake, but these were the
+  // only raw `fetch` calls in the module — against a wedged sidecar they
+  // hung forever, leaving roster portraits and the App.tsx warm-prefetch
+  // stuck with no error.
+  const SHEET_TIMEOUT_MS = 60_000;
   const [pngRes, jsonRes] = await Promise.all([
-    fetch(`${base}/roster/portrait-sheet.png${qs}`, { headers }),
-    fetch(`${base}/roster/portrait-sheet.json${qs}`, { headers }),
+    fetchWithTimeout(`${base}/roster/portrait-sheet.png${qs}`, { headers },
+                     SHEET_TIMEOUT_MS),
+    fetchWithTimeout(`${base}/roster/portrait-sheet.json${qs}`, { headers },
+                     SHEET_TIMEOUT_MS),
   ]);
   if (!pngRes.ok) {
     let detail: unknown = null;
@@ -655,18 +957,6 @@ export function createMerc(payload: CreateMercPayload, install_id?: string) {
     `/merc${qs}`,
     { method: "POST", body: JSON.stringify(payload) }
   );
-}
-
-export function updateMerc(
-  slot: number,
-  payload: { merc?: Merc; gear?: Gear; aim_binding?: AimBinding },
-  install_id?: string
-) {
-  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
-  return request<{ ok: boolean; slot: number }>(`/merc/${slot}${qs}`, {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -729,41 +1019,43 @@ export interface SaveProgressEvent {
   message?: string;
 }
 
-/** PUT /merc/{slot} with NDJSON streaming progress events.
+/** Shared NDJSON progress-stream driver for the streaming merc ops
+ * (update / move / duplicate) — one reader, three thin wrappers. This
+ * used to be copy-pasted per endpoint and had already drifted.
  *
- * Calls `onProgress(event)` for each line in the response stream. Resolves
- * with the final `{done: true, ok: true, slot}` event on success. Throws
- * `ApiError(500, ...)` on a `done: true, ok: false` event so the standard
- * React Query error path picks it up — `formatApiError` reads the
- * `error` / `error_step` / `steps_completed` / `message` fields out of the
- * detail and renders a friendly message via `ERROR_MESSAGES`.
+ * Feeds each parsed line to `onProgress` and resolves with the final
+ * `{done: true, ok: true, ...}` event. Error contract:
+ * - non-2xx before the stream opens (e.g. 400 AUDIT_FAILED) →
+ *   ApiError(status, detail);
+ * - `{done: true, ok: false}` → ApiError(500) shaped so formatApiError +
+ *   extractAuditIssues can read error/error_step/steps_completed/message;
+ * - stream closes with no done event → ApiError(500, INTERNAL_ERROR),
+ *   INCLUDING any trailing malformed fragment — a truncated final line
+ *   used to be silently skipped, masking the sidecar's real failure
+ *   payload exactly when it mattered.
  *
  * Uses `LONG_OP_TIMEOUT_MS` (5 min) instead of the 30s default because
- * backup on large modded installs can exceed 30s — the latent timeout bug
- * the streaming refactor incidentally fixes. */
-export async function updateMercStreaming(
-  slot: number,
-  payload: { merc?: Merc; gear?: Gear; aim_binding?: AimBinding },
-  install_id: string | undefined,
+ * backup on large modded installs can exceed 30s. */
+async function streamMercOp(
+  path: string,
+  init: { method: string; body?: string },
+  opLabel: string,
+  failCode: string,
   onProgress: (ev: SaveProgressEvent) => void,
 ): Promise<SaveProgressEvent> {
   const base = await getBaseUrl();
   const auth = await authHeaders();
-  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
-  const url = `${base}/merc/${slot}${qs}`;
-
   const res = await fetchWithTimeout(
-    url,
+    `${base}${path}`,
     {
-      method: "PUT",
+      method: init.method,
       headers: { "Content-Type": "application/json", ...auth },
-      body: JSON.stringify(payload),
+      body: init.body,
     },
     LONG_OP_TIMEOUT_MS,
   );
 
   if (!res.ok) {
-    // Non-streaming error path — e.g. 400 AUDIT_FAILED before stream opens.
     let detail: unknown = null;
     try {
       detail = await res.json();
@@ -775,105 +1067,102 @@ export async function updateMercStreaming(
 
   const reader = res.body?.getReader();
   if (!reader) {
-    throw new ApiError(500, { detail: { error: "INTERNAL_ERROR", message: "Response had no readable body." } });
+    throw new ApiError(500, {
+      detail: { error: "INTERNAL_ERROR", message: "Response had no readable body." },
+    });
   }
 
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
-  let finalEvent: SaveProgressEvent | null = null;
+  // Property box (not plain lets): TS narrows closure-assigned locals to
+  // their initializer type at the post-loop reads below.
+  const got: { final: SaveProgressEvent | null; malformed: string | null } = {
+    final: null,
+    malformed: null,
+  };
+
+  const feed = (raw: string) => {
+    const line = raw.trim();
+    if (!line) return;
+    try {
+      const ev = JSON.parse(line) as SaveProgressEvent;
+      onProgress(ev);
+      if (ev.done) got.final = ev;
+    } catch {
+      // Malformed mid-stream line: skip, but remember it — if the
+      // stream then ends without a done event, this fragment is the
+      // best clue to what the sidecar actually sent.
+      got.malformed = line;
+    }
+  };
 
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-
-    // Process complete lines (NDJSON: one JSON object per newline)
     let newlineIdx = buffer.indexOf("\n");
     while (newlineIdx !== -1) {
-      const line = buffer.slice(0, newlineIdx).trim();
+      feed(buffer.slice(0, newlineIdx));
       buffer = buffer.slice(newlineIdx + 1);
-      if (line) {
-        try {
-          const ev = JSON.parse(line) as SaveProgressEvent;
-          onProgress(ev);
-          if (ev.done) {
-            finalEvent = ev;
-          }
-        } catch {
-          // Malformed line — skip
-        }
-      }
       newlineIdx = buffer.indexOf("\n");
     }
   }
+  // Trailing buffered content (last line had no newline).
+  feed(buffer);
 
-  // Handle any trailing buffered content (in case the last line had no newline)
-  if (buffer.trim()) {
-    try {
-      const ev = JSON.parse(buffer.trim()) as SaveProgressEvent;
-      onProgress(ev);
-      if (ev.done) {
-        finalEvent = ev;
-      }
-    } catch {
-      // Malformed final fragment — skip
-    }
-  }
-
-  if (!finalEvent) {
+  if (!got.final) {
     throw new ApiError(500, {
       detail: {
         error: "INTERNAL_ERROR",
-        message: "Save stream closed without a 'done' event.",
+        message: `${opLabel} stream closed without a 'done' event.`
+          + (got.malformed
+            ? ` Truncated trailing data: ${got.malformed.slice(0, 200)}`
+            : ""),
       },
     });
   }
-
-  if (!finalEvent.ok) {
-    // Build an ApiError that formatApiError + extractAuditIssues understand.
+  const fin: SaveProgressEvent = got.final;
+  if (!fin.ok) {
     throw new ApiError(500, {
       detail: {
-        error: finalEvent.error ?? "SAVE_FAILED",
-        message: finalEvent.message,
-        error_step: finalEvent.error_step,
-        steps_completed: finalEvent.steps_completed,
+        error: fin.error ?? failCode,
+        message: fin.message,
+        error_step: fin.error_step,
+        steps_completed: fin.steps_completed,
       },
     });
   }
-
-  return finalEvent;
+  return fin;
 }
 
-export function deleteMerc(slot: number, install_id?: string) {
-  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
-  return request<{ ok: boolean }>(`/merc/${slot}${qs}`, { method: "DELETE" });
-}
-
-/**
- * Resolve the absolute URL for a slot's portrait thumbnail. Uses an async
- * one-shot resolver because the sidecar port is discovered at startup.
- *
- * Resolves to `null` when no install is registered (the request would 400)
- * — callers should fall back to rendering slot number alone.
- *
- * The endpoint returns:
- *   - 200 image/png : decoded face STI frame[0]
- *   - 204            : ubFaceIndex=0 ("no portrait" vanilla convention)
- *   - 404            : empty slot OR face STI missing on disk
- *
- * `<img>` only fires `onLoad` for status 200 — 204 / 404 trip `onError`,
- * so the cell can fall back to the slot number without further branching.
- */
-export async function getMercPortraitUrl(
+/** PUT /merc/{slot} with NDJSON streaming progress events. See
+ * `streamMercOp` for the shared stream/error contract. */
+export function updateMercStreaming(
   slot: number,
-  opts?: { install_id?: string; size?: "smallface" | "face_65" | "face_33" | "bigface" },
-): Promise<string> {
-  const base = await getBaseUrl();
+  payload: { merc?: Merc; gear?: Gear; aim_binding?: AimBinding },
+  install_id: string | undefined,
+  onProgress: (ev: SaveProgressEvent) => void,
+): Promise<SaveProgressEvent> {
+  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+  return streamMercOp(
+    `/merc/${slot}${qs}`,
+    { method: "PUT", body: JSON.stringify(payload) },
+    "Save", "SAVE_FAILED", onProgress,
+  );
+}
+
+export function deleteMerc(
+  slot: number,
+  opts?: { install_id?: string; force?: boolean },
+) {
+  // force acknowledges the server-side slot-lock gate (409 SLOT_LOCKED on
+  // non-safe tiers otherwise). UI callers pass it after their slot-lock
+  // modal confirm.
   const params = new URLSearchParams();
   if (opts?.install_id) params.set("install_id", opts.install_id);
-  if (opts?.size) params.set("size", opts.size);
-  const qs = params.toString();
-  return `${base}/merc/${slot}/portrait${qs ? `?${qs}` : ""}`;
+  if (opts?.force) params.set("force", "true");
+  const qs = params.size ? `?${params.toString()}` : "";
+  return request<{ ok: boolean }>(`/merc/${slot}${qs}`, { method: "DELETE" });
 }
 
 export interface MoveResult {
@@ -898,105 +1187,29 @@ export interface MoveResult {
 
 /** POST /merc/{slot}/move with NDJSON streaming progress.
  *
- * Streaming since 2026-05-23 (same refactor as /duplicate). The same-install
+ * Streaming (same refactor as /duplicate). The same-install
  * branch emits backup + move events; the cross-install branch emits one
  * coarse "move" step (the bundle pipeline doesn't surface internal steps).
  * Both end with `{done: True, ok, from, to, ...}`. */
-export async function moveMercStreaming(
+export function moveMercStreaming(
   slot: number,
   to_slot: number,
   opts: { install_id?: string; to_install_id?: string; force?: boolean } | undefined,
   onProgress: (ev: SaveProgressEvent) => void,
 ): Promise<SaveProgressEvent> {
-  const base = await getBaseUrl();
-  const auth = await authHeaders();
   const qs = opts?.install_id ? `?install_id=${encodeURIComponent(opts.install_id)}` : "";
-  const url = `${base}/merc/${slot}/move${qs}`;
-
-  const res = await fetchWithTimeout(
-    url,
+  return streamMercOp(
+    `/merc/${slot}/move${qs}`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify({
         to_slot,
         to_install_id: opts?.to_install_id,
         force: opts?.force ?? false,
       }),
     },
-    LONG_OP_TIMEOUT_MS,
+    "Move", "MOVE_FAILED", onProgress,
   );
-
-  if (!res.ok) {
-    let detail: unknown = null;
-    try {
-      detail = await res.json();
-    } catch {
-      // not JSON
-    }
-    throw new ApiError(res.status, detail);
-  }
-
-  const reader = res.body?.getReader();
-  if (!reader) {
-    throw new ApiError(500, {
-      detail: { error: "INTERNAL_ERROR", message: "Response had no readable body." },
-    });
-  }
-
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let finalEvent: SaveProgressEvent | null = null;
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newlineIdx = buffer.indexOf("\n");
-    while (newlineIdx !== -1) {
-      const line = buffer.slice(0, newlineIdx).trim();
-      buffer = buffer.slice(newlineIdx + 1);
-      if (line) {
-        try {
-          const ev = JSON.parse(line) as SaveProgressEvent;
-          onProgress(ev);
-          if (ev.done) finalEvent = ev;
-        } catch {
-          // Malformed line — skip
-        }
-      }
-      newlineIdx = buffer.indexOf("\n");
-    }
-  }
-  if (buffer.trim()) {
-    try {
-      const ev = JSON.parse(buffer.trim()) as SaveProgressEvent;
-      onProgress(ev);
-      if (ev.done) finalEvent = ev;
-    } catch {
-      // Malformed final fragment — skip
-    }
-  }
-
-  if (!finalEvent) {
-    throw new ApiError(500, {
-      detail: {
-        error: "INTERNAL_ERROR",
-        message: "Move stream closed without a 'done' event.",
-      },
-    });
-  }
-  if (!finalEvent.ok) {
-    throw new ApiError(500, {
-      detail: {
-        error: finalEvent.error ?? "MOVE_FAILED",
-        message: finalEvent.message,
-        error_step: finalEvent.error_step,
-        steps_completed: finalEvent.steps_completed,
-      },
-    });
-  }
-  return finalEvent;
 }
 
 /** POST /merc/{slot}/duplicate with NDJSON streaming progress events.
@@ -1008,98 +1221,19 @@ export async function moveMercStreaming(
  *
  * Uses LONG_OP_TIMEOUT_MS — backup on a heavily-modded install (Wasteland,
  * AIMNAS, etc.) can take well over the 30s default that the pre-streaming version
- * was using, which surfaced as "Couldn't reach the sidecar" 2026-05-23. */
-export async function duplicateMercStreaming(
+ * was using, which surfaced as "Couldn't reach the sidecar". */
+export function duplicateMercStreaming(
   slot: number,
   to_slot: number,
   install_id: string | undefined,
   onProgress: (ev: SaveProgressEvent) => void,
 ): Promise<SaveProgressEvent> {
-  const base = await getBaseUrl();
-  const auth = await authHeaders();
   const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
-  const url = `${base}/merc/${slot}/duplicate${qs}`;
-
-  const res = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...auth },
-      body: JSON.stringify({ to_slot }),
-    },
-    LONG_OP_TIMEOUT_MS,
+  return streamMercOp(
+    `/merc/${slot}/duplicate${qs}`,
+    { method: "POST", body: JSON.stringify({ to_slot }) },
+    "Duplicate", "DUPLICATE_FAILED", onProgress,
   );
-
-  if (!res.ok) {
-    let detail: unknown = null;
-    try {
-      detail = await res.json();
-    } catch {
-      // not JSON
-    }
-    throw new ApiError(res.status, detail);
-  }
-
-  const reader = res.body?.getReader();
-  if (!reader) {
-    throw new ApiError(500, {
-      detail: { error: "INTERNAL_ERROR", message: "Response had no readable body." },
-    });
-  }
-
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let finalEvent: SaveProgressEvent | null = null;
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let newlineIdx = buffer.indexOf("\n");
-    while (newlineIdx !== -1) {
-      const line = buffer.slice(0, newlineIdx).trim();
-      buffer = buffer.slice(newlineIdx + 1);
-      if (line) {
-        try {
-          const ev = JSON.parse(line) as SaveProgressEvent;
-          onProgress(ev);
-          if (ev.done) finalEvent = ev;
-        } catch {
-          // Malformed line — skip
-        }
-      }
-      newlineIdx = buffer.indexOf("\n");
-    }
-  }
-  if (buffer.trim()) {
-    try {
-      const ev = JSON.parse(buffer.trim()) as SaveProgressEvent;
-      onProgress(ev);
-      if (ev.done) finalEvent = ev;
-    } catch {
-      // Malformed final fragment — skip
-    }
-  }
-
-  if (!finalEvent) {
-    throw new ApiError(500, {
-      detail: {
-        error: "INTERNAL_ERROR",
-        message: "Duplicate stream closed without a 'done' event.",
-      },
-    });
-  }
-  if (!finalEvent.ok) {
-    throw new ApiError(500, {
-      detail: {
-        error: finalEvent.error ?? "DUPLICATE_FAILED",
-        message: finalEvent.message,
-        error_step: finalEvent.error_step,
-        steps_completed: finalEvent.steps_completed,
-      },
-    });
-  }
-  return finalEvent;
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1115,6 +1249,7 @@ export async function compilePortrait(
     mouth_x?: number; mouth_y?: number;
     mouth_w?: number; mouth_h?: number;
     skip_animation?: boolean;
+    rpc_talkface?: boolean;
     install_id?: string;
     // Optional alternate-authoring uploads. Each is independent — supply
     // bigface_image alone for a separately-framed hero portrait, or any
@@ -1143,6 +1278,8 @@ export async function compilePortrait(
   if (opts?.mouth_h !== undefined) fd.append("mouth_h", String(opts.mouth_h));
   if (opts?.skip_animation !== undefined)
     fd.append("skip_animation", String(opts.skip_animation));
+  if (opts?.rpc_talkface !== undefined)
+    fd.append("rpc_talkface", String(opts.rpc_talkface));
   if (opts?.bigface_image) fd.append("bigface_image", opts.bigface_image);
   if (opts?.anim_eye_1) fd.append("anim_eye_1", opts.anim_eye_1);
   if (opts?.anim_eye_2) fd.append("anim_eye_2", opts.anim_eye_2);
@@ -1172,6 +1309,71 @@ export async function compilePortrait(
     frame_count: number;
     explicit_animation?: boolean;
     bigface_override?: boolean;
+    talkface?: {
+      written: boolean;
+      eyes_x: number;
+      eyes_y: number;
+      mouth_x: number;
+      mouth_y: number;
+      animated_eyes: boolean;
+      animated_mouth: boolean;
+    } | null;
+  };
+}
+
+export async function saveRpcPortrait(
+  image: File,
+  operation: "create" | "edit",
+  merc: Merc,
+  gear: Gear | undefined,
+  opts: {
+    eye_x: number; eye_y: number; eye_w: number; eye_h: number;
+    mouth_x: number; mouth_y: number; mouth_w: number; mouth_h: number;
+    install_id?: string;
+    bigface_image?: File;
+    anim_eye_1?: File; anim_eye_2?: File; anim_eye_3?: File; anim_eye_4?: File;
+    anim_mouth_1?: File; anim_mouth_2?: File; anim_mouth_3?: File;
+  },
+) {
+  const fd = new FormData();
+  fd.append("image", image);
+  fd.append("operation", operation);
+  fd.append("merc_json", JSON.stringify(merc));
+  if (gear) fd.append("gear_json", JSON.stringify(gear));
+  for (const key of ["eye_x", "eye_y", "eye_w", "eye_h", "mouth_x", "mouth_y", "mouth_w", "mouth_h"] as const) {
+    fd.append(key, String(opts[key]));
+  }
+  for (const key of [
+    "bigface_image", "anim_eye_1", "anim_eye_2", "anim_eye_3", "anim_eye_4",
+    "anim_mouth_1", "anim_mouth_2", "anim_mouth_3",
+  ] as const) {
+    const file = opts[key];
+    if (file) fd.append(key, file);
+  }
+  const base = await getBaseUrl();
+  const auth = await authHeaders();
+  const qs = opts.install_id ? `?install_id=${encodeURIComponent(opts.install_id)}` : "";
+  const res = await fetchWithTimeout(`${base}/portrait/rpc-save${qs}`, {
+    method: "POST", headers: auth, body: fd,
+  }, LONG_OP_TIMEOUT_MS);
+  if (!res.ok) {
+    let detail: unknown = null;
+    try { detail = await res.json(); } catch {}
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as {
+    ok: boolean;
+    operation: "create" | "edit";
+    slot: number;
+    face_index: number;
+    files_written: string[];
+    backup_id: string;
+    issues: AuditIssue[];
+    talkface: {
+      written: boolean;
+      eyes_x: number; eyes_y: number; mouth_x: number; mouth_y: number;
+      animated_eyes: boolean; animated_mouth: boolean;
+    };
   };
 }
 
@@ -1208,6 +1410,7 @@ export interface BackgroundFieldSpec {
   max: number;
   options?: { value: number; label: string }[];
   note?: string;
+  help?: string;
 }
 
 export interface BackgroundsResponse {
@@ -1299,6 +1502,96 @@ export function setBackgroundImpThreshold(
 ) {
   const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
   return request<BackgroundWriteResult>(`/backgrounds/imp-threshold${qs}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// ───────────────────────────────────────────────────────────────────────
+//  Background Library (cross-mod union harvested from every JA2 mod on disk)
+// ───────────────────────────────────────────────────────────────────────
+
+/** One row of the cross-mod background library. `block_xml` is omitted from the
+ * list endpoint (lightweight) and present on the detail endpoint. `modifiers`
+ * is a list of [field, value] pairs for quick display/filter. */
+export interface LibraryBackground {
+  uid: string;
+  name: string;
+  short_name: string;
+  description: string;
+  /** Representative source index (informational — renumbered on assign). */
+  raw_index: number;
+  indices_seen: number[];
+  /** Source mod(s) this background appears in. */
+  sources: string[];
+  /** Provenance kinds: mod_custom | shared_baseline | wasteland. */
+  source_kinds: string[];
+  net: number;
+  core_net: number;
+  gross_pos: number;
+  gross_neg: number;
+  n_fields: number;
+  cluster: string;
+  imp_pickable: boolean;
+  has_power: boolean;
+  modifiers: [string, number][];
+  /** Full verbatim <BACKGROUND> block — detail endpoint only. */
+  block_xml?: string;
+}
+
+export interface LibraryMeta {
+  schema_version: number;
+  generator: string;
+  source_files: number;
+  unique_backgrounds: number;
+  total_entries_scanned: number;
+  facets: {
+    sources: string[];
+    kinds: string[];
+    clusters: string[];
+    net_min: number;
+    net_max: number;
+  };
+}
+
+export interface BackgroundLibraryResponse {
+  meta: LibraryMeta;
+  total: number;
+  count: number;
+  backgrounds: LibraryBackground[];
+}
+
+export interface LibraryAssignResult {
+  ok: boolean;
+  backup_id?: string;
+  uid: string;
+  name: string;
+  /** The free in-range (<500) id the block was renumbered to + written at. */
+  ui_index: number;
+  created: boolean;
+  num_found_background: number;
+  imp_selectable?: boolean;
+}
+
+/** Browse the harvested cross-mod library (lightweight rows + meta). The
+ * whole union is fetched once; filtering is client-side. */
+export function listBackgroundLibrary() {
+  return request<BackgroundLibraryResponse>(`/backgrounds/library`);
+}
+
+/** One library entry including its full verbatim `<BACKGROUND>` block. */
+export function getBackgroundLibraryEntry(uid: string) {
+  return request<LibraryBackground>(`/backgrounds/library/${encodeURIComponent(uid)}`);
+}
+
+/** Renumber the chosen library block into a free <500 id and splice it into the
+ * active install's Backgrounds.xml. Returns the assigned id. */
+export function assignBackgroundFromLibrary(
+  body: { uid: string; ui_index?: number | null; make_imp_selectable?: boolean },
+  install_id?: string,
+) {
+  const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
+  return request<LibraryAssignResult>(`/backgrounds/library/assign${qs}`, {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -1464,6 +1757,9 @@ export function injectFaceGearOverlay(
   pngFile: File,
   install_id?: string,
   apply_to_imp: boolean = true,
+  // Pins the exact data-layer copy when the same filename exists in
+  // several layers (Data/ vs Data-UB/); bare sti_name = first match.
+  relative_path?: string,
 ) {
   return new Promise<FaceGearOverlayResponse>((resolve, reject) => {
     const reader = new FileReader();
@@ -1476,7 +1772,7 @@ export function injectFaceGearOverlay(
           `/facegear/overlay${qs}`,
           {
             method: "POST",
-            body: JSON.stringify({ sti_name, face_index, png_b64, apply_to_imp }),
+            body: JSON.stringify({ sti_name, face_index, png_b64, apply_to_imp, relative_path }),
           },
           LONG_OP_TIMEOUT_MS,
         );
@@ -1527,6 +1823,8 @@ export function autoPositionFaceGear(
   options?: {
     install_id?: string;
     apply_to_imp?: boolean;
+    /** Pins the exact data-layer copy — see injectFaceGearOverlay. */
+    relative_path?: string;
   },
 ) {
   const qs = options?.install_id ? `?install_id=${encodeURIComponent(options.install_id)}` : "";
@@ -1536,6 +1834,7 @@ export function autoPositionFaceGear(
     target_eye_x,
     target_eye_y,
     apply_to_imp: options?.apply_to_imp ?? true,
+    relative_path: options?.relative_path,
   };
   return request<FaceGearAutoPositionResponse>(
     `/facegear/auto-position${qs}`,
@@ -1570,13 +1869,15 @@ export function nudgeFaceGearOffset(
   dy: number,
   install_id?: string,
   apply_to_imp: boolean = true,
+  /** Pins the exact data-layer copy — see injectFaceGearOverlay. */
+  relative_path?: string,
 ) {
   const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
   return request<FaceGearNudgeResponse>(
     `/facegear/nudge${qs}`,
     {
       method: "POST",
-      body: JSON.stringify({ sti_name, face_index, dx, dy, apply_to_imp }),
+      body: JSON.stringify({ sti_name, face_index, dx, dy, apply_to_imp, relative_path }),
     },
   );
 }
@@ -1609,13 +1910,15 @@ export function setFaceGearOffset(
   offset_y: number,
   install_id?: string,
   apply_to_imp: boolean = true,
+  /** Pins the exact data-layer copy — see injectFaceGearOverlay. */
+  relative_path?: string,
 ) {
   const qs = install_id ? `?install_id=${encodeURIComponent(install_id)}` : "";
   return request<FaceGearSetOffsetResponse>(
     `/facegear/set-offset${qs}`,
     {
       method: "POST",
-      body: JSON.stringify({ sti_name, face_index, offset_x, offset_y, apply_to_imp }),
+      body: JSON.stringify({ sti_name, face_index, offset_x, offset_y, apply_to_imp, relative_path }),
     },
   );
 }
@@ -1636,12 +1939,15 @@ export function previewFaceGearOverlay(
   sti_name: string,
   face_index: number,
   install_id?: string,
+  /** Pins the exact data-layer copy — see injectFaceGearOverlay. */
+  relative_path?: string,
 ) {
   const params = new URLSearchParams({
     sti_name,
     face_index: String(face_index),
   });
   if (install_id) params.set("install_id", install_id);
+  if (relative_path) params.set("relative_path", relative_path);
   return request<FaceGearOverlayPreview>(`/facegear/overlay?${params.toString()}`);
 }
 
@@ -1773,6 +2079,157 @@ export function deleteVoiceClip(slot: number, filename: string, install_id?: str
 }
 
 // ───────────────────────────────────────────────────────────────────────
+//  Voice Lab
+// ───────────────────────────────────────────────────────────────────────
+
+function voiceLabInstallQuery(installId?: string): string {
+  return installId ? `?install_id=${encodeURIComponent(installId)}` : "";
+}
+
+export async function getVoiceLabStatus(installId?: string): Promise<VoiceLabStatus> {
+  return parseVoiceLabStatus(await request<unknown>(`/voice-lab/status${voiceLabInstallQuery(installId)}`));
+}
+
+export async function startVoiceScan(voiceIndex?: number, installId?: string): Promise<VoiceLabJob> {
+  const params = new URLSearchParams();
+  if (installId) params.set("install_id", installId);
+  if (voiceIndex !== undefined) params.set("voice_index", String(voiceIndex));
+  const query = params.size ? `?${params.toString()}` : "";
+  return parseVoiceLabJob(await request<unknown>(`/voice-lab/scans${query}`, {
+    method: "POST",
+  }));
+}
+
+/** Audit one already-indexed bank; optional lines retain their review sequence. */
+export async function startVoiceAudit(
+  voiceIndex: number,
+  lineIds?: string[],
+  installId?: string,
+): Promise<VoiceLabJob> {
+  return parseVoiceLabJob(await request<unknown>(`/voice-lab/audits${voiceLabInstallQuery(installId)}`, {
+    method: "POST",
+    body: JSON.stringify({ voice_index: voiceIndex, ...(lineIds ? { line_ids: lineIds } : {}) }),
+  }));
+}
+
+/** Transcribe uncached clips, then check one merc's indexed voice lines. */
+export async function startVoiceAnalysis(
+  voiceIndex: number,
+  lineIds?: string[],
+  installId?: string,
+): Promise<VoiceLabJob> {
+  return parseVoiceLabJob(await request<unknown>(`/voice-lab/analyses${voiceLabInstallQuery(installId)}`, {
+    method: "POST",
+    body: JSON.stringify({ voice_index: voiceIndex, ...(lineIds ? { line_ids: lineIds } : {}) }),
+  }));
+}
+
+export async function cancelVoiceJob(jobId: string): Promise<VoiceLabJob> {
+  return parseVoiceLabJob(await request<unknown>(
+    `/voice-lab/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  ));
+}
+
+export async function getVoiceJob(jobId: string): Promise<VoiceLabJob> {
+  return parseVoiceLabJob(await request<unknown>(`/voice-lab/jobs/${encodeURIComponent(jobId)}`));
+}
+
+export async function getVoiceBanks(installId?: string): Promise<VoiceBank[]> {
+  return parseVoiceBanks(await request<unknown>(`/voice-lab/banks${voiceLabInstallQuery(installId)}`));
+}
+
+export async function getVoiceBankCatalog(installId?: string): Promise<VoiceBank[]> {
+  return parseVoiceBanks(await request<unknown>(`/voice-lab/catalog${voiceLabInstallQuery(installId)}`));
+}
+
+export async function getVoiceFindings(installId?: string): Promise<VoiceFinding[]> {
+  return parseVoiceFindings(await request<unknown>(`/voice-lab/findings${voiceLabInstallQuery(installId)}`));
+}
+
+export async function setVoiceFindingState(
+  stableKey: string,
+  state: VoiceFindingState,
+  installId?: string,
+): Promise<VoiceFinding> {
+  return parseVoiceFindings([await request<unknown>(
+    `/voice-lab/findings/${encodeURIComponent(stableKey)}${voiceLabInstallQuery(installId)}`,
+    { method: "PATCH", body: JSON.stringify({ state }) },
+  )])[0]!;
+}
+
+/** Build the only client-visible Voice Lab playback URL from an opaque asset ID. */
+export function voiceLabAudioUrl(assetId: string, installId?: string): Promise<string> {
+  return mediaUrl(`/voice-lab/assets/${encodeURIComponent(assetId)}/audio${voiceLabInstallQuery(installId)}`);
+}
+
+export async function getVoiceWaveform(assetId: string, installId?: string): Promise<VoiceWaveform> {
+  return parseVoiceWaveform(await request<unknown>(`/voice-lab/assets/${encodeURIComponent(assetId)}/waveform${voiceLabInstallQuery(installId)}`));
+}
+export async function getVoiceLineDetail(voiceIndex: number, family: string, lineId: string): Promise<VoiceLineDetail> { return parseVoiceLineDetail(await request<unknown>(`/voice-lab/lines/${voiceIndex}/${encodeURIComponent(family)}/${encodeURIComponent(lineId)}`)); }
+
+export async function importVoiceSource(file: File, installId?: string): Promise<ImportedVoiceAsset> {
+  const base = await getBaseUrl();
+  const response = await fetchWithTimeout(`${base}/voice-lab/import-source${voiceLabInstallQuery(installId)}`, {
+    method: "POST", headers: await authHeaders(), body: (() => { const form = new FormData(); form.set("file", file); return form; })(),
+  }, LONG_OP_TIMEOUT_MS);
+  if (!response.ok) throw new ApiError(response.status, await response.json().catch(() => null));
+  return parseImportedVoiceAsset(await response.json());
+}
+
+export interface SavedVoiceRecipe { recipeId: string; }
+
+export async function saveVoiceRecipe(draft: EditRecipeDraft, installId?: string): Promise<SavedVoiceRecipe> {
+  const wire = await request<{ recipe_id: string }>(`/voice-lab/recipes${voiceLabInstallQuery(installId)}`, {
+    method: "POST",
+    body: JSON.stringify({
+      input_asset_id: draft.inputAssetId, input_sha256: draft.inputSha256,
+      voice_index: draft.voiceIndex, family: draft.family, line_id: draft.lineId,
+      output_extension: draft.outputExtension,
+      operations: draft.operations.map((operation) => ({ kind: operation.kind, start_ms: operation.startMs, end_ms: operation.endMs })),
+      subtitle: draft.subtitle, replacement_source: draft.replacementSource && { asset_id: draft.replacementSource.assetId, sha256: draft.replacementSource.sha256 },
+    }),
+  });
+  return { recipeId: wire.recipe_id };
+}
+
+export interface VoicePreviewJob extends VoiceLabJob { previewAssetId: string; }
+
+export async function previewVoiceRecipe(recipeId: string, installId?: string): Promise<VoicePreviewJob> {
+  const job = parseVoiceLabJob(await request<unknown>(`/voice-lab/recipes/${encodeURIComponent(recipeId)}/preview${voiceLabInstallQuery(installId)}`, { method: "POST" }));
+  if (!job.previewAssetId) throw new Error("Voice Lab did not plan preview media.");
+  return { ...job, previewAssetId: job.previewAssetId };
+}
+
+/** Request a server-authoritative reviewed manifest for a completed recipe. */
+export async function preflightVoiceRecipe(recipeId: string, installId?: string): Promise<VoiceDeployPlan> {
+  return parseVoiceDeployPlan(await request<unknown>(`/voice-lab/deploy/preflight${voiceLabInstallQuery(installId)}`, {
+    method: "POST",
+    body: JSON.stringify({ recipe_id: recipeId }),
+  }));
+}
+
+/** Deploys only the opaque plan returned by preflight; the sidecar revalidates it under locks. */
+export async function deployVoicePlan(planId: string, installId?: string): Promise<{ deploymentId: string; planId: string; recipeId: string; backupId: string }> {
+  const wire = await request<{ deployment_id: string; plan_id: string; recipe_id: string; backup_id: string }>(
+    `/voice-lab/deploy${voiceLabInstallQuery(installId)}`,
+    { method: "POST", body: JSON.stringify({ plan_id: planId }) },
+  );
+  return { deploymentId: wire.deployment_id, planId: wire.plan_id, recipeId: wire.recipe_id, backupId: wire.backup_id };
+}
+
+export async function getVoiceDeploymentHistory(installId?: string): Promise<VoiceDeployment[]> {
+  return parseVoiceDeployments(await request<unknown>(`/voice-lab/deployments${voiceLabInstallQuery(installId)}`));
+}
+
+export async function undoVoiceDeployment(deploymentId: string, installId?: string): Promise<VoiceUndoResult> {
+  return parseVoiceUndoResult(await request<unknown>(
+    `/voice-lab/deployments/${encodeURIComponent(deploymentId)}/undo${voiceLabInstallQuery(installId)}`,
+    { method: "POST" },
+  ));
+}
+
+// ───────────────────────────────────────────────────────────────────────
 //  .wmerc bundle (export + import)
 // ───────────────────────────────────────────────────────────────────────
 
@@ -1792,8 +2249,7 @@ export interface ExportBundlePayload {
   // frames. The backend's ExportPayload accepts these to round-trip
   // hand-authored animations through the bundle; without them in the
   // TS interface the frontend couldn't request explicit-animation
-  // exports even when the user had authored the frames. Cross-cutting
-  // review fix 2026-05-25.
+  // exports even when the user had authored the frames.
   anim_eye_1?: string;
   anim_eye_2?: string;
   anim_eye_3?: string;
@@ -1831,7 +2287,7 @@ export interface WmercManifestSummary {
   merc: import("./schema").Merc;
   gear: import("./schema").GearKit[];
   aim_binding: import("./schema").AimBinding | null;
-  // Type=2 expansion-MERC binding. Added 2026-05-14 as the fix for the
+  // Type=2 expansion-MERC binding. Added as the fix for the
   // Eskimo bug (bundled MercBioID was clobbering the importer's
   // auto-allocation). The importer ALWAYS rederives MercBioID against
   // the target install — this field is descriptive metadata only, used
@@ -1948,7 +2404,7 @@ export function getSavesRefs(slot: number, install_id?: string) {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-//  INI editor + game status + app settings (MercForge UI Phase 2)
+//  INI editor + game status + app settings
 // ───────────────────────────────────────────────────────────────────────
 
 import type {
@@ -2030,7 +2486,7 @@ export async function deployGraphics(): Promise<GraphicsDeployResult> {
   return request<GraphicsDeployResult>("/graphics/deploy", { method: "POST" });
 }
 
-// ---- INI presets + setup flow (MercForge UI Phase 3) ----
+// ---- INI presets + setup flow ----
 
 import type {
   IniPresetsResponse,

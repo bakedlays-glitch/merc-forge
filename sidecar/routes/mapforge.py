@@ -1,10 +1,10 @@
-"""MapForge — JA2 .dat sector editor (Phase 0: read-only inspector).
+"""MapForge — JA2 .dat sector editor routes.
 
 Wraps the vendored iso renderer + .dat parser
 (`mercwizard_core.mapforge_engine`) as a FastAPI router so the React
 frontend can render sectors and inspect tiles through the MercForge sidecar.
 
-Phase 0 endpoints (all read-only — no .dat writes):
+Read-only inspection:
 
   GET  /mapforge/health             — confirms the renderer imports
   GET  /mapforge/installs/maps      — lists .dat files in the active install
@@ -12,10 +12,10 @@ Phase 0 endpoints (all read-only — no .dat writes):
   GET  /mapforge/sector/render      — PNG of sector (full / room / bbox)
   GET  /mapforge/sector/tile        — JSON describing one tile
 
-Future phases (NOT in this file yet):
-  - POST /mapforge/sessions          — open a .dat for editing, returns session_id
-  - PUT  /mapforge/sessions/{sid}/tile/{x}/{y}/struct  — edit op
-  - POST /mapforge/sessions/{sid}/save  — write .dat back
+Editing sessions:
+  POST /mapforge/sessions            — open a .dat for editing, returns session_id
+  PUT  /mapforge/sessions/{sid}/tile/{x}/{y}/struct  — one edit op
+  POST /mapforge/sessions/{sid}/save — write the .dat back
 
 The renderer + parser are vendored inside the sidecar package
 (`mercwizard_core/mapforge_engine/`) so they bundle cleanly under
@@ -30,11 +30,13 @@ import os
 import tempfile
 from pathlib import Path
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .state import get_state
 
@@ -103,8 +105,21 @@ from mercwizard_core.mapforge_engine.validate import (  # noqa: E402
 )
 from mercwizard_core.mapforge_engine.appendix_extract import extract_appendix_entities  # noqa: E402
 from mercwizard_core.vfs import parse_vfs_config, VfsConfigError  # noqa: E402
+from mercwizard_core.cross_lock import (  # noqa: E402
+    cross_process_install_root_lock,
+    acquire_writable_map_session_lease,
+)
+
+# Local injection seam for deterministic route tests.  Production callers
+# pass a physical root to this alias, never a profile/install ID.
+cross_process_install_lock = cross_process_install_root_lock
+from mercwizard_core.inject._atomic_xml import write_bytes_atomic  # noqa: E402
 # tile_families is pure (a static enum table) — import alongside validate.
 from mercwizard_core.mapforge.tile_families import slot_family, MAX_TILE_SLOT  # noqa: E402
+# prop_labels is pure (a JSON lookup) — friendly names for The Wasteland's
+# custom prop sheets so the palette reads "Junktown furnishings" not
+# "gecko_props_v101". See mercwizard_core/mapforge/prop_labels.py.
+from mercwizard_core.mapforge import prop_labels  # noqa: E402
 
 
 # ─── Install-relative tileset asset resolution ─────────────────────────
@@ -155,6 +170,11 @@ def _active_install_root() -> Optional[Path]:
     """Active install root from app state, or None when none is active."""
     info = get_state().active()
     return Path(info.path) if info is not None else None
+
+
+def _session_install_root(sess: "MapForgeSession") -> Path:
+    """Captured physical root, with a test/back-compat fallback."""
+    return Path(getattr(sess, "install_root", sess.dat_path.parents[2]))
 
 
 def _tileset_paths_for(xml_path: Path) -> tuple[list[Path], list[Path]]:
@@ -362,24 +382,63 @@ def _parse_slf_uri(uri: str) -> tuple[Path, str]:
     return Path(slf_str), internal
 
 
+def _resolve_slf_uri(uri: str) -> tuple[Path, str]:
+    """Resolve an SLF URI only when its archive is mounted by this install.
+
+    ``slf://`` values originate at the map listing, but still cross the HTTP
+    boundary as caller-controlled strings. Restrict the archive itself to a
+    recognized VFS directory root; resolving first makes junction and ``..``
+    escapes fail the same way as other MapForge path-policy checks.
+    """
+    try:
+        slf_path, internal = _parse_slf_uri(uri)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "BAD_SLF_URI", "message": str(e)},
+        )
+    install_root = _active_install_root()
+    if install_root is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "NO_ACTIVE_INSTALL",
+                    "message": "Select an install before opening an SLF map."},
+        )
+    try:
+        layout = parse_vfs_config(install_root)
+        archive = slf_path.resolve()
+        allowed_roots = [
+            location.path.resolve()
+            for profile in layout.profiles
+            for location in profile.locations
+            if location.is_directory
+        ]
+    except (OSError, VfsConfigError) as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "BAD_SLF_PATH",
+                    "message": f"{type(e).__name__}: {e}"},
+        )
+    if not any(archive.is_relative_to(root) for root in allowed_roots):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "PATH_NOT_ALLOWED",
+                    "message": "SLF archive is outside the active install's VFS roots."},
+        )
+    if not archive.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "SLF_NOT_FOUND", "message": f"{archive} not found"},
+        )
+    return archive, internal
+
+
 def _resolve_dat_path(raw: str) -> Path:
     """Accept either a real filesystem path or an `slf://...!...` URI.
     For SLF URIs, extract on demand to the temp cache and return the
     cached path. Raises HTTPException on bad input."""
     if raw.startswith(SLF_URI_PREFIX):
-        try:
-            slf_path, internal = _parse_slf_uri(raw)
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "BAD_SLF_URI", "message": str(e)},
-            )
-        if not slf_path.is_file():
-            raise HTTPException(
-                status_code=404,
-                detail={"error": "SLF_NOT_FOUND",
-                        "message": f"{slf_path} not found"},
-            )
+        slf_path, internal = _resolve_slf_uri(raw)
         try:
             return _extract_dat_from_slf(slf_path, internal)
         except Exception as e:  # noqa: BLE001
@@ -389,6 +448,41 @@ def _resolve_dat_path(raw: str) -> Path:
                         "message": f"{type(e).__name__}: {e}"},
             )
     return _validate_dat_path(raw)
+
+
+def _resolve_dat_for_captured_root(raw: str, install_root: Path) -> Path:
+    """Resolve a radar input while keeping its live archive in ``install_root``.
+
+    SLF sectors are extracted to a temp cache and may therefore not pass the
+    ordinary install-tree confinement check.  Validate the archive itself
+    against the captured root, then extract it before the physical writer
+    lock is acquired; the lock need only cover the live destination.
+    """
+    if not raw.startswith(SLF_URI_PREFIX):
+        return _confine_path_to_root(raw, install_root, ".dat", require_file=True)
+    try:
+        slf_path, internal = _parse_slf_uri(raw)
+        archive = slf_path.resolve()
+        root = install_root.resolve()
+    except (OSError, ValueError) as e:
+        raise HTTPException(400, {"error": "BAD_SLF_URI",
+            "message": f"{type(e).__name__}: {e}"})
+    if not archive.is_relative_to(root):
+        raise HTTPException(403, {
+            "error": "PATH_NOT_ALLOWED",
+            "message": "SLF archive is outside the captured active install.",
+        })
+    if not archive.is_file():
+        raise HTTPException(404, {
+            "error": "SLF_NOT_FOUND", "message": f"{archive} not found",
+        })
+    try:
+        return _extract_dat_from_slf(archive, internal)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, {
+            "error": "SLF_EXTRACT_FAILED",
+            "message": f"{type(e).__name__}: {e}",
+        })
 
 
 router = APIRouter(prefix="/mapforge")
@@ -401,7 +495,7 @@ class MapForgeHealth(BaseModel):
     # Where the renderer code lives. Now that the renderer is vendored
     # inside the sidecar package, this is the vendored module's directory
     # (a diagnostic shown when the renderer fails to import) — NOT an
-    # external dev-machine path. Field name kept for frontend compat.
+    # path outside the install. Field name kept for frontend compat.
     headless_compiler_path: str
     active_install_id: Optional[str] = None
 
@@ -479,7 +573,7 @@ class TilesetList(BaseModel):
 # ─── Endpoints ─────────────────────────────────────────────────────────
 @router.get("/health", response_model=MapForgeHealth)
 def health():
-    """Phase 0 wiring check: confirms the renderer + parser are importable."""
+    """Wiring check: confirms the renderer + parser are importable."""
     state = get_state()
     active = state.active()
     return MapForgeHealth(
@@ -1400,7 +1494,7 @@ def sector_tile(
     """Return everything stored at one tile across all layers, with each
     entry's STI filename resolved through the tileset's slot map.
 
-    This is the Phase 0 "what's on this tile?" inspector endpoint.
+    This is the "what's on this tile?" inspector endpoint.
     """
     _require_renderer()
     dat_path = _resolve_dat_path(dat)
@@ -1437,7 +1531,7 @@ def sector_tile(
     )
 
 
-# ─── STI frame preview (Phase 2 visual picker) ────────────────────────
+# ─── STI frame preview (visual picker) ────────────────────────────────
 @router.get("/sti/frame")
 def sti_frame(
     xml: str = Query(..., description="Path to Ja2Set.dat.xml"),
@@ -1536,7 +1630,7 @@ def sti_frame_count(
     }
 
 
-# ─── Tileset palette (Phase 2B) ───────────────────────────────────────
+# ─── Tileset palette ──────────────────────────────────────────────────
 # Categorized slot inventory the frontend uses to render the asset
 # sidebar. Categories come from the authoritative TileDat slot→family
 # table (`tile_families.slot_family`, baked from the TileTypeDefines enum)
@@ -1620,6 +1714,12 @@ class PaletteSlot(BaseModel):
     frame_count: int
     category: str
     has_jsd: bool   # multi-tile structures have JSDs; useful UX hint
+    # Friendly name for The Wasteland's custom prop sheets (None for stock art,
+    # which keeps its filename label). origin = which map/feature it belongs to.
+    # sub_names = {sub_index: prop name} for the sub-picker (empty for sheet-level).
+    display_name: Optional[str] = None
+    origin: Optional[str] = None
+    sub_names: dict[int, str] = {}
 
 
 class TilesetPalette(BaseModel):
@@ -1680,6 +1780,11 @@ def tileset_palette(
             # for slots the table doesn't cover (item/UI slots, filtered out).
             category=slot_family(slot_idx) or _categorize_sti(name),
             has_jsd=has_jsd,
+            # Friendly name / origin / per-sub names for our custom sheets
+            # (None/empty for stock art — the frontend falls back to filename).
+            display_name=prop_labels.display_name(name),
+            origin=prop_labels.origin(name),
+            sub_names=prop_labels.sub_names(name),
         ))
     return TilesetPalette(
         tileset=tileset,
@@ -1735,7 +1840,7 @@ def list_tilesets(
     return TilesetList(xml_path=str(xml_path), tilesets=out)
 
 
-# ─── Palette sprite sheet (Phase 2B perf) ─────────────────────────────
+# ─── Palette sprite sheet (perf) ──────────────────────────────────────
 # One PNG with EVERY slot's frame-0 packed into a grid. Replaces ~150
 # individual /sti/frame requests with one, which (a) saves the per-
 # request HTTP overhead, (b) gets past the browser's 6-concurrent-
@@ -2078,159 +2183,6 @@ def palette_sheet_build(
                              headers={"Cache-Control": "no-store"})
 
 
-# ─── Edit endpoint (Phase 2) ──────────────────────────────────────────
-class EditTileBody(BaseModel):
-    dat: str   # filesystem path; SLF URIs are refused (read-only)
-    x: int
-    y: int
-    layer: str  # "land" | "objs" | "shadows" | "structs" | "roofs" | "onroofs"
-    op: str     # "replace" | "add" | "remove" | "set_room"
-    # replace + remove
-    entry_index: Optional[int] = None
-    # replace + add
-    slot: Optional[int] = None
-    sub: Optional[int] = None
-    # set_room
-    room_id: Optional[int] = None
-
-
-class EditTileResult(BaseModel):
-    ok: bool
-    op: str
-    before: Optional[list[list[int]]] = None  # [[slot,sub], ...] before
-    after: list[list[int]]                     # entries after the edit
-    backup_path: Optional[str] = None          # .bak path if one was created
-    bytes_written: int
-
-
-@router.post("/sector/edit-tile", response_model=EditTileResult)
-def edit_tile(body: EditTileBody):
-    """Apply a single edit to one tile and save the .dat back to disk.
-
-    On the first edit per file, a `<dat>.bak` snapshot of the original
-    is created (idempotent — if the .bak already exists we don't
-    overwrite it, so successive edits keep the original-pristine copy).
-    SLF-bundled sectors are refused; extract to a loose path first.
-    """
-    _require_renderer()
-    if body.dat.startswith(SLF_URI_PREFIX):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "SLF_WRITE_UNSUPPORTED",
-                "message": ("Editing SLF-bundled .dat is not supported in "
-                            "Phase 2 — copy the file out of the SLF first "
-                            "(e.g. into the install's Data-1.13/Maps/ dir "
-                            "where loose files shadow SLF entries)."),
-            },
-        )
-    dat_path = _validate_dat_path(body.dat)
-    original_bytes = dat_path.read_bytes()
-    parsed = parse_dat_full(original_bytes, str(dat_path))
-    cols = parsed["cols"]
-    rows = parsed["rows"]
-    if not (0 <= body.x < cols and 0 <= body.y < rows):
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "OUT_OF_BOUNDS",
-                    "message": f"({body.x},{body.y}) outside {cols}x{rows}"},
-        )
-    gridno = body.y * cols + body.x
-
-    # Snapshot the BEFORE-edit state for the response.
-    before: Optional[list[list[int]]] = None
-    if body.op == "set_room":
-        before = [[parsed["rooms"][gridno]]]
-    else:
-        if body.layer not in (
-            "land", "objs", "shadows", "structs", "roofs", "onroofs"
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "BAD_LAYER",
-                        "message": f"unknown layer {body.layer!r}"},
-            )
-        before = [list(t) for t in parsed[body.layer][gridno]]
-
-    # Dispatch the op. EditOpError → 400; anything else → 500.
-    try:
-        if body.op == "replace":
-            if body.entry_index is None or body.slot is None or body.sub is None:
-                raise HTTPException(400, {"error": "MISSING_FIELDS",
-                    "message": "replace needs entry_index, slot, sub"})
-            replace_layer_entry(parsed, gridno, body.layer,
-                                body.entry_index, body.slot, body.sub)
-        elif body.op == "add":
-            if body.slot is None or body.sub is None:
-                raise HTTPException(400, {"error": "MISSING_FIELDS",
-                    "message": "add needs slot, sub"})
-            add_layer_entry(parsed, gridno, body.layer, body.slot, body.sub)
-        elif body.op == "remove":
-            if body.entry_index is None:
-                raise HTTPException(400, {"error": "MISSING_FIELDS",
-                    "message": "remove needs entry_index"})
-            remove_layer_entry(parsed, gridno, body.layer, body.entry_index)
-        elif body.op == "set_room":
-            if body.room_id is None:
-                raise HTTPException(400, {"error": "MISSING_FIELDS",
-                    "message": "set_room needs room_id"})
-            set_room_id(parsed, gridno, body.room_id)
-        else:
-            raise HTTPException(400, {"error": "BAD_OP",
-                "message": f"unknown op {body.op!r}; "
-                           f"valid: replace | add | remove | set_room"})
-    except EditOpError as e:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "INVALID_EDIT", "message": str(e)},
-        )
-
-    # Encode the new .dat bytes.
-    new_bytes = write_dat_bytes(parsed, original_bytes)
-
-    # Create .bak once per file (preserves the ORIGINAL-pristine state).
-    bak_path = dat_path.with_suffix(dat_path.suffix + ".bak")
-    backup_created: Optional[str] = None
-    if not bak_path.exists():
-        try:
-            bak_path.write_bytes(original_bytes)
-            backup_created = str(bak_path)
-        except OSError as e:
-            raise HTTPException(
-                status_code=500,
-                detail={"error": "BACKUP_FAILED",
-                        "message": f"could not write {bak_path}: {e}"},
-            )
-
-    # Atomic-ish write: temp file + rename. Avoids leaving a half-written
-    # .dat if the process is killed mid-write.
-    tmp_path = dat_path.with_suffix(dat_path.suffix + ".mwtmp")
-    try:
-        tmp_path.write_bytes(new_bytes)
-        tmp_path.replace(dat_path)
-    except OSError as e:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": "WRITE_FAILED",
-                    "message": f"could not write {dat_path}: {e}"},
-        )
-
-    # Re-parse to compute the after-state for the response.
-    after_parsed = parse_dat_full(new_bytes, str(dat_path))
-    if body.op == "set_room":
-        after = [[after_parsed["rooms"][gridno]]]
-    else:
-        after = [list(t) for t in after_parsed[body.layer][gridno]]
-
-    return EditTileResult(
-        ok=True, op=body.op,
-        before=before,
-        after=after,
-        backup_path=backup_created,
-        bytes_written=len(new_bytes),
-    )
-
-
 # ─── Helpers ───────────────────────────────────────────────────────────
 def _require_renderer() -> None:
     if not _iso_renderer_available:
@@ -2283,6 +2235,43 @@ def _confine_install_path(raw: str) -> Path:
     return resolved
 
 
+def _confine_path_to_root(
+    raw: str | Path,
+    install_root: str | Path,
+    suffix: str | None = None,
+    *,
+    require_file: bool = False,
+) -> Path:
+    """Resolve a path against one already-captured physical install root.
+
+    Mutation routes use this after acquiring their root + state transaction;
+    consulting the live active-install state again here would reopen the
+    A->B path-confusion race that the transaction is meant to close.
+    """
+    try:
+        resolved = Path(raw).resolve()
+        root = Path(install_root).resolve()
+    except (OSError, ValueError) as e:
+        raise HTTPException(400, {"error": "BAD_PATH",
+            "message": f"{type(e).__name__}: {e}"})
+    if not resolved.is_relative_to(root):
+        raise HTTPException(403, {
+            "error": "PATH_NOT_ALLOWED",
+            "message": "Path is outside the captured active install.",
+        })
+    if suffix and resolved.suffix.lower() != suffix.lower():
+        raise HTTPException(400, {
+            "error": "BAD_SUFFIX",
+            "message": f"Expected {suffix}, got {resolved.suffix}",
+        })
+    if require_file and not resolved.is_file():
+        raise HTTPException(404, {
+            "error": "FILE_NOT_FOUND",
+            "message": f"{raw} not found",
+        })
+    return resolved
+
+
 def _validate_path(raw: str, suffix: str | None = None) -> Path:
     p = _confine_install_path(raw)
     if not p.is_file():
@@ -2310,7 +2299,7 @@ def _validate_dat_path(raw: str) -> Path:
     return p
 
 
-# ─── Session model (Phase 2A) ──────────────────────────────────────────
+# ─── Session model ─────────────────────────────────────────────────────
 # In-memory editing sessions. Each session caches the parsed dict + the
 # original .dat bytes so subsequent edits / renders / inspects don't
 # re-parse the file on every operation. Two-orders-of-magnitude perf
@@ -2327,6 +2316,17 @@ import uuid
 
 _MAX_SESSIONS = 16
 _SESSION_IDLE_TIMEOUT = 60 * 60  # 1h
+_active_session_access: ContextVar[tuple[str, ...]] = ContextVar(
+    "mapforge_active_session_access", default=(),
+)
+
+
+class SessionAdmissionError(RuntimeError):
+    """The bounded session store cannot admit another session safely."""
+
+
+class SessionBusyError(RuntimeError):
+    """An explicit close was requested while a session is borrowed."""
 
 
 class MapForgeSession:
@@ -2339,25 +2339,45 @@ class MapForgeSession:
     would silently strand edits in %TEMP%, not back into the SLF)."""
 
     __slots__ = (
-        "id", "dat_path", "xml_path", "tileset",
-        "parsed", "original_bytes",
-        "dirty", "edit_count",
+        "id", "dat_path", "xml_path", "tileset", "install_id", "install_root",
+        "parsed", "original_bytes", "disk_baseline",
+        "dirty", "edit_count", "mutation_seq", "autosaved_seq",
         "created_at", "last_used_at",
-        "read_only", "source_uri",
-        "baseline_findings",
+        "read_only", "source_uri", "closed",
+        "baseline_findings", "map_lease",
+        "borrow_count",
         "_lock",
     )
 
     def __init__(self, dat_path: Path, xml_path: Path, tileset: int,
-                 read_only: bool = False, source_uri: str = ""):
+                 read_only: bool = False, source_uri: str = "",
+                 install_id: str = "", install_root: str | Path = "", map_lease=None):
         self.id = uuid.uuid4().hex[:16]
         self.dat_path = dat_path
         self.xml_path = xml_path
         self.tileset = tileset
+        # Capture this when the session opens. A later active-install switch
+        # must not move this session to a different cross-process lock.
+        self.install_id = install_id
+        self.install_root = str(install_root)
+        self.map_lease = map_lease
         self.original_bytes = dat_path.read_bytes()
+        # `original_bytes` is the WRITER baseline (appendix slicing); this is
+        # the EXTERNAL-CHANGE baseline (what the file looked like on disk when
+        # this session last synced with it). They start identical and stay
+        # identical through saves — they diverge only after a recovery
+        # restore, where the writer baseline becomes the recovery bytes while
+        # the guard keeps protecting the real on-disk file.
+        self.disk_baseline = self.original_bytes
         self.parsed = parse_dat_full(self.original_bytes, str(dat_path))
         self.dirty = False
         self.edit_count = 0
+        # Monotonic mutation counter — bumped by every state-changing op
+        # (edits, generator applies, appendix-model). The autosaver compares
+        # it against `autosaved_seq` so it only re-serializes when something
+        # actually changed since the last recovery snapshot.
+        self.mutation_seq = 0
+        self.autosaved_seq = 0
         self.created_at = time.time()
         self.last_used_at = self.created_at
         self.read_only = read_only
@@ -2380,6 +2400,10 @@ class MapForgeSession:
             self.baseline_findings = {}
         # Each session has its own lock so concurrent edits from a
         # batch-paint don't trample n_per_tile counts.
+        self.closed = False
+        # Store-level borrows pin this session against eviction and lease
+        # release for the entire request operation.
+        self.borrow_count = 0
         self._lock = threading.Lock()
 
     def touch(self) -> None:
@@ -2394,59 +2418,251 @@ class _SessionStore:
         self._lock = threading.Lock()
 
     def open(self, dat_path: Path, xml_path: Path, tileset: int,
-             read_only: bool = False, source_uri: str = "") -> MapForgeSession:
-        sess = MapForgeSession(dat_path, xml_path, tileset,
-                               read_only=read_only, source_uri=source_uri)
-        with self._lock:
-            self._evict_idle_locked()
-            if len(self._sessions) >= _MAX_SESSIONS:
-                # Evict the oldest CLEAN session by last_used_at. NEVER a
-                # dirty one — its unsaved edits live only here, so dropping
-                # it silently loses the user's work (R6 trust fix). If every
-                # session is dirty, we let the cap be exceeded rather than
-                # lose anything.
-                clean = [k for k, s in self._sessions.items() if not s.dirty]
-                if clean:
-                    oldest_id = min(clean,
-                                    key=lambda k: self._sessions[k].last_used_at)
-                    del self._sessions[oldest_id]
-            self._sessions[sess.id] = sess
+             read_only: bool = False, source_uri: str = "",
+             install_id: str = "", install_root: str | Path = "", map_lease=None) -> MapForgeSession:
+        try:
+            sess = MapForgeSession(dat_path, xml_path, tileset,
+                                   read_only=read_only, source_uri=source_uri,
+                                   install_id=install_id, install_root=install_root,
+                                   map_lease=map_lease)
+        except Exception:
+            self._release_lease(map_lease)
+            raise
+
+        victims: list[MapForgeSession] = []
+        try:
+            with self._lock:
+                if _MAX_SESSIONS <= 0:
+                    raise SessionAdmissionError(
+                        "MapForge session capacity must be positive.",
+                    )
+                victims.extend(self._evict_idle_locked())
+                # Capacity is a hard bound. A clean, unborrowed LRU is safe
+                # to discard; dirty or borrowed sessions are never candidates.
+                while len(self._sessions) >= _MAX_SESSIONS:
+                    candidates = [
+                        candidate for candidate in self._sessions.values()
+                        if not candidate.dirty
+                        and getattr(candidate, "borrow_count", 0) == 0
+                    ]
+                    if not candidates:
+                        raise SessionAdmissionError(
+                            "MapForge session capacity is full; all existing "
+                            "sessions are dirty or borrowed.",
+                        )
+                    victim = min(candidates, key=lambda item: item.last_used_at)
+                    self._sessions.pop(victim.id, None)
+                    victim.closed = True
+                    victims.append(victim)
+                self._sessions[sess.id] = sess
+        except Exception:
+            # Admission owns the lease once open() is called. Release it here
+            # so route-level error handlers cannot accidentally release twice.
+            self._release_lease(sess)
+            self._release_leases(victims)
+            raise
+        self._release_leases(victims)
         return sess
 
     def get(self, session_id: str) -> MapForgeSession:
+        """Compatibility lookup for non-production callers.
+
+        Production endpoints must use :meth:`borrow`; this method remains a
+        lock-atomic touch for older tests and helpers that only inspect a
+        session synchronously.
+        """
         with self._lock:
             sess = self._sessions.get(session_id)
-        if sess is None:
-            raise HTTPException(
-                status_code=404,
-                detail={"error": "SESSION_NOT_FOUND",
-                        "message": f"No active MapForge session {session_id!r}. "
-                                   "Open one with POST /mapforge/sessions."},
-            )
-        sess.touch()
+            if sess is None:
+                raise self._not_found(session_id)
+            sess.touch()
         return sess
+
+    @staticmethod
+    def _not_found(session_id: str) -> HTTPException:
+        return HTTPException(
+            status_code=404,
+            detail={"error": "SESSION_NOT_FOUND",
+                    "message": f"No active MapForge session {session_id!r}. "
+                               "Open one with POST /mapforge/sessions."},
+        )
+
+    @staticmethod
+    def _release_lease(lease_or_session) -> None:
+        is_session = isinstance(lease_or_session, MapForgeSession) \
+            or (hasattr(lease_or_session, "map_lease")
+                and not hasattr(lease_or_session, "release"))
+        lease = getattr(lease_or_session, "map_lease", None) if is_session else lease_or_session
+        if lease is None:
+            return
+        if is_session:
+            lease_or_session.map_lease = None
+        lease.release()
+
+    @classmethod
+    def _release_leases(cls, sessions: list[MapForgeSession]) -> None:
+        for sess in sessions:
+            cls._release_lease(sess)
+
+    @contextmanager
+    def borrow(self, session_id: str):
+        """Pin a session for one complete operation.
+
+        Borrow count and last-use timestamp are updated atomically under the
+        store lock. Eviction/admission and close therefore cannot remove or
+        release this session until the operation's ``finally`` runs.
+        """
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is None or getattr(sess, "closed", False):
+                raise self._not_found(session_id)
+            sess.borrow_count = getattr(sess, "borrow_count", 0) + 1
+            sess.touch()
+        try:
+            yield sess
+        finally:
+            with self._lock:
+                # The session may have been marked closed only after a bug in
+                # a caller; a borrow still owns exactly one pin to release.
+                sess.borrow_count -= 1
+                if sess.borrow_count < 0:
+                    sess.borrow_count = 0
+                    raise RuntimeError("MapForge session borrow underflow")
+
+    def borrowed(self, session_id: str) -> MapForgeSession:
+        """Return the session already pinned by an endpoint wrapper."""
+        if session_id not in _active_session_access.get():
+            raise RuntimeError(
+                "session access requires the current endpoint borrow",
+            )
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is None or getattr(sess, "closed", False):
+                raise self._not_found(session_id)
+            if getattr(sess, "borrow_count", 0) <= 0:
+                raise RuntimeError("session access requires an active borrow")
+            return sess
+
+    def peek(self, session_id: str) -> MapForgeSession:
+        """Lookup for close, which cannot hold a borrow while closing."""
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is None:
+                raise self._not_found(session_id)
+            return sess
 
     def close(self, session_id: str) -> bool:
         with self._lock:
-            return self._sessions.pop(session_id, None) is not None
+            sess = self._sessions.get(session_id)
+            if sess is None:
+                return False
+            if getattr(sess, "borrow_count", 0):
+                raise SessionBusyError(
+                    f"MapForge session {session_id!r} is in use.",
+                )
+            self._sessions.pop(session_id, None)
+            sess.closed = True
+            return True
 
     def list_all(self) -> list[MapForgeSession]:
         with self._lock:
             return list(self._sessions.values())
 
-    def _evict_idle_locked(self) -> None:
+    def evict_idle(self) -> None:
+        """Release clean idle leases before admission attempts."""
+        with self._lock:
+            victims = self._evict_idle_locked()
+        self._release_leases(victims)
+
+    def reclaim_own_clean(self, previous_session_id: str,
+                          canonical_dat: str) -> None:
+        """Close the caller's OWN previous session for this map, if clean.
+
+        A reloaded page cannot reliably close its old session (the browser
+        tears the page down before any close request lands), so the client
+        remembers its session id per-tab (sessionStorage) and names it on
+        the next open. Only THAT session is reclaimed, and only when it is
+        clean and unborrowed for the SAME map - a live sibling tab's
+        session (different id) and any dirty session stay protected.
+        (A blanket steal-any-clean-holder variant broke live tabs: two
+        mounts of the same map stole each other's session mid-atlas-load.)"""
+        norm = os.path.normcase(str(canonical_dat))
+        with self._lock:
+            sess = self._sessions.get(previous_session_id)
+            if (sess is None
+                    or os.path.normcase(str(sess.dat_path)) != norm
+                    or sess.dirty
+                    or getattr(sess, "borrow_count", 0)):
+                return
+            self._sessions.pop(previous_session_id, None)
+            sess.closed = True
+            victims = [sess]
+        self._release_leases(victims)
+
+    def _evict_idle_locked(self) -> list[MapForgeSession]:
         # Drop sessions idle past the timeout — but NEVER a dirty one. Its
         # unsaved edits live only in memory here, so evicting on idle would
         # silently lose them (R6 trust fix). Dirty idle sessions persist
         # until saved or explicitly closed.
         now = time.time()
+        victims: list[MapForgeSession] = []
         for sid in list(self._sessions):
             sess = self._sessions[sid]
-            if not sess.dirty and now - sess.last_used_at > _SESSION_IDLE_TIMEOUT:
-                del self._sessions[sid]
+            if (not sess.dirty
+                    and getattr(sess, "borrow_count", 0) == 0
+                    and now - sess.last_used_at > _SESSION_IDLE_TIMEOUT):
+                old = self._sessions.pop(sid)
+                old.closed = True
+                victims.append(old)
+        return victims
 
 
 _session_store = _SessionStore()
+
+
+def _borrow_session_endpoint(fn):
+    """Hold a store borrow across a complete session endpoint operation.
+
+    Streaming responses transfer release ownership to a wrapper around their
+    iterator, so a generator remains pinned until its final event is consumed.
+    """
+    from functools import wraps
+
+    @wraps(fn)
+    def wrapped(session_id, *args, **kwargs):
+        borrow = _session_store.borrow(session_id)
+        borrow.__enter__()
+        access_token = _active_session_access.set(
+            (*_active_session_access.get(), session_id),
+        )
+        try:
+            try:
+                result = fn(session_id, *args, **kwargs)
+            finally:
+                # The token grants only this synchronous endpoint body
+                # access through `borrowed()`. Streaming retains the store
+                # pin below, but receives no ambient authority in a later
+                # async context/thread.
+                _active_session_access.reset(access_token)
+        except BaseException as exc:
+            borrow.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        if isinstance(result, StreamingResponse):
+            iterator = result.body_iterator
+
+            async def release_after_stream():
+                try:
+                    async for chunk in iterator:
+                        yield chunk
+                finally:
+                    borrow.__exit__(None, None, None)
+
+            result.body_iterator = release_after_stream()
+        else:
+            borrow.__exit__(None, None, None)
+        return result
+
+    return wrapped
 
 
 # ─── Session-aware Pydantic models ─────────────────────────────────────
@@ -2454,6 +2670,18 @@ class OpenSessionBody(BaseModel):
     dat: str
     xml: str
     tileset: int
+    # The caller's OWN previous session id for this map (remembered
+    # per-tab in sessionStorage). If it still holds the writable lease
+    # and is clean, the open reclaims it - reload-wins without letting
+    # two live tabs steal each other's sessions.
+    previous_session_id: str | None = None
+
+
+class RecoveryInfo(BaseModel):
+    """A crash-recovery snapshot exists for this map (autosaved by a prior
+    sidecar process) and differs from the on-disk file."""
+    saved_at: float
+    edit_count: int
 
 
 class SessionInfo(BaseModel):
@@ -2472,6 +2700,10 @@ class SessionInfo(BaseModel):
     read_only: bool = False
     # Original URI the client opened with (slf://... or filesystem path).
     source_uri: str = ""
+    # Populated ONLY by POST /sessions (open): a recovery snapshot from a
+    # previous sidecar process is available for this map. The client offers
+    # restore/discard via POST /sessions/{id}/recovery.
+    recovery: Optional[RecoveryInfo] = None
 
 
 class EditOp(BaseModel):
@@ -2493,7 +2725,12 @@ class EditOp(BaseModel):
 
 
 class ApplyEditsBody(BaseModel):
-    edits: list[EditOp]
+    # Capped because the whole list is walked twice while the session
+    # lock is held, which also blocks that session's saves. The ceiling
+    # is well clear of the largest legitimate batch: a 160x160 map is
+    # 25,600 tiles, and an undo restoring every layer of all of them is
+    # 153,600 edits.
+    edits: list[EditOp] = Field(max_length=250_000)
 
 
 class ApplyEditsResult(BaseModel):
@@ -2653,24 +2890,24 @@ def session_validate(
     edit introduced this" from "this map came that way" — many shipped
     maps carry warn-grade findings natively (C6.DAT: 40 room-ID gaps)."""
     _require_renderer()
-    sess = _session_store.get(session_id)
-    findings = list(validate_parsed(sess.parsed))
-    jsd_checked = False
-    if check_jsd:
-        findings.extend(_validate_tileset_jsds(sess.xml_path, sess.tileset))
-        jsd_checked = True
-    report = _to_validation_report(
-        str(sess.dat_path), sess.parsed, findings, jsd_checked)
-    baseline = getattr(sess, "baseline_findings", None) or {}
-    for f in report.findings:
-        if f.code in ("JSD_FRAME_MISMATCH", "JSD_CHECK_SKIPPED"):
-            # Tileset-level: independent of map edits, so always
-            # pre-existing relative to this session.
-            f.preexisting = True
-        elif f.code in baseline:
-            cur = f.count if f.count is not None else len(f.tiles)
-            f.preexisting = cur <= baseline[f.code]
-    return report
+    with _session_store.borrow(session_id) as sess:
+        findings = list(validate_parsed(sess.parsed))
+        jsd_checked = False
+        if check_jsd:
+            findings.extend(_validate_tileset_jsds(sess.xml_path, sess.tileset))
+            jsd_checked = True
+        report = _to_validation_report(
+            str(sess.dat_path), sess.parsed, findings, jsd_checked)
+        baseline = getattr(sess, "baseline_findings", None) or {}
+        for f in report.findings:
+            if f.code in ("JSD_FRAME_MISMATCH", "JSD_CHECK_SKIPPED"):
+                # Tileset-level: independent of map edits, so always
+                # pre-existing relative to this session.
+                f.preexisting = True
+            elif f.code in baseline:
+                cur = f.count if f.count is not None else len(f.tiles)
+                f.preexisting = cur <= baseline[f.code]
+        return report
 
 
 # ─── Radar / minimap STI generation (A3) ───────────────────────────────
@@ -2678,6 +2915,31 @@ _RADAR_BACKUP_DIR = (
     Path(os.environ.get("APPDATA") or Path.home() / ".config")
     / "MercWizard" / "mapforge" / "radar_backups"
 )
+
+
+def _radar_backup_path(install_root: str | Path, sector_name: str) -> Path:
+    """Namespace recovery copies by the resolved physical install root."""
+    normalized_root = os.path.normcase(str(Path(install_root).resolve()))
+    root_key = hashlib.sha256(normalized_root.encode("utf-8")).hexdigest()[:16]
+    return _RADAR_BACKUP_DIR / root_key / f"{sector_name}.STI.prev"
+
+
+def _restore_radar_output(out_path: Path, prior_bytes: Optional[bytes]) -> Optional[str]:
+    """Restore a radar target after its post-write verification fails.
+
+    Returns a display-safe restoration error instead of raising so callers
+    can preserve the original verification failure in their response.
+    """
+    try:
+        if prior_bytes is None:
+            out_path.unlink(missing_ok=True)
+        else:
+            write_bytes_atomic(out_path, prior_bytes)
+            if out_path.read_bytes() != prior_bytes:
+                raise OSError("restored radar bytes did not match the pre-write file")
+    except Exception as e:  # noqa: BLE001 - recovery must report any failure
+        return f"{type(e).__name__}: {e}"
+    return None
 
 
 class RadarResult(BaseModel):
@@ -2733,66 +2995,110 @@ def sector_radar(
     )
     from mercwizard_core.sti_decode import decode_sti_frame_to_png
 
-    dat_path = _resolve_dat_path(dat)
-    xml_path = _validate_path(xml, ".xml")
-    install_root = _active_install_root()
-    if install_root is None:
+    state = get_state()
+    captured = state.active()
+    if captured is None:
         raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL",
             "message": "No active install to write the radar map into."})
-    loose_dirs, slf_paths = _tileset_paths_for(xml_path)
+    install_root = Path(captured.path).resolve()
+
+    # An SLF map is read from a temp extraction cache. Resolve that archive
+    # before taking the writer lock, but constrain the archive to the root
+    # captured above. Loose inputs are resolved again under the transaction.
+    prefetched_dat = (
+        _resolve_dat_for_captured_root(dat, install_root)
+        if dat.startswith(SLF_URI_PREFIX) else None
+    )
 
     # Sector name from the ORIGINAL arg (the resolved temp path for an
     # slf:// dat would carry a temp name, not the sector name).
     raw = dat.split("!")[-1] if dat.startswith("slf://") else dat
     name = Path(raw).stem.upper()
 
-    # 1. Resolve the engine-read write target: the writable profile, which is
-    #    front-of-stack and overrides Radarmaps.slf (correct by construction).
-    try:
-        layout = parse_vfs_config(install_root)
-        out_path = layout.resolve_override_write(f"RADARMAPS/{name}.STI")
-    except VfsConfigError as e:
-        raise HTTPException(400, {"error": "NO_WRITE_PROFILE", "message": str(e)})
+    # The active root and its state are one transaction. Every live path
+    # resolution, backup, write, and read-back assertion stays inside it.
+    with cross_process_install_lock(install_root), state.write_lock:
+        current = state.active()
+        if current is None or current.id != captured.id:
+            raise HTTPException(409, {
+                "error": "ACTIVE_INSTALL_CHANGED",
+                "message": "The active install changed while writing the radar.",
+            })
+        dat_path = prefetched_dat or _confine_path_to_root(
+            dat, install_root, ".dat", require_file=True,
+        )
+        xml_path = _confine_path_to_root(
+            xml, install_root, ".xml", require_file=True,
+        )
+        loose_dirs, slf_paths = _install_tileset_paths(install_root)
 
-    # 2. Render → 88x44.
-    img = render_radar_image(dat_path, xml_path, tileset, loose_dirs, slf_paths)
-
-    # 3. Back up any prior override OUTSIDE mounted dirs, then write atomically.
-    if out_path.exists():
+        # Resolve the engine-read write target: the writable profile, which is
+        # front-of-stack and overrides Radarmaps.slf (correct by construction).
         try:
-            _RADAR_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-            _shutil.copy2(out_path, _RADAR_BACKUP_DIR / f"{name}.STI.prev")
-        except OSError:
-            pass
-    write_radar_sti(img, out_path)
+            layout = parse_vfs_config(install_root)
+            resolved_out = layout.resolve_override_write(f"RADARMAPS/{name}.STI")
+            out_path = _confine_path_to_root(resolved_out, install_root)
+        except VfsConfigError as e:
+            raise HTTPException(400, {"error": "NO_WRITE_PROFILE", "message": str(e)})
 
-    # 4. Read-back assertion: the file landed UNDER the engine write profile
-    #    AND decodes as a valid STI. (We can't prove non-shadowing via
-    #    resolve_read — it ignores SLFs — so correctness is by-construction:
-    #    we wrote to the top-of-stack writable profile. This confirms the
-    #    write took and is where the engine will look.)
-    ewp = layout.engine_write_profile()
-    under_profile = False
-    if ewp is not None and ewp.profile_root is not None:
+        # Render -> 88x44 while the captured install transaction is held, so
+        # the source paths and the live destination cannot cross installs.
+        img = render_radar_image(dat_path, xml_path, tileset, loose_dirs, slf_paths)
+
+        # Back up any prior override outside mounted dirs, then write
+        # atomically. The backup itself uses the shared atomic byte writer so
+        # neither recovery copy nor live STI can be left half-written.
+        prior_bytes: Optional[bytes] = None
+        if out_path.exists():
+            try:
+                prior_bytes = out_path.read_bytes()
+                backup_path = _radar_backup_path(install_root, name)
+                write_bytes_atomic(backup_path, prior_bytes)
+            except OSError as e:
+                raise HTTPException(500, {
+                    "error": "BACKUP_FAILED",
+                    "message": f"could not back up {out_path}: {e}",
+                })
+        write_radar_sti(img, out_path)
+
+        # Read-back assertion: the file landed UNDER the captured install's
+        # engine write profile AND decodes as a valid STI.
+        ewp = layout.engine_write_profile()
+        under_profile = False
+        if ewp is not None and ewp.profile_root is not None:
+            try:
+                under_profile = out_path.resolve().is_relative_to(
+                    ewp.profile_root.resolve()
+                )
+            except (OSError, ValueError):
+                under_profile = False
         try:
-            under_profile = out_path.resolve().is_relative_to(ewp.profile_root.resolve())
-        except (OSError, ValueError):
-            under_profile = False
-    decoded = decode_sti_frame_to_png(out_path.read_bytes(), 0)
-    if not under_profile or decoded is None:
-        raise HTTPException(500, {"error": "RADAR_WRITE_UNVERIFIED",
-            "message": (f"Radar written to {out_path} but the read-back check "
-                        "failed (location or decode) — the engine may not read it.")})
+            decoded = decode_sti_frame_to_png(out_path.read_bytes(), 0)
+        except Exception:  # noqa: BLE001 - a decoder exception is unverified output
+            decoded = None
+        if not under_profile or decoded is None:
+            restore_error = _restore_radar_output(out_path, prior_bytes)
+            recovery = (
+                " The prior radar was restored."
+                if restore_error is None else
+                f" Restoration also failed: {restore_error}"
+            )
+            raise HTTPException(500, {
+                "error": "RADAR_WRITE_UNVERIFIED",
+                "message": (f"Radar written to {out_path} but the read-back check "
+                             "failed (location or decode) — the engine may not read it."
+                             f"{recovery}"),
+            })
 
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="PNG")
-    return RadarResult(
-        output_path=str(out_path),
-        bytes_written=out_path.stat().st_size,
-        width=RADAR_W, height=RADAR_H,
-        overrides_bundled=_radarmaps_slf_has(install_root, name),
-        preview_png_b64=_b64.b64encode(buf.getvalue()).decode("ascii"),
-    )
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="PNG")
+        return RadarResult(
+            output_path=str(out_path),
+            bytes_written=out_path.stat().st_size,
+            width=RADAR_W, height=RADAR_H,
+            overrides_bundled=_radarmaps_slf_has(install_root, name),
+            preview_png_b64=_b64.b64encode(buf.getvalue()).decode("ascii"),
+        )
 
 
 def _apply_single_edit(parsed: dict, edit: EditOp, rows: int, cols: int) -> None:
@@ -2975,81 +3281,57 @@ def extract_slf_to_loose(body: ExtractSlfMapBody):
     if info is None:
         raise HTTPException(400, {"error": "NO_ACTIVE_INSTALL"})
 
-    try:
-        slf_path, internal = _parse_slf_uri(body.slf_uri)
-    except ValueError as e:
-        raise HTTPException(400, {"error": "BAD_SLF_URI",
-            "message": str(e)})
-    if not slf_path.is_file():
-        raise HTTPException(404, {"error": "SLF_NOT_FOUND",
-            "message": f"{slf_path} not found"})
+    slf_path, internal = _resolve_slf_uri(body.slf_uri)
 
-    # Pick the destination layer.
-    #
-    # Old behavior: hardcoded heuristic "Data-1.13/Maps → Data-DMK/Maps
-    # → Data/Maps based on dir existence." This broke installs running
-    # under Vanilla VFS (e.g. a reference install): the heuristic picked
-    # Data-1.13/Maps but the engine never reads that layer when VFS
-    # is set to vfs_config.JA2Vanilla.ini, so user paint edits were
-    # invisible in-game. (Root cause of the 2026-05-22 H4 saga.)
-    #
-    # New behavior: route the destination through the install's active
-    # VFS layout via `make_install_context().layout.resolve_write()`.
-    # That walks the install's vfs_config.<active>.ini profile chain
-    # and returns the path the engine WILL actually read from. Falls
-    # back to the old heuristic if context construction fails — never
-    # refuses the extract just because VFS introspection broke.
-    install_root = Path(info.path)
-    out_name = os.path.basename(internal) or "extracted.dat"
-    out_path: Optional[Path] = None
-    target_profile: Optional[str] = None
-    target_layer_source = "vfs_config"
-    try:
-        from mercwizard_core.install_context import make_install_context
-        ctx = make_install_context(install_root)
-        # resolve_write returns the path the engine sees as "Maps/<file>"
-        # via the highest-priority WRITABLE directory profile in the
-        # active VFS config. For Vanilla VFS = Data/Maps/<file>; for
-        # JA2113 VFS = Data-1.13/Maps/<file>. Exactly what we need.
-        out_path = ctx.layout.resolve_write(f"Maps/{out_name}")
-        # Tag the profile we landed in for the UI confirmation.
-        writable = ctx.layout.writable_profile()
-        if writable is not None:
-            target_profile = writable.name
-    except Exception:  # noqa: BLE001
-        target_layer_source = "heuristic-fallback"
-        out_path = None
-    if out_path is None:
-        # Fallback to the legacy heuristic.
-        target_layer: Optional[Path] = None
-        for layer in ("Data-1.13", "Data-DMK", "Data"):
-            cand = install_root / layer
-            if cand.is_dir():
-                target_layer = cand
-                target_profile = layer
-                break
-        if target_layer is None:
-            raise HTTPException(500, {"error": "NO_DATA_LAYER",
-                "message": f"no Data*/ dir under {install_root}"})
-        out_path = target_layer / "Maps" / out_name
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.exists():
-        raise HTTPException(409, {"error": "LOOSE_EXISTS",
-            "message": f"{out_path} already exists. Rename or delete it "
-                       "first if you want to re-extract."})
-
-    try:
-        from ja2py.fileformats.SlfFS import SlfFS  # noqa
-    except ImportError:
-        raise HTTPException(500, {"error": "SLF_LIB_MISSING"})
-    try:
-        fs = SlfFS(str(slf_path))
-        data = fs.readbytes(internal)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, {"error": "SLF_READ_FAILED",
-            "message": f"{type(e).__name__}: {e}"})
-    out_path.write_bytes(data)
+    # Destination selection, the no-clobber check, archive read, and atomic
+    # replacement are one install transaction. A concurrent save-copy-as or
+    # second extraction therefore cannot slip between `exists()` and replace.
+    with cross_process_install_lock(info.path), state.write_lock:
+        current_install = state.active()
+        if current_install is None or current_install.id != info.id:
+            raise HTTPException(409, {"error": "ACTIVE_INSTALL_CHANGED",
+                "message": "The active install changed during SLF extraction."})
+        install_root = Path(current_install.path)
+        out_name = os.path.basename(internal) or "extracted.dat"
+        out_path: Optional[Path] = None
+        target_profile: Optional[str] = None
+        target_layer_source = "vfs_config"
+        try:
+            from mercwizard_core.install_context import make_install_context
+            ctx = make_install_context(install_root)
+            out_path = ctx.layout.resolve_write(f"Maps/{out_name}")
+            writable = ctx.layout.writable_profile()
+            if writable is not None:
+                target_profile = writable.name
+        except Exception:  # noqa: BLE001
+            target_layer_source = "heuristic-fallback"
+        if out_path is None:
+            target_layer = next(
+                (install_root / layer for layer in ("Data-1.13", "Data-DMK", "Data")
+                 if (install_root / layer).is_dir()),
+                None,
+            )
+            if target_layer is None:
+                raise HTTPException(500, {"error": "NO_DATA_LAYER",
+                    "message": f"no Data*/ dir under {install_root}"})
+            target_profile = target_layer.name
+            out_path = target_layer / "Maps" / out_name
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.exists():
+            raise HTTPException(409, {"error": "LOOSE_EXISTS",
+                "message": f"{out_path} already exists. Rename or delete it "
+                           "first if you want to re-extract."})
+        try:
+            from ja2py.fileformats.SlfFS import SlfFS  # noqa
+        except ImportError:
+            raise HTTPException(500, {"error": "SLF_LIB_MISSING"})
+        try:
+            fs = SlfFS(str(slf_path))
+            data = fs.readbytes(internal)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, {"error": "SLF_READ_FAILED",
+                "message": f"{type(e).__name__}: {e}"})
+        write_bytes_atomic(out_path, data)
 
     # Bust the install scan caches so the new loose file shows up
     # on the next list. The fingerprint logic does this automatically
@@ -3095,40 +3377,216 @@ def open_session(body: OpenSessionBody):
     # path; the session then operates on that copy. We track the
     # original URI on the session so the response carries it back.
     is_slf = body.dat.startswith(SLF_URI_PREFIX)
-    dat_path = _resolve_dat_path(body.dat)
-    xml_path = _validate_path(body.xml, ".xml")
-    sess = _session_store.open(
-        dat_path, xml_path, body.tileset,
-        read_only=is_slf,
-        source_uri=body.dat,
-    )
-    # Auto-detect tileset from the .dat header if the client sent 0.
-    # parsed["tileset"] is the value stored in the file at save time.
-    if body.tileset == 0 and sess.parsed.get("tileset", 0) != 0:
-        sess.tileset = sess.parsed["tileset"]
-    return _session_info(sess)
+    state = get_state()
+    active_install = state.active()
+    if active_install is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "NO_ACTIVE_INSTALL",
+                    "message": "Select an install before opening a map session."},
+        )
+    # The path validation, file parse/baseline capture, and recovery lookup
+    # all belong to the installation that was active at request start.
+    with cross_process_install_lock(active_install.path), state.write_lock:
+        current_install = state.active()
+        if current_install is None or current_install.id != active_install.id:
+            raise HTTPException(409, {
+                "error": "ACTIVE_INSTALL_CHANGED",
+                "message": "The active install changed while opening the map session.",
+            })
+        dat_path = _resolve_dat_path(body.dat)
+        xml_path = _validate_path(body.xml, ".xml")
+        lease = None
+        if not is_slf:
+            # Admission must evict/release a clean idle holder BEFORE taking
+            # the new lease; doing it in SessionStore.open is too late.
+            _session_store.evict_idle()
+            # Reload-wins for the caller's OWN previous session (named via
+            # previous_session_id, remembered per-tab). Two cases:
+            #   clean -> close it and open fresh below;
+            #   DIRTY -> RECONNECT: return the live session as-is, keeping
+            #            every unsaved edit. (Previously this 409'd - the
+            #            one session a reload must never refuse is the
+            #            caller's own dirty one.)
+            prev_id = getattr(body, "previous_session_id", None)
+            if prev_id:
+                try:
+                    prev = _session_store.get(prev_id)
+                except HTTPException:
+                    prev = None
+                if (prev is not None and not getattr(prev, "closed", False)
+                        and os.path.normcase(str(prev.dat_path)) == os.path.normcase(str(dat_path))
+                        and prev.dirty and not prev.read_only):
+                    return _session_info(prev)
+                _session_store.reclaim_own_clean(prev_id, str(dat_path))
+            try:
+                lease = acquire_writable_map_session_lease(active_install.path, dat_path)
+            except RuntimeError:
+                raise HTTPException(409, {"error": "WRITABLE_SESSION_EXISTS",
+                    "message": "This map already has a writable MapForge session."})
+        try:
+            sess = _session_store.open(
+                dat_path, xml_path, body.tileset,
+                read_only=is_slf,
+                source_uri=body.dat,
+                install_id=active_install.id,
+                install_root=active_install.path,
+                map_lease=lease,
+            )
+        except SessionAdmissionError as e:
+            raise HTTPException(409, {
+                "error": "SESSION_CAPACITY",
+                "message": str(e),
+            })
+        # Auto-detect tileset from the .dat header if the client sent 0.
+        # parsed["tileset"] is the value stored in the file at save time.
+        if body.tileset == 0 and sess.parsed.get("tileset", 0) != 0:
+            sess.tileset = sess.parsed["tileset"]
+        info = _session_info(sess)
+        # Offer a crash-recovery snapshot only while the session install
+        # transaction is still held.
+        if not sess.read_only:
+            info.recovery = _recovery_offer(
+                sess.dat_path, sess.original_bytes, active_install.id,
+            )
+    _ensure_autosave_thread()
+    return info
 
 
 @router.get("/sessions", response_model=list[SessionInfo])
 def list_sessions():
     """List all active editing sessions (debug + UI cleanup)."""
-    return [_session_info(s) for s in _session_store.list_all()]
+    infos = []
+    for candidate in _session_store.list_all():
+        try:
+            with _session_store.borrow(candidate.id) as sess:
+                infos.append(_session_info(sess))
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    return infos
 
 
 @router.get("/sessions/{session_id}", response_model=SessionInfo)
 def get_session(session_id: str):
-    sess = _session_store.get(session_id)
-    return _session_info(sess)
+    with _session_store.borrow(session_id) as sess:
+        return _session_info(sess)
 
 
 @router.delete("/sessions/{session_id}")
-def close_session(session_id: str):
-    """Discard the session and free its memory. Unsaved edits are LOST."""
-    ok = _session_store.close(session_id)
-    if not ok:
-        raise HTTPException(404, {"error": "SESSION_NOT_FOUND",
-            "message": f"No session {session_id!r}"})
+def close_session(session_id: str, force: bool = False):
+    """Discard the session and free its memory. Unsaved edits are LOST.
+    An explicit close is a deliberate discard, so the map's crash-recovery
+    snapshot is deleted too — otherwise the next open would resurrect
+    edits the user just chose to throw away.
+
+    A DIRTY session is refused (409 SESSION_DIRTY) unless `force=true`:
+    the page's mount-effect cleanup closes "its" session on unmount, and
+    React StrictMode / HMR re-run that cleanup in dev right after the
+    effect reconnected to a live dirty session, which silently
+    destroyed 1092 unsaved edits once. Only a deliberate discard may force."""
+    state = get_state()
+    # Lookup/touch is atomic under the store lock. Keep the store borrow out
+    # of this endpoint: close itself must reject an already-borrowed session
+    # instead of waiting on its session lock and then racing the borrower.
+    sess = _session_store.peek(session_id)
+    if getattr(sess, "dirty", False) and not force:
+        raise HTTPException(409, {
+            "error": "SESSION_DIRTY",
+            "message": (f"Session {session_id!r} has {getattr(sess, 'edit_count', 0)} unsaved "
+                        "edit(s); save it, or pass force=true to discard them."),
+        })
+    # Close/delete is ordered with recovery/open on the same physical-map
+    # lease and install transaction, so an old close cannot delete a newer
+    # session's recovery snapshot.
+    with cross_process_install_lock(_session_install_root(sess)), state.write_lock:
+        try:
+            ok = _session_store.close(session_id)
+        except SessionBusyError:
+            raise HTTPException(409, {
+                "error": "SESSION_BUSY",
+                "message": "This MapForge session is in use by another operation.",
+            })
+        if not ok:
+            raise HTTPException(404, {"error": "SESSION_NOT_FOUND",
+                "message": f"No session {session_id!r}"})
+        # close() removes the session under the store lock before we take the
+        # session lock, so no new borrow can begin and no store-lock ->
+        # session-lock inversion is possible.
+        with sess._lock:
+            _delete_recovery(sess.dat_path)
+            _session_store._release_lease(sess)
     return {"closed": session_id}
+
+
+class RecoveryActionBody(BaseModel):
+    """`restore` swaps the session's in-memory state to the recovery
+    snapshot (session becomes dirty; the on-disk file is untouched until
+    the user saves). `discard` deletes the snapshot."""
+    action: str  # "restore" | "discard"
+
+
+@router.post("/sessions/{session_id}/recovery", response_model=SessionInfo)
+def session_recovery(session_id: str, body: RecoveryActionBody):
+    """Act on the crash-recovery snapshot offered by POST /sessions."""
+    with _session_store.borrow(session_id) as sess:
+        if body.action not in {"restore", "discard"}:
+            raise HTTPException(400, {"error": "BAD_ACTION",
+                "message": f"Unknown recovery action {body.action!r} "
+                           "(expected 'restore' or 'discard')."})
+        if sess.read_only:
+            raise HTTPException(400, {"error": "SESSION_READ_ONLY",
+                "message": "Cannot restore recovery into a read-only session."})
+        state = get_state()
+        # A restored snapshot may be saved over canonical data, so recovery gets
+        # the same install transaction as an explicit save.
+        with cross_process_install_lock(_session_install_root(sess)), state.write_lock, sess._lock:
+            current = state.active()
+            if current is None or current.id != sess.install_id:
+                raise HTTPException(409, {"error": "SESSION_INSTALL_CHANGED",
+                    "message": "The active install changed since this session opened."})
+            if body.action == "discard":
+                _delete_recovery(sess.dat_path)
+                return _session_info(sess)
+            rec_dat, rec_meta = _recovery_paths(sess.dat_path)
+            if not rec_dat.is_file() or not rec_meta.is_file():
+                raise HTTPException(404, {"error": "RECOVERY_NOT_FOUND",
+                    "message": "No recovery snapshot exists for this map."})
+            try:
+                on_disk = sess.dat_path.read_bytes()
+                meta = json.loads(rec_meta.read_text("utf-8"))
+                rec_bytes = rec_dat.read_bytes()
+            except (OSError, ValueError) as e:
+                _delete_recovery(sess.dat_path)
+                raise HTTPException(500, {"error": "RECOVERY_CORRUPT",
+                    "message": f"Recovery snapshot unreadable ({type(e).__name__}: "
+                               f"{e}) — it has been discarded."})
+            expected_fingerprint = hashlib.sha256(sess.disk_baseline).hexdigest()
+            if (on_disk != sess.disk_baseline
+                    or meta.get("source_dat") != str(sess.dat_path)
+                    or meta.get("install_id") != sess.install_id
+                    or meta.get("disk_baseline_sha256") != expected_fingerprint):
+                _delete_recovery(sess.dat_path)
+                raise HTTPException(409, {"error": "STALE_RECOVERY",
+                    "message": "Recovery was created against different canonical map bytes and was discarded."})
+            try:
+                parsed = parse_dat_full(rec_bytes, str(sess.dat_path))
+            except Exception as e:  # noqa: BLE001 — corrupt snapshot must not 500-loop
+                _delete_recovery(sess.dat_path)
+                raise HTTPException(500, {"error": "RECOVERY_CORRUPT",
+                    "message": f"Recovery snapshot unreadable ({type(e).__name__}: "
+                               f"{e}) — it has been discarded."})
+            sess.parsed = parsed
+            # The writer baseline must be the SAME bytes `parsed` (and its
+            # appendix_offset) came from, or the next save slices the appendix
+            # at a wrong offset and corrupts the file. disk_baseline is NOT
+            # touched: the external-modification guard keeps comparing against
+            # the on-disk file as this session found it.
+            sess.original_bytes = rec_bytes
+            sess.dirty = True
+            sess.mutation_seq += 1
+            sess.autosaved_seq = sess.mutation_seq  # snapshot == state right now
+        return _session_info(sess)
 
 
 # Rolling pre-save backups live OUTSIDE the install (the in-dir one-shot
@@ -3186,61 +3644,63 @@ def apply_edits(session_id: str, body: ApplyEditsBody):
     Batching matters: a paint stroke that touches 30 tiles is ONE
     round-trip + ONE re-render, not 30."""
     _require_renderer()
-    sess = _session_store.get(session_id)
-    if sess.read_only:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "SESSION_READ_ONLY",
-                    "message": ("This session is read-only (loaded from "
-                                "an SLF archive). Drop a loose copy into "
-                                "Data-1.13/Maps/ to enable editing.")},
-        )
-    rows = sess.parsed["rows"]
-    cols = sess.parsed["cols"]
-    applied = 0
-    with sess._lock:
-        # Transactional: snapshot every touched tile BEFORE applying, so a
-        # mid-batch failure rolls the WHOLE batch back — no half-applied
-        # paste/paint left in the live session. `_apply_single_edit` raises
-        # EditOpError (15-cap, etc.) AND HTTPException (OOB / BAD_LAYER /
-        # BAD_ENTRIES); both must roll back. Snapshot is O(touched tiles).
-        world_max = rows * cols
-        touched: list[int] = []
-        seen: set[int] = set()
-        for edit in body.edits:
-            g = edit.y * cols + edit.x
-            if 0 <= g < world_max and g not in seen:
-                seen.add(g)
-                touched.append(g)
-        snap = _snapshot_tiles(sess.parsed, touched)
-        # The edit ops also mutate the map-global `counts` totals dict;
-        # snapshot it so a rollback restores it too (defense-in-depth —
-        # today only `sector_info` reads it, and it re-parses off disk).
-        counts_before = dict(sess.parsed.get("counts") or {})
-
-        def _rollback() -> None:
-            _restore_tiles(sess.parsed, snap)
-            c = sess.parsed.get("counts")
-            if c is not None:
-                c.clear()
-                c.update(counts_before)
-
-        try:
+    with _session_store.borrow(session_id) as sess:
+        if sess.read_only:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "SESSION_READ_ONLY",
+                        "message": ("This session is read-only (loaded from "
+                                    "an SLF archive). Drop a loose copy into "
+                                    "Data-1.13/Maps/ to enable editing.")},
+            )
+        rows = sess.parsed["rows"]
+        cols = sess.parsed["cols"]
+        applied = 0
+        with sess._lock:
+            # Transactional: snapshot every touched tile BEFORE applying, so a
+            # mid-batch failure rolls the WHOLE batch back — no half-applied
+            # paste/paint left in the live session. `_apply_single_edit` raises
+            # EditOpError (15-cap, etc.) AND HTTPException (OOB / BAD_LAYER /
+            # BAD_ENTRIES); both must roll back. Snapshot is O(touched tiles).
+            world_max = rows * cols
+            touched: list[int] = []
+            seen: set[int] = set()
             for edit in body.edits:
-                _apply_single_edit(sess.parsed, edit, rows, cols)
-                applied += 1
-        except EditOpError as e:
-            _rollback()
-            raise HTTPException(400, {"error": "EDIT_OP_ERROR",
-                "message": str(e), "applied_before_error": applied})
-        except Exception:
-            _rollback()
-            raise
-        sess.edit_count += applied
-        # `or`: an empty/no-op batch must never reset a dirty session to
-        # clean (the UI would then refuse to save real earlier edits).
-        sess.dirty = sess.dirty or applied > 0
-    return ApplyEditsResult(applied=applied, session=_session_info(sess))
+                g = edit.y * cols + edit.x
+                if 0 <= g < world_max and g not in seen:
+                    seen.add(g)
+                    touched.append(g)
+            snap = _snapshot_tiles(sess.parsed, touched)
+            # The edit ops also mutate the map-global `counts` totals dict;
+            # snapshot it so a rollback restores it too (defense-in-depth —
+            # today only `sector_info` reads it, and it re-parses off disk).
+            counts_before = dict(sess.parsed.get("counts") or {})
+
+            def _rollback() -> None:
+                _restore_tiles(sess.parsed, snap)
+                c = sess.parsed.get("counts")
+                if c is not None:
+                    c.clear()
+                    c.update(counts_before)
+
+            try:
+                for edit in body.edits:
+                    _apply_single_edit(sess.parsed, edit, rows, cols)
+                    applied += 1
+            except EditOpError as e:
+                _rollback()
+                raise HTTPException(400, {"error": "EDIT_OP_ERROR",
+                    "message": str(e), "applied_before_error": applied})
+            except Exception:
+                _rollback()
+                raise
+            sess.edit_count += applied
+            # `or`: an empty/no-op batch must never reset a dirty session to
+            # clean (the UI would then refuse to save real earlier edits).
+            sess.dirty = sess.dirty or applied > 0
+            if applied > 0:
+                sess.mutation_seq += 1
+        return ApplyEditsResult(applied=applied, session=_session_info(sess))
 
 
 def _session_backup_dir(dat_path: Path) -> Path:
@@ -3252,15 +3712,218 @@ def _session_backup_dir(dat_path: Path) -> Path:
     return _DAT_BACKUP_DIR / f"{dat_path.stem}_{tag}"
 
 
+def _backup_destination_before_overwrite(dest: Path) -> str:
+    """Atomically retain an existing destination outside the game install.
+
+    Create/copy routes are destructive only after this succeeds.  The folder
+    convention is shared with ordinary map saves and its full-path hash keeps
+    equally-named maps from separate installs isolated.
+    """
+    backup_dir = _session_backup_dir(dest)
+    backup_path = backup_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.dat"
+    try:
+        prior_bytes = dest.read_bytes()
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        write_bytes_atomic(backup_path, prior_bytes)
+        if backup_path.read_bytes() != prior_bytes:
+            raise OSError("backup bytes did not match the destination")
+    except OSError as e:
+        raise HTTPException(500, {
+            "error": "BACKUP_FAILED",
+            "message": f"could not back up {dest} before replacement: {type(e).__name__}: {e}",
+        })
+    return str(backup_path)
+
+
+def _acquire_transient_destination_lease(install_root: Path, dest: Path):
+    """Reject a create/copy target owned by any writable map session."""
+    try:
+        return acquire_writable_map_session_lease(install_root, dest)
+    except RuntimeError:
+        raise HTTPException(409, {
+            "error": "WRITABLE_SESSION_EXISTS",
+            "message": "This destination already has a writable MapForge session.",
+        })
+
+
+# ─── Crash-recovery autosave ────────────────────────────────────────────
+# Dirty session edits live ONLY in this process's memory: the frontend's
+# R6 "journal" is a localStorage breadcrumb that can reconnect to a still-
+# running sidecar, but a sidecar crash / power loss loses everything since
+# the last explicit save. The autosaver periodically serializes each dirty
+# session to a recovery .dat in its backup folder (outside the install);
+# open_session offers it back when it finds one that differs from disk.
+
+import logging as _autosave_logging
+
+_AUTOSAVE_INTERVAL_SECS = float(
+    os.environ.get("MERCWIZARD_MAPFORGE_AUTOSAVE_SECS", "30"))
+_autosave_started = False
+_autosave_start_lock = threading.Lock()
+_autosave_log = _autosave_logging.getLogger("mapforge.autosave")
+
+
+def _recovery_paths(dat_path: Path) -> tuple[Path, Path]:
+    d = _session_backup_dir(dat_path)
+    return d / "recovery_autosave.dat", d / "recovery_autosave.json"
+
+
+def _delete_recovery(dat_path: Path) -> None:
+    for p in _recovery_paths(dat_path):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass  # best-effort — a locked file just leaves a stale snapshot
+
+
+def _write_recovery(sess: "MapForgeSession") -> bool:
+    """Serialize the session's current state to its recovery snapshot.
+    Returns True when a snapshot was written. Skips read-only sessions and
+    states the consistency validator rejects (never persist a state the
+    save endpoint itself would refuse)."""
+    if sess.read_only or getattr(sess, "closed", False):
+        return False
+    state = get_state()
+    with cross_process_install_lock(_session_install_root(sess)), state.write_lock, sess._lock:
+        # A close can race an autosave sweep after list_all() snapshots the
+        # store. Recheck under the same lock that close uses before doing any
+        # recovery I/O.
+        if sess.closed:
+            return False
+        current = state.active()
+        if current is None or current.id != sess.install_id:
+            return False
+        # Another session may have explicitly saved newer canonical bytes
+        # since this one opened. Never leave an autosave that can resurrect
+        # this older baseline over that save.
+        try:
+            on_disk = sess.dat_path.read_bytes()
+        except OSError:
+            _delete_recovery(sess.dat_path)
+            return False
+        if on_disk != sess.disk_baseline:
+            _delete_recovery(sess.dat_path)
+            return False
+        if _validate_parsed_consistency(sess.parsed) is not None:
+            return False
+        try:
+            snap_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
+        except Exception:  # noqa: BLE001 — autosave must never kill the loop
+            _autosave_log.exception("recovery serialize failed for %s",
+                                    sess.dat_path)
+            return False
+        seq = sess.mutation_seq
+        meta = {
+            "source_dat": str(sess.dat_path),
+            "install_id": sess.install_id,
+            "disk_baseline_sha256": hashlib.sha256(
+                sess.disk_baseline,
+            ).hexdigest(),
+            "saved_at": time.time(),
+            "edit_count": sess.edit_count,
+            "tileset": sess.tileset,
+        }
+        rec_dat, rec_meta = _recovery_paths(sess.dat_path)
+        try:
+            rec_dat.parent.mkdir(parents=True, exist_ok=True)
+            write_bytes_atomic(rec_dat, snap_bytes)
+            write_bytes_atomic(rec_meta, json.dumps(meta).encode("utf-8"))
+        except OSError:
+            _autosave_log.exception("recovery write failed for %s", sess.dat_path)
+            return False
+        sess.autosaved_seq = seq
+    return True
+
+
+def autosave_flush_all() -> int:
+    """Snapshot every dirty session whose state changed since its last
+    snapshot. Called by the background loop; callable directly by tests."""
+    written = 0
+    for candidate in _session_store.list_all():
+        try:
+            with _session_store.borrow(candidate.id) as sess:
+                if sess.dirty and sess.mutation_seq != sess.autosaved_seq:
+                    if _write_recovery(sess):
+                        written += 1
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+    return written
+
+
+def _autosave_loop() -> None:
+    while True:
+        time.sleep(_AUTOSAVE_INTERVAL_SECS)
+        try:
+            autosave_flush_all()
+        except Exception:  # noqa: BLE001 — the loop must survive anything
+            _autosave_log.exception("autosave sweep failed")
+
+
+def _ensure_autosave_thread() -> None:
+    """Start the autosave daemon lazily on first session open. Disabled
+    under pytest (tests call autosave_flush_all() deterministically) and
+    when the interval is set to 0."""
+    global _autosave_started
+    if _autosave_started or _AUTOSAVE_INTERVAL_SECS <= 0 \
+            or "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    with _autosave_start_lock:
+        if _autosave_started:
+            return
+        threading.Thread(target=_autosave_loop, daemon=True,
+                         name="mapforge-autosave").start()
+        _autosave_started = True
+
+
+def _recovery_offer(dat_path: Path, on_disk: bytes,
+                    install_id: Optional[str] = None) -> Optional["RecoveryInfo"]:
+    """Return recovery metadata when a usable snapshot exists for this map.
+    A snapshot byte-identical to the on-disk file carries nothing worth
+    restoring — it's deleted on sight."""
+    rec_dat, rec_meta = _recovery_paths(dat_path)
+    if not rec_dat.is_file() or not rec_meta.is_file():
+        _delete_recovery(dat_path)
+        return None
+    try:
+        meta = json.loads(rec_meta.read_text("utf-8"))
+        rec_bytes = rec_dat.read_bytes()
+    except (OSError, ValueError):
+        _delete_recovery(dat_path)
+        return None
+    if (not isinstance(meta, dict)
+            or not isinstance(meta.get("saved_at"), (int, float))
+            or isinstance(meta.get("saved_at"), bool)
+            or not isinstance(meta.get("edit_count"), int)
+            or isinstance(meta.get("edit_count"), bool)):
+        _delete_recovery(dat_path)
+        return None
+    if (meta.get("source_dat") != str(dat_path)
+            or meta.get("disk_baseline_sha256") != hashlib.sha256(on_disk).hexdigest()
+            or (install_id is not None and meta.get("install_id") != install_id)):
+        _delete_recovery(dat_path)
+        return None  # stem+hash collision paranoia — wrong map's snapshot
+    if rec_bytes == on_disk:
+        _delete_recovery(dat_path)
+        return None
+    return RecoveryInfo(
+        saved_at=float(meta.get("saved_at", 0.0)),
+        edit_count=int(meta.get("edit_count", 0)),
+    )
+
+
 @router.post("/sessions/{session_id}/save", response_model=SaveResult)
-def save_session(session_id: str):
+@_borrow_session_endpoint
+def save_session(session_id: str, force: bool = False):
     """Flush the session's in-memory state to disk. Keeps a one-shot
     pristine backup + rolling pre-save backups, all OUTSIDE the install
     (never inside `Maps/` — the in-game editor's load dialog enumerates
     `MAPS/*` with no extension filter, so a `.dat.bak` next to the live
-    map shows up as a loadable map and invites editing a stale copy)."""
+    map shows up as a loadable map and invites editing a stale copy).
+
+    `force=true` skips the external-modification guard (see below)."""
     _require_renderer()
-    sess = _session_store.get(session_id)
+    sess = _session_store.borrowed(session_id)
     if sess.read_only:
         raise HTTPException(
             status_code=400,
@@ -3271,50 +3934,81 @@ def save_session(session_id: str):
                                 "the SLF archive. Drop a loose copy of "
                                 "this sector into Data-1.13/Maps/ first.")},
         )
-    backup_dir = _session_backup_dir(sess.dat_path)
-    # First-save pristine backup. Don't clobber an existing one so
-    # multiple save cycles keep the original as first opened.
-    backup_path = backup_dir / "pristine_original.dat"
-    backup_str: Optional[str] = None
-    if not backup_path.exists():
-        try:
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            backup_path.write_bytes(sess.original_bytes)
-            backup_str = str(backup_path)
-        except OSError as e:
-            raise HTTPException(500, {"error": "BACKUP_FAILED",
-                "message": f"{type(e).__name__}: {e}"})
-    else:
-        backup_str = str(backup_path)
-    # Rolling pre-save backup: copy the CURRENT on-disk .dat (the version
-    # about to be overwritten) to a timestamped file OUTSIDE the install,
-    # so EVERY save is recoverable — not just the pristine original.
-    # Best-effort; never block the save on it.
-    if sess.dat_path.exists():
-        try:
-            import shutil as _shutil
-            stamp = time.strftime("%Y%m%d_%H%M%S")
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            # uuid suffix so two saves in the same wall-clock second can't
-            # collide and silently overwrite the earlier rolling backup.
-            _shutil.copy2(sess.dat_path,
-                          backup_dir / f"{stamp}_{uuid.uuid4().hex[:6]}.dat")
-        except OSError:
-            pass  # disk full / permission — the save itself still proceeds
     import logging as _logging
     _log = _logging.getLogger("mapforge.save")
-    # Hold the session lock from the consistency check through the state
-    # update: `apply_edits` and generator runs mutate `parsed` under this
-    # lock (a generator can hold it for seconds), and an unlocked save
-    # racing them could serialize a mid-mutation state to disk — or mark
-    # in-flight edits clean via `dirty = False` and silently drop them.
-    with sess._lock:
+    backup_str: Optional[str] = None
+    new_bytes = b""
+    state = get_state()
+    # Guard the ENTIRE save transaction in the globally consistent order:
+    # cross-process install lock -> in-process state lock -> session lock.
+    # The external-change check must be in this scope; otherwise two open
+    # sessions can both observe the old baseline and last-writer-win.
+    with cross_process_install_lock(_session_install_root(sess)), state.write_lock, sess._lock:
+        if sess.closed:
+            raise HTTPException(409, {
+                "error": "SESSION_CLOSED",
+                "message": "This MapForge session was explicitly closed.",
+            })
+        current_install = state.active()
+        if current_install is None or current_install.id != sess.install_id:
+            raise HTTPException(409, {"error": "SESSION_INSTALL_CHANGED",
+                "message": "The active install changed since this session opened."})
+        # Missing is an external deletion, not permission to recreate the map.
+        if not force and not sess.dat_path.exists():
+            raise HTTPException(409, {"error": "EXTERNAL_MODIFICATION",
+                "message": f"{sess.dat_path.name} was removed since this session opened."})
+        # External-change guard. force=true still captures the external
+        # version in the rolling backup below before it is replaced.
+        if not force and sess.dat_path.exists():
+            try:
+                on_disk = sess.dat_path.read_bytes()
+            except OSError:
+                raise HTTPException(409, {"error": "EXTERNAL_MODIFICATION",
+                    "message": f"{sess.dat_path.name} could not be read for the external-change check."})
+            if on_disk != sess.disk_baseline:
+                raise HTTPException(409, {
+                    "error": "EXTERNAL_MODIFICATION",
+                    "message": (
+                        f"{sess.dat_path.name} changed on disk since this "
+                        "session opened it — something else (the in-game "
+                        "editor? another MercForge window?) wrote to it. "
+                        "Save again to overwrite the external version (a "
+                        "rolling backup of it is kept), or reopen the sector "
+                        "to discard this session's edits and load it."
+                    ),
+                })
+        backup_dir = _session_backup_dir(sess.dat_path)
+        backup_path = backup_dir / "pristine_original.dat"
+        if not backup_path.exists():
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                # disk_baseline, not original_bytes: after recovery restore
+                # it remains the file as originally found on disk.
+                backup_path.write_bytes(sess.disk_baseline)
+                backup_str = str(backup_path)
+            except OSError as e:
+                raise HTTPException(500, {"error": "BACKUP_FAILED",
+                    "message": f"{type(e).__name__}: {e}"})
+        else:
+            backup_str = str(backup_path)
+        # Every overwrite retains the version it is replacing.
+        if sess.dat_path.exists():
+            try:
+                import shutil as _shutil
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(
+                    sess.dat_path,
+                    backup_dir / f"{stamp}_{uuid.uuid4().hex[:6]}.dat",
+                )
+            except OSError:
+                pass  # disk full / permission — the save itself still proceeds
         # Pre-write consistency check. If the parsed dict's per-tile layer
         # counts disagree with the actual entry list lengths, the writer
         # will produce a file the engine can't load (count nibbles mislead
         # the file reader, MAPINFO ends up read from the wrong offset, and
         # the engine asserts "Map is less than minimum supported version").
-        # A user hit this 2026-05-25 on a saved C6 — root cause not yet
+        # A user hit this on a saved C6 — root cause not yet
         # localised; this validator surfaces it AT the save point so the
         # bad data never reaches disk + we get diagnostics for the repro.
         desync = _validate_parsed_consistency(sess.parsed)
@@ -3333,17 +4027,34 @@ def save_session(session_id: str):
         # can't truncate the canonical .dat.
         try:
             new_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
-            tmp_path = sess.dat_path.with_suffix(sess.dat_path.suffix + ".mwtmp")
-            tmp_path.write_bytes(new_bytes)
-            tmp_path.replace(sess.dat_path)
+            # Validate/rebase boundary before mutating canonical disk.
+            saved_parse = parse_dat_full(new_bytes, str(sess.dat_path))
+            write_bytes_atomic(sess.dat_path, new_bytes)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, {"error": "WRITE_FAILED",
                 "message": f"{type(e).__name__}: {e}"})
         # After save: the on-disk file IS the new baseline. Update
         # original_bytes so subsequent saves diff against it (and so the
         # backup logic doesn't re-back-up the freshly-saved version).
+        # `appendix_offset` must be re-anchored to the NEW baseline in the
+        # same step: the writer slices the appendix as
+        # original_bytes[appendix_offset:], so after a size-changing edit
+        # (layer passes grew/shrank) the appendix starts at a different
+        # offset in the just-written bytes — a stale offset makes the NEXT
+        # save prepend room-info bytes to (or chop bytes off) the appendix,
+        # corrupting the .dat. The appendix passthrough is length-invariant,
+        # so re-anchor from the tail. (If the dormant appendix_model
+        # authoring path is ever wired up, its synthesized appendix can
+        # change length — recompute from the model there instead.)
         sess.original_bytes = new_bytes
+        sess.disk_baseline = new_bytes
+        # An authored appendix can change size; derive the new boundary from
+        # the bytes just written rather than carrying the old appendix length.
+        sess.parsed["appendix_offset"] = saved_parse["appendix_offset"]
         sess.dirty = False
+        # The saved file IS the state — any recovery snapshot is now stale.
+        sess.autosaved_seq = sess.mutation_seq
+        _delete_recovery(sess.dat_path)
     return SaveResult(
         session=_session_info(sess),
         bytes_written=len(new_bytes),
@@ -3387,32 +4098,57 @@ def new_sector(body: NewSectorBody):
     correct freshly-created state — the in-game editor recomputes scroll
     bounds + entry points on its first save; the bytes load fine."""
     _require_renderer()
-    p = _confine_install_path(body.dat_path)
-    if p.suffix.lower() != ".dat":
-        raise HTTPException(400, {"error": "BAD_SUFFIX",
-            "message": f"Expected .dat, got {p.suffix or '(none)'}"})
-    if p.exists() and not body.overwrite:
-        raise HTTPException(409, {"error": "FILE_EXISTS",
-            "message": (f"{p} already exists. Pass overwrite=true to replace "
-                        "it (this destroys the existing map).")})
     if body.rows <= 0 or body.cols <= 0 or body.rows > 1024 or body.cols > 1024:
         raise HTTPException(400, {"error": "BAD_DIMENSIONS",
             "message": f"implausible dimensions {body.rows}x{body.cols}"})
-    try:
-        data = build_empty_dat_bytes(
-            tileset=body.tileset, rows=body.rows, cols=body.cols)
-    except ValueError as e:
-        raise HTTPException(400, {"error": "BAD_PARAMS", "message": str(e)})
-    # Atomic write (tmp + replace) so a crash mid-write can't leave a
-    # truncated .dat behind. Create the parent dir if it doesn't exist yet.
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = p.with_suffix(p.suffix + ".mwtmp")
-        tmp_path.write_bytes(data)
-        tmp_path.replace(p)
-    except OSError as e:
-        raise HTTPException(500, {"error": "WRITE_FAILED",
-            "message": f"{type(e).__name__}: {e}"})
+    if not 0 <= body.tileset <= 0xFFFFFFFF:
+        raise HTTPException(400, {"error": "BAD_PARAMS",
+            "message": "tileset must fit an unsigned 32-bit field"})
+    state = get_state()
+    active_install = state.active()
+    if active_install is None:
+        # Test-only compatibility seam: production _active_install_root also
+        # reads state.active(), so a real absent active install still rejects.
+        root = _active_install_root()
+        if root is None:
+            raise HTTPException(409, {"error": "NO_ACTIVE_INSTALL",
+                "message": "Select an install before creating a sector."})
+        active_path, active_id = str(root), str(root.resolve())
+    else:
+        active_path, active_id = active_install.path, active_install.id
+    # Keep validation, no-clobber, parent creation, and the atomic write in
+    # one install transaction. Extraction/save-copy-as/new-sector all share
+    # this namespace and must not race an exists() check.
+    with cross_process_install_lock(active_path), state.write_lock:
+        current = state.active()
+        if current is not None and current.id != active_id:
+            raise HTTPException(409, {"error": "ACTIVE_INSTALL_CHANGED",
+                "message": "The active install changed while creating the sector."})
+        p = _confine_install_path(body.dat_path)
+        if p.suffix.lower() != ".dat":
+            raise HTTPException(400, {"error": "BAD_SUFFIX",
+                "message": f"Expected .dat, got {p.suffix or '(none)'}"})
+        lease = _acquire_transient_destination_lease(Path(active_path), p)
+        try:
+            if p.exists():
+                if not body.overwrite:
+                    raise HTTPException(409, {"error": "FILE_EXISTS",
+                        "message": (f"{p} already exists. Pass overwrite=true to replace "
+                                    "it (this destroys the existing map).")})
+                _backup_destination_before_overwrite(p)
+            try:
+                data = build_empty_dat_bytes(
+                    tileset=body.tileset, rows=body.rows, cols=body.cols)
+            except ValueError as e:
+                raise HTTPException(400, {"error": "BAD_PARAMS", "message": str(e)})
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                write_bytes_atomic(p, data)
+            except OSError as e:
+                raise HTTPException(500, {"error": "WRITE_FAILED",
+                    "message": f"{type(e).__name__}: {e}"})
+        finally:
+            lease.release()
     return NewSectorResult(
         dat_path=str(p),
         tileset=body.tileset,
@@ -3436,6 +4172,7 @@ class SaveCopyAsResult(BaseModel):
 
 
 @router.post("/sessions/{session_id}/save-copy-as", response_model=SaveCopyAsResult)
+@_borrow_session_endpoint
 def save_copy_as(session_id: str, body: SaveCopyAsBody):
     """Write the session's current in-memory state to a NEW .dat path
     WITHOUT touching the original file or re-baselining the session.
@@ -3446,45 +4183,74 @@ def save_copy_as(session_id: str, body: SaveCopyAsBody):
     (SLF-bundled) sessions ARE allowed here, since we write to a brand-new
     loose path the user chose, not back into the archive."""
     _require_renderer()
-    sess = _session_store.get(session_id)
-    dest = _confine_install_path(body.dat_path)
-    if dest.suffix.lower() != ".dat":
-        raise HTTPException(400, {"error": "BAD_SUFFIX",
-            "message": f"Expected .dat, got {dest.suffix or '(none)'}"})
-    # Refuse to clobber the session's OWN source (that's what /save is for —
-    # /save keeps backups; this path doesn't) or any existing file unless
-    # the caller explicitly confirmed.
-    try:
-        same_as_source = dest.resolve() == sess.dat_path.resolve()
-    except OSError:
-        same_as_source = str(dest) == str(sess.dat_path)
-    if same_as_source:
-        raise HTTPException(409, {"error": "SAME_AS_SOURCE",
-            "message": ("Destination is the session's own source file. Use "
-                        "the normal Save (which keeps backups) instead.")})
-    if dest.exists() and not body.overwrite:
-        raise HTTPException(409, {"error": "FILE_EXISTS",
-            "message": (f"{dest} already exists. Pass overwrite=true to "
-                        "replace it.")})
-    with sess._lock:
-        desync = _validate_parsed_consistency(sess.parsed)
-        if desync is not None:
-            raise HTTPException(500, {
-                "error": "PARSED_STATE_CORRUPT",
+    sess = _session_store.borrowed(session_id)
+    state = get_state()
+    active_install = state.active()
+    if active_install is None or active_install.id != sess.install_id:
+        raise HTTPException(409, {
+            "error": "SESSION_INSTALL_CHANGED",
+            "message": (
+                "The active install changed after this map session opened. "
+                "Reopen the map before saving a copy into the new install."
+            ),
+        })
+    # Save-a-copy is install-scoped too: it may overwrite an existing map in
+    # the same target, so serialize the existence check and atomic write with
+    # all other MapForge mutations for this session's captured install.
+    with cross_process_install_lock(_session_install_root(sess)), state.write_lock, sess._lock:
+        current_install = state.active()
+        if current_install is None or current_install.id != sess.install_id:
+            raise HTTPException(409, {
+                "error": "SESSION_INSTALL_CHANGED",
                 "message": (
-                    "MercForge's in-memory map state is inconsistent — saving "
-                    "would produce a .dat the game can't load. The copy is "
-                    f"BLOCKED. Specific desync: {desync}"),
+                    "The active install changed after this map session opened. "
+                    "Reopen the map before saving a copy into the new install."
+                ),
             })
+        if sess.closed:
+            raise HTTPException(409, {
+                "error": "SESSION_CLOSED",
+                "message": "This MapForge session was explicitly closed.",
+            })
+        # Resolve and confine against the rechecked active install while its
+        # root transaction is held; an A→B→A switch cannot carry a stale B
+        # path into this write.
+        dest = _confine_install_path(body.dat_path)
+        if dest.suffix.lower() != ".dat":
+            raise HTTPException(400, {"error": "BAD_SUFFIX",
+                "message": f"Expected .dat, got {dest.suffix or '(none)'}"})
         try:
-            new_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = dest.with_suffix(dest.suffix + ".mwtmp")
-            tmp_path.write_bytes(new_bytes)
-            tmp_path.replace(dest)
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(500, {"error": "WRITE_FAILED",
-                "message": f"{type(e).__name__}: {e}"})
+            same_as_source = dest.resolve() == sess.dat_path.resolve()
+        except OSError:
+            same_as_source = str(dest) == str(sess.dat_path)
+        if same_as_source:
+            raise HTTPException(409, {"error": "SAME_AS_SOURCE",
+                "message": "Destination is the session's own source file. Use normal Save instead."})
+        lease = _acquire_transient_destination_lease(_session_install_root(sess), dest)
+        try:
+            if dest.exists():
+                if not body.overwrite:
+                    raise HTTPException(409, {"error": "FILE_EXISTS",
+                        "message": (f"{dest} already exists. Pass overwrite=true to "
+                                    "replace it.")})
+                _backup_destination_before_overwrite(dest)
+            desync = _validate_parsed_consistency(sess.parsed)
+            if desync is not None:
+                raise HTTPException(500, {
+                    "error": "PARSED_STATE_CORRUPT",
+                    "message": (
+                        "MercForge's in-memory map state is inconsistent — saving "
+                        "would produce a .dat the game can't load. The copy is "
+                        f"BLOCKED. Specific desync: {desync}"),
+                })
+            try:
+                new_bytes = write_dat_bytes(sess.parsed, sess.original_bytes)
+                write_bytes_atomic(dest, new_bytes)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(500, {"error": "WRITE_FAILED",
+                    "message": f"{type(e).__name__}: {e}"})
+        finally:
+            lease.release()
     return SaveCopyAsResult(dat_path=str(dest), bytes_written=len(new_bytes))
 
 
@@ -3739,6 +4505,7 @@ def building_library(
 
 
 @router.post("/sessions/{session_id}/run-generator")
+@_borrow_session_endpoint
 def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBody = RunGeneratorBody()):
     """Stream a generator's op output into the session.
 
@@ -3765,7 +4532,7 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
     from mercwizard_core.mapforge.generators import get as get_generator, GeneratorContext
 
     _require_renderer()
-    sess = _session_store.get(session_id)
+    sess = _session_store.borrowed(session_id)
     if sess.read_only:
         raise HTTPException(
             status_code=400,
@@ -3786,6 +4553,13 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
             },
         )
 
+    # Force every declared numeric param into its own min/max before the
+    # generator sees it. The UI's inputs carry those bounds but browsers
+    # only enforce them on the stepper arrows, and a count that drives a
+    # quadratic placement loop turns an out-of-range value into a wedged
+    # sidecar rather than a bad map.
+    gen_params = gen.clamp_params(body.params)
+
     rows = sess.parsed["rows"]
     cols = sess.parsed["cols"]
 
@@ -3797,11 +4571,14 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
     # generators that don't need it (Wipe, Fill, …) pay nothing.
     slot_map: Optional[dict[int, str]] = None
     frame_count = None
+    sti_sha256 = None
+    structure_identity = None
     try:
         slot_map = load_tileset_xml(sess.xml_path, sess.tileset)
         _loose, _slf = _tileset_paths_for(sess.xml_path)
         _sti = StiCache(sess.tileset, loose_dirs=_loose, slf_paths=_slf)
         _fc_cache: dict[int, int] = {}
+        _sti_hash_cache: dict[int, Optional[str]] = {}
 
         def frame_count(slot: int) -> int:
             if slot not in _fc_cache:
@@ -3811,12 +4588,44 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
                 except Exception:  # noqa: BLE001
                     _fc_cache[slot] = 0
             return _fc_cache[slot]
+
+        def sti_sha256(slot: int) -> Optional[str]:
+            if slot not in _sti_hash_cache:
+                name = slot_map.get(slot) if slot_map else None
+                raw = None
+                if name:
+                    loose_path = _sti._find_loose(name)
+                    raw = loose_path.read_bytes() if loose_path else _sti._extract_from_slf(name)
+                _sti_hash_cache[slot] = hashlib.sha256(raw).hexdigest() if raw else None
+            return _sti_hash_cache[slot]
+
+        from mercwizard_core.mapforge_engine.jsd_structure import (
+            parse_structure_identities,
+        )
+        _structure_cache: dict[int, dict] = {}
+
+        def structure_identity(slot: int, sub: int):
+            if slot not in _structure_cache:
+                name = slot_map.get(slot) if slot_map else None
+                found = _find_jsd_bytes(sess.xml_path, sess.tileset, name) if name else None
+                if found is None:
+                    _structure_cache[slot] = {}
+                else:
+                    try:
+                        _structure_cache[slot] = parse_structure_identities(found[0])
+                    except Exception:  # noqa: BLE001
+                        _structure_cache[slot] = {}
+            return _structure_cache[slot].get(int(sub))
     except Exception:  # noqa: BLE001
         slot_map = None
         frame_count = None
+        sti_sha256 = None
+        structure_identity = None
 
     ctx = GeneratorContext(rows=rows, cols=cols, parsed=sess.parsed,
-                           slot_map=slot_map, frame_count=frame_count)
+                           tileset_id=sess.tileset, slot_map=slot_map,
+                           frame_count=frame_count, sti_sha256=sti_sha256,
+                           structure_identity=structure_identity)
 
     def dry_run_stream():
         """Preview mode: iterate + shape-validate the generator's ops,
@@ -3826,7 +4635,7 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
             buffered: list[dict] = []
             op_count = 0
             with sess._lock:
-                for event in gen.iter_ops(ctx, body.params):
+                for event in gen.iter_ops(ctx, gen_params):
                     if "phase" in event:
                         buffered.append(event)
                         continue
@@ -3872,7 +4681,7 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
             # lock held for 30+ seconds while concurrent paint/undo/
             # save calls blocked, and the Tauri shell watchdog could
             # respawn the sidecar mid-stream interpreting the frozen
-            # health endpoint as a failure. Bug-review finding A5.
+            # health endpoint as a failure.
             #
             # Buffer footprint is bounded: even a WipeGenerator on a
             # 160×160 sector produces ~150k events × ~200 bytes ≈ 30MB,
@@ -3911,7 +4720,7 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
                         c.update(counts_before)
 
                 try:
-                    for event in gen.iter_ops(ctx, body.params):
+                    for event in gen.iter_ops(ctx, gen_params):
                         # Phase event: just buffer; no mutation.
                         if "phase" in event:
                             buffered.append(event)
@@ -3937,6 +4746,8 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
                     raise
                 sess.edit_count += applied
                 sess.dirty = sess.dirty or applied > 0
+                if applied > 0:
+                    sess.mutation_seq += 1
             # Lock released — safe to suspend on yield.
             for ev in buffered:
                 yield json.dumps(ev) + "\n"
@@ -3970,6 +4781,7 @@ def run_generator(session_id: str, name: str = Query(...), body: RunGeneratorBod
 
 
 @router.get("/sessions/{session_id}/tile", response_model=TileInspection)
+@_borrow_session_endpoint
 def session_tile(
     session_id: str,
     x: int = Query(..., ge=0, le=1023),
@@ -3978,7 +4790,7 @@ def session_tile(
     """Like /sector/tile but reads from the session's in-memory parsed
     dict — sees all uncommitted edits."""
     _require_renderer()
-    sess = _session_store.get(session_id)
+    sess = _session_store.borrowed(session_id)
     cols = sess.parsed["cols"]
     rows = sess.parsed["rows"]
     if x >= cols or y >= rows:
@@ -4007,6 +4819,7 @@ def session_tile(
 
 
 @router.get("/sessions/{session_id}/render")
+@_borrow_session_endpoint
 def session_render(
     session_id: str,
     room: Optional[int] = Query(None),
@@ -4022,7 +4835,7 @@ def session_render(
     Same response headers (X-MapForge-IxMin/IyMin/etc.) as the
     stateless render endpoint."""
     _require_renderer()
-    sess = _session_store.get(session_id)
+    sess = _session_store.borrowed(session_id)
     # IsoRenderer accepts a pre-parsed dict so we don't re-parse on
     # every render. Construction is cheap when parsed is provided.
     loose_dirs, slf_paths = _tileset_paths_for(sess.xml_path)
@@ -4089,7 +4902,7 @@ def session_render(
     )
 
 
-# ─── Atlas (Phase 3 client-side renderer) ─────────────────────────────
+# ─── Atlas (client-side renderer) ─────────────────────────────────────
 # Goal: one PNG containing every (slot, sub) of every STI in the tileset,
 # packed, plus a manifest with per-sprite atlas rect + engine offsets.
 # The frontend draws iso views to <canvas> via ctx.drawImage(atlas, ...),
@@ -4108,6 +4921,17 @@ _ATLAS_CACHE = (
     Path(os.environ.get("APPDATA") or Path.home() / ".config")
     / "MercWizard" / "mapforge" / "atlas"
 )
+
+
+def bust_atlas_cache(tileset: int) -> None:
+    """Remove every on-disk atlas cache dir for `tileset` — call after ANY
+    write that changes what the atlas would bake (new slot, injected sub,
+    JSD edit). The atlas fingerprint hashes slot NAMES only, so content
+    changes never invalidate it on their own. Single owner of the rmtree
+    pattern (was copy-pasted across three write paths)."""
+    import shutil
+    for d in _ATLAS_CACHE.glob(f"{tileset}_*"):
+        shutil.rmtree(d, ignore_errors=True)
 # Single-flight locks keyed by atlas cache_dir name (e.g.
 # "18_e26c1d5f2e36541e" or "18_<fp>_partial_<pairs_hash>"). When
 # multiple concurrent _build_atlas calls target the same cache_dir
@@ -4295,8 +5119,18 @@ def _atlas_fingerprint(xml_path: Path, tileset: int,
     # fix fires on first paint (not just after the complete bake swap).
     h.update(b"atlas-bake-v6|")
     h.update(f"{xml_path.resolve()}|{tileset}".encode("utf-8", "replace"))
+    # Loose sheets (Tilesets/<ts>/<name>.sti next to the XML) are content-versioned by size+mtime: a re-authored sheet
+    # under the SAME name must yield a new fingerprint, or the browser keeps the old atlas PNG (URL keyed by fingerprint,
+    # 24 h max-age) against a re-baked manifest and the map renders garbage (seen on the Den guild slot 55: 8 -> 10 subs).
+    # SLF-only sheets have no loose file and stay name-keyed as before.
+    loose_dir = xml_path.parent / "Tilesets" / str(tileset)
     for slot, name in sorted(slot_map.items()):
         h.update(f"|{slot}={name}".encode("utf-8", "replace"))
+        try:
+            st = (loose_dir / name).stat()
+            h.update(f"|{slot}:{st.st_size}:{int(st.st_mtime)}".encode("ascii"))
+        except OSError:
+            pass
     return h.hexdigest()[:16]
 
 
@@ -4578,21 +5412,18 @@ def _validate_parsed_consistency(parsed: dict) -> Optional[str]:
     ends up misaligned, MAPINFO is read from the wrong offset,
     `gMapInformation.ubMapVersion` ends up < 15, and the engine asserts
     with "Map is less than minimum supported version" — which is the
-    crash a user hit 2026-05-25 on a saved C6.
+    crash a user hit on a saved C6.
 
     Each edit op in dat_edit_ops.py is supposed to keep these in sync
     (it updates both `parsed[layer][gridno]` and
     `parsed["n_per_tile"][ck][gridno]` together), but if any code path
     mutates entries WITHOUT updating the count nibble, this catches it.
     """
-    layer_to_count_key = {
-        "land":    "land",
-        "objs":    "obj",
-        "structs": "struct",
-        "shadows": "shadow",
-        "roofs":   "roof",
-        "onroofs": "onroof",
-    }
+    # Single owner of the plural→singular mapping — drift here would
+    # produce exactly the count-desync corruption this guard catches.
+    from mercwizard_core.mapforge_engine.dat_edit_ops import (
+        _LAYER_TO_COUNT_KEY as layer_to_count_key,
+    )
     n_per_tile = parsed.get("n_per_tile") or {}
     for plural, ck in layer_to_count_key.items():
         entries = parsed.get(plural) or []
@@ -4665,7 +5496,7 @@ def _build_atlas(xml_path: Path, tileset: int,
       pack         — ~6 ms: row-pack sprites into cells
       render       — ~10 ms: PIL.paste each sprite (fast despite ~4k
                      calls — this was misdiagnosed as the bottleneck
-                     for hours on 2026-05-25; it never was)
+                     for a long time; it never was)
       jsd-harvest  — ~8.6 s: walk both SLFs for .jsd files (THIS is
                      the dominant phase; ~1.75 ms × 4000 SLF entries)
                      Skipped entirely for partial bakes.
@@ -4848,10 +5679,10 @@ def _build_atlas_unbaked(
     cache = StiCache(tileset, loose_dirs=loose, slf_paths=slf)
 
     # PHASE: load-stis. Parallelised. iso_renderer's StiCache got a
-    # per-instance lock around SLF readbytes() on 2026-05-25 making
+    # per-instance lock around SLF readbytes(), making
     # concurrent cache.get() on distinct names safe.
     #
-    # 2026-05-25 measurements (tileset 18 cold):
+    # Measurements (tileset 18 cold):
     #   sequential:                          2,642 ms
     #   parallel 4-worker + lock:            2,827 ms  (lock contention)
     #   precompute SLF index + parallel:   load-stis 738ms BUT index-slf 7,138ms (net LOSS)
@@ -5011,6 +5842,16 @@ def _build_atlas_unbaked(
                 }
         if parsed.ubNumberOfTiles <= 1:
             continue
+        # A stamp recipe only makes sense when the WHOLE FILE is one
+        # multi-tile object (a single DB_STRUCTURE whose STI subs are
+        # its tile parts). A file with one DB_STRUCTURE PER SUB
+        # (gastuf1: truck / truck / pumps / GAS sign ...) is a
+        # collection of INDEPENDENT objects - there the first
+        # structure's ubNumberOfTiles is just its own collision span,
+        # and stamping subs 1..N across those tile offsets merges
+        # unrelated objects into one smear on the map.
+        if len(sub_structs) > 1:
+            continue
         # Cap by STI frame count — emit at most one footprint tile
         # per visible sub. Bigger ubNumberOfTiles means the rest are
         # passability-only and the engine handles them on load.
@@ -5131,8 +5972,8 @@ def tileset_atlas(
     xml_path = _validate_path(xml, ".xml")
     needed_pairs: Optional[set[tuple[int, int]]] = None
     if session_id is not None:
-        sess = _session_store.get(session_id)
-        needed_pairs = _collect_used_pairs(sess.parsed)
+        with _session_store.borrow(session_id) as sess:
+            needed_pairs = _collect_used_pairs(sess.parsed)
     png_bytes, manifest, _cache_dir = _build_atlas(
         xml_path, tileset, needed_pairs=needed_pairs,
     )
@@ -5322,7 +6163,7 @@ def _parse_jsd_bytes(data: bytes, jsd_path: Path, sti_filename: str) -> JsdParse
     # there get interpreted as sPos/bX/bY, producing nonsense footprint
     # offsets like (+97, +1). That nonsense propagated all the way to
     # stamp paint, which then dropped a struct entry 100+ tiles away
-    # from the click point. Verified 2026-05-23 by hex-decoding
+    # from the click point. Verified by hex-decoding
     # mdrock.jsd: real footprint is the expected 2×2 rock pattern.
     #
     # We only surface the FIRST DB_STRUCTURE's tiles (the primary
@@ -5486,6 +6327,26 @@ class JsdEditResult(BaseModel):
 
 @router.put("/sti/jsd", response_model=JsdEditResult)
 def update_sti_jsd(body: JsdEditBody):
+    """Patch a loose JSD inside the captured active install transaction."""
+    state = get_state()
+    captured = state.active()
+    if captured is None:
+        raise HTTPException(409, {
+            "error": "NO_ACTIVE_INSTALL",
+            "message": "Select an install before editing a JSD.",
+        })
+    install_root = Path(captured.path).resolve()
+    with cross_process_install_lock(install_root), state.write_lock:
+        current = state.active()
+        if current is None or current.id != captured.id:
+            raise HTTPException(409, {
+                "error": "ACTIVE_INSTALL_CHANGED",
+                "message": "The active install changed while writing the JSD.",
+            })
+        return _update_sti_jsd_locked(body, install_root)
+
+
+def _update_sti_jsd_locked(body: JsdEditBody, install_root: Path):
     """Write patched JSD bytes back to disk.
 
     Strategy: read original bytes, apply only the requested spans
@@ -5504,7 +6365,9 @@ def update_sti_jsd(body: JsdEditBody):
     """
     import struct as _struct
     _require_renderer()
-    xml_path = _validate_path(body.xml, ".xml")
+    xml_path = _confine_path_to_root(
+        body.xml, install_root, ".xml", require_file=True,
+    )
     slot_map = load_tileset_xml(xml_path, body.tileset)
     name = slot_map.get(body.slot)
     if not name:
@@ -5529,12 +6392,17 @@ def update_sti_jsd(body: JsdEditBody):
                 "already on disk."
             ),
         })
-    jsd_path = Path(source)
-    if not jsd_path.is_file():
-        raise HTTPException(404, {
-            "error": "JSD_PATH_GONE",
-            "message": f"resolved JSD path {jsd_path} is not a file",
-        })
+    try:
+        jsd_path = _confine_path_to_root(
+            source, install_root, ".jsd", require_file=True,
+        )
+    except HTTPException as e:
+        if e.status_code == 404:
+            raise HTTPException(404, {
+                "error": "JSD_PATH_GONE",
+                "message": f"resolved JSD path {source} is not a file",
+            })
+        raise
 
     # Parse first so we know ubNumberOfTiles + can sanity-check tile
     # indices in the edit body. Re-uses the existing parser.
@@ -5662,12 +6530,12 @@ def update_sti_jsd(body: JsdEditBody):
     # makes the renderer dereference past the buffer), so silently
     # proceeding with `backup_path: null + ok: true` per the pre-fix
     # behavior was actively dangerous. Mirrors the inject-sub flow's
-    # 500 BACKUP_FAILED pattern at mapforge.py:2456. TODO #7 fix.
+    # 500 BACKUP_FAILED pattern at mapforge.py:2456.
     backup_path: Optional[Path] = jsd_path.with_suffix(jsd_path.suffix + ".bak")
     backup_emitted: Optional[str] = None
     if backup_path is not None and not backup_path.exists():
         try:
-            backup_path.write_bytes(data)  # original bytes, pre-patch
+            write_bytes_atomic(backup_path, data)  # original bytes, pre-patch
             backup_emitted = str(backup_path)
         except OSError as e:
             raise HTTPException(500, {
@@ -5683,18 +6551,57 @@ def update_sti_jsd(body: JsdEditBody):
 
     new_bytes = bytes(buf)
     try:
-        jsd_path.write_bytes(new_bytes)
+        # Reject an internally malformed candidate before it can replace the
+        # live JSD. This is independent of the disk read-back below.
+        _parse_jsd_bytes(new_bytes, jsd_path, name)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, {
+            "error": "JSD_SERIALIZE_INVALID",
+            "message": f"refusing invalid patched JSD bytes: {type(e).__name__}: {e}",
+        })
+    try:
+        # Atomic write (same rationale as every other game-file writer: a
+        # kill mid-write leaves a JSD the engine CTDs on). Shared helper
+        # adds fsync + tmp-cleanup-on-error.
+        write_bytes_atomic(jsd_path, new_bytes)
     except OSError as e:
         raise HTTPException(500, {
             "error": "JSD_WRITE_FAILED",
             "message": f"could not write {jsd_path}: {e}",
         })
 
-    parsed_after = _parse_jsd_bytes(new_bytes, jsd_path, name)
+    verify_error: str | None = None
+    disk_bytes: bytes | None = None
+    try:
+        disk_bytes = jsd_path.read_bytes()
+        if disk_bytes != new_bytes:
+            verify_error = "installed bytes differ from the atomic-write payload"
+        else:
+            parsed_after = _parse_jsd_bytes(disk_bytes, jsd_path, name)
+    except Exception as e:  # noqa: BLE001
+        verify_error = f"{type(e).__name__}: {e}"
+    if verify_error is not None:
+        restore_error: str | None = None
+        try:
+            write_bytes_atomic(jsd_path, data)
+        except OSError as e:
+            restore_error = f"; restore also failed: {e}"
+        raise HTTPException(500, {
+            "error": "JSD_WRITE_UNVERIFIED",
+            "message": (
+                f"JSD disk read-back failed ({verify_error}); the pre-edit "
+                f"bytes were restored{restore_error or ''}."
+            ),
+        })
+
+    # Bust the atlas cache only after the installed bytes have been read back
+    # and parsed successfully.
+    bust_atlas_cache(body.tileset)
+
     return JsdEditResult(
         sti_filename=name,
         jsd_path=str(jsd_path),
-        bytes_written=len(new_bytes),
+        bytes_written=len(disk_bytes),
         backup_path=backup_emitted,
         parsed=parsed_after,
     )
@@ -5724,8 +6631,8 @@ def tileset_atlas_manifest(
     xml_path = _validate_path(xml, ".xml")
     needed_pairs: Optional[set[tuple[int, int]]] = None
     if session_id is not None:
-        sess = _session_store.get(session_id)
-        needed_pairs = _collect_used_pairs(sess.parsed)
+        with _session_store.borrow(session_id) as sess:
+            needed_pairs = _collect_used_pairs(sess.parsed)
     _png_bytes, manifest, _cache_dir = _build_atlas(
         xml_path, tileset, needed_pairs=needed_pairs,
     )
@@ -5774,8 +6681,8 @@ def tileset_atlas_build(
     xml_path = _validate_path(xml, ".xml")
     needed_pairs: Optional[set[tuple[int, int]]] = None
     if session_id is not None:
-        sess = _session_store.get(session_id)
-        needed_pairs = _collect_used_pairs(sess.parsed)
+        with _session_store.borrow(session_id) as sess:
+            needed_pairs = _collect_used_pairs(sess.parsed)
     import json
     import queue
     import threading
@@ -5831,7 +6738,7 @@ def tileset_atlas_build(
                               headers={"Cache-Control": "no-store"})
 
 
-# ─── Session parsed-dict export (Phase 3 client-side renderer) ─────────
+# ─── Session parsed-dict export (client-side renderer) ─────────────────
 # The client-side iso renderer needs the full parsed dict in JSON form
 # so it can iterate per-tile layer arrays in the browser. We serialize a
 # minimal subset — only the fields the renderer (and the existing tile
@@ -5951,14 +6858,99 @@ def _serialize_layer(layer: list[list[tuple[int, int]]]) -> list[list[list[int]]
 
 
 @router.get("/sessions/{session_id}/appendix", response_model=AppendixEntities)
+@_borrow_session_endpoint
 def session_appendix(session_id: str):
     """Read-only positioned appendix entities (items / entry points / exit
     grids / lights) for the tactical overlay. Extracted from the on-disk bytes;
     never written. Later sections (soldiers, doors, edgepoints) report via
     `blocked_at` until their parsers land."""
-    sess = _session_store.get(session_id)
+    sess = _session_store.borrowed(session_id)
     ents = extract_appendix_entities(sess.original_bytes, sess.parsed)
     return AppendixEntities(session_id=sess.id, **ents)
+
+
+class AppendixModelBody(BaseModel):
+    """Synthetic-appendix authoring model — the input `build_appendix`
+    (appendix_writer.py) expects. Every field optional; a bare body
+    authors just the 32-byte MapInfo tail (all entry points NOWHERE,
+    0 soldiers). See appendix_writer.build_appendix for the byte layout.
+
+      tail:  MAPCREATE_STRUCT overrides — north/east/south/west/center/
+             isolated (edge-entry gridnos, -1 = NOWHERE), num_individuals,
+             map_version, restricted_scroll_id, smoothing_type. Missing keys
+             fall back to the parsed tail, then to defaults.
+      exit_grids: [{map_index, grid_no, sx, sy, sz}, ...] (sets EXITGRIDS flag)
+      ambient: {basement, caves, level} (sets AMBIENTLIGHTLEVEL flag) | null
+    """
+    tail: dict[str, int] = Field(default_factory=dict)
+    exit_grids: list[dict[str, int]] = Field(default_factory=list)
+    ambient: Optional[dict[str, int]] = None
+
+
+@router.post("/sessions/{session_id}/appendix-model")
+@_borrow_session_endpoint
+def set_appendix_model(session_id: str, body: AppendixModelBody):
+    """Author/replace the session's synthetic appendix model. Stored on the
+    parsed dict; on save (`/save`, `/save-copy-as`) dat_writer re-serializes
+    the appendix from it via build_appendix — letting a caller DROP inherited
+    soldiers, place edge entry points, add exit grids / ambient light on a map
+    whose original appendix rode along. This is the only appendix WRITE path
+    (GET /appendix is read-only). Refused on read-only (SLF) sessions."""
+    sess = _session_store.borrowed(session_id)
+    if sess.read_only:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "SESSION_READ_ONLY",
+                    "message": ("Cannot author an appendix on a read-only "
+                                "session (SLF-bundled source). Extract the "
+                                "sector to a loose copy first.")},
+        )
+    # exclude_none so a null `ambient` doesn't set the AMBIENTLIGHTLEVEL flag.
+    model = body.model_dump(exclude_none=True)
+    allowed_tail = {"north", "east", "south", "west", "center", "isolated",
+                    "num_individuals", "map_version", "restricted_scroll_id",
+                    "smoothing_type"}
+    allowed_ambient = {"basement", "caves", "level"}
+    allowed_exit = {"map_index", "grid_no", "sx", "sy", "sz"}
+    def reject_unknown(section: str, values: dict, allowed: set[str]) -> None:
+        unknown = sorted(set(values) - allowed)
+        if unknown:
+            raise HTTPException(422, {"error": "APPENDIX_MODEL_INVALID",
+                "message": f"Unknown {section} field(s): {', '.join(unknown)}"})
+    reject_unknown("tail", model.get("tail", {}), allowed_tail)
+    if model.get("ambient") is not None:
+        reject_unknown("ambient", model["ambient"], allowed_ambient)
+    for index, grid in enumerate(model.get("exit_grids", [])):
+        reject_unknown(f"exit_grids[{index}]", grid, allowed_exit)
+        missing = sorted(allowed_exit - set(grid))
+        if missing:
+            raise HTTPException(422, {"error": "APPENDIX_MODEL_INVALID",
+                "message": f"exit_grids[{index}] missing required field(s): {', '.join(missing)}"})
+    map_version = model.get("tail", {}).get("map_version")
+    if map_version is not None and not 15 <= map_version <= 255:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "MAP_VERSION_OUT_OF_RANGE",
+                    "message": "map_version must be from 15 through 255."},
+        )
+    with sess._lock:
+        # Validate the exact bytes the writer would emit BEFORE publishing a
+        # mutation.  _world_max is an internal writer input so every gridno is
+        # checked against this map's actual dimensions, not a 160x160 default.
+        candidate = dict(model)
+        candidate["_world_max"] = sess.parsed["rows"] * sess.parsed["cols"]
+        try:
+            from mercwizard_core.mapforge_engine.appendix_writer import build_appendix
+            build_appendix(candidate, sess.parsed.get("tail"), sess.parsed["major"])
+        except ValueError as e:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "APPENDIX_MODEL_INVALID", "message": str(e)},
+            )
+        sess.parsed["appendix_model"] = candidate
+        sess.dirty = True
+        sess.mutation_seq += 1
+    return {"session_id": sess.id, "appendix_model": model}
 
 
 # Install-scoped (not session-scoped): usItem is a global asset lookup.
@@ -5994,6 +6986,7 @@ def soldier_sprite(bodytype: int = Query(...), dir: int = Query(0, ge=0, le=7)):
 
 
 @router.get("/sessions/{session_id}/parsed", response_model=ParsedSector)
+@_borrow_session_endpoint
 def session_parsed(session_id: str):
     """Full parsed sector data for the client-side renderer.
 
@@ -6005,7 +6998,7 @@ def session_parsed(session_id: str):
     depending on building density. Single large response is faster than
     streaming + simpler to reason about."""
     _require_renderer()
-    sess = _session_store.get(session_id)
+    sess = _session_store.borrowed(session_id)
     p = sess.parsed
     return ParsedSector(
         session_id=sess.id,

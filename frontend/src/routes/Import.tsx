@@ -85,7 +85,7 @@ export default function Import() {
     mutationFn: () => importBundle(bundlePath!, targetSlot ?? undefined, force),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["roster"] });
-      // Slot picker — bug-review finding E4.
+      // Slot picker.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
       // Destination slot detail + voice when an explicit target was picked,
       // so an open view of that slot refreshes post-import (matches Move).
@@ -279,7 +279,7 @@ export default function Import() {
             )}
 
             {importMut.isSuccess && (() => {
-              // Bug-review #93: when partial_failures is non-empty, the
+              // When partial_failures is non-empty, the
               // import wrote SOME but not ALL the bundle's files (usually
               // one or two voice clips locked by another process,
               // npc_speech audio, or mod-extra XML rows). Pre-fix the

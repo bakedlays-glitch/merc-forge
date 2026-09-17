@@ -59,7 +59,7 @@ Before destructive tests on **Test install**, take a manual backup:
 | A-Boot-1 | Cold launch | Kill all instances, run `mercwizard.exe` | Window opens within 5s; no error dialogs | |
 | A-Boot-2 | Sidecar spawned | Open Task Manager during launch | `mercwizard_core.exe` running as child of `mercwizard.exe` | |
 | A-Boot-3 | Settings → About is fresh | Check the build timestamp shown | Matches your last build (< 30 min old in a dev session) | |
-| A-Boot-4 | Sidecar version shown | Settings → About | "Sidecar version: 2.0.0" appears | |
+| A-Boot-4 | Sidecar version shown | Settings → About | "Sidecar version: 1.0.0-beta.4" appears | |
 | A-Boot-5 | Watchdog respawns sidecar | Task Manager → kill `mercwizard_core.exe` | Sidecar respawns within ~4s; app stays usable | |
 | A-Boot-6 | Repeated kill backs off | Kill sidecar 5x in a row | Respawn delay increases (4→8→16→32→60s cap) | |
 

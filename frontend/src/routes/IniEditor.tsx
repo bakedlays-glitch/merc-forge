@@ -1,7 +1,7 @@
 /**
- * INI Editor — schema-driven engine-config editing (MercForge UI Phase 2).
+ * INI Editor — schema-driven engine-config editing.
  *
- * Two modes, one route (labels chosen by Will 2026-06-07 — name the thing
+ * Two modes, one route (the labels name the thing
  * being written, not the intent):
  *  - OVERRIDE mode (default, session-only): writes `<stem>.Override` next
  *    to the saves (engine write profile); the game reads it on top of the
@@ -9,7 +9,7 @@
  *  - EDIT INI mode (per-session opt-in, amber-tinted route, first-write
  *    confirm): edits the mod's actual INI files in Data-1.13 in place.
  *
- * Design rules from the 2026-06-07 adversarial review:
+ * Design rules:
  *  - cross-file search is the primary navigation (all 2,141 keys)
  *  - dense rows with exactly ONE scan signal (the changed-dot)
  *  - tiered apply weight: silent commit / inline advisory / destructive
@@ -219,7 +219,7 @@ export default function IniEditor() {
     // Rank: key-name hit (2) > section-name hit (1) > description hit (0).
     // Section matching matters: e.g. Skills_Settings.INI's [Ranger]
     // section's keys never say "ranger" — without it the trait sections
-    // are unfindable (Gate-3 finding).
+    // are unfindable.
     const out: Array<{ file: string; section: string; prop: IniProperty; nameHit: boolean; sectHit: boolean; rank: number }> = [];
     for (const [fname, doc] of docs) {
       for (const sect of doc.sections) {

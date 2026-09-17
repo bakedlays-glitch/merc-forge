@@ -59,6 +59,52 @@ def test_record_round_trip() -> None:
     assert decoded_addl == addl
 
 
+def test_edt_safe_maps_typographic_characters_to_ascii() -> None:
+    from mercwizard_core.edt_text import edt_safe
+
+    assert edt_safe("bar fights — which he settles") == "bar fights - which he settles"
+    assert edt_safe("“quoted” and wait…") == '"quoted" and wait...'
+
+
+def test_edt_safe_preserves_renderable_latin1() -> None:
+    from mercwizard_core.edt_text import edt_safe
+
+    assert edt_safe("Raúl café Ñ ü") == "Raúl café Ñ ü"
+
+
+def test_edt_safe_folds_compatible_text_and_marks_unmapped_text() -> None:
+    from mercwizard_core.edt_text import edt_safe, unrenderable
+
+    assert edt_safe("Ａ中") == "A?"
+    assert unrenderable(edt_safe("Ａ中")) == []
+
+
+def test_edt_safe_is_idempotent_and_none_safe() -> None:
+    from mercwizard_core.edt_text import edt_safe
+
+    assert edt_safe(edt_safe("a — b")) == "a - b"
+    assert edt_safe(None) is None
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("bar fights — which he settles", "bar fights - which he settles"),
+        ("“quoted” and wait…", '"quoted" and wait...'),
+        ("Raúl café Ñ ü", "Raúl café Ñ ü"),
+        ("Ａ中", "A?"),
+    ],
+)
+def test_encode_field_round_trip_uses_edt_safe_text(source: str, expected: str) -> None:
+    encoded = edt.encode_field(source, edt.BIO_FIELD_SIZE, edt.BIO_CHAR_MAX)
+    assert edt.decode_field(encoded) == expected
+
+
+def test_encode_field_normalizes_before_truncation() -> None:
+    encoded = edt.encode_field("x" * 399 + "…", edt.BIO_FIELD_SIZE, edt.BIO_CHAR_MAX)
+    assert edt.decode_field(encoded) == "x" * 399 + "."
+
+
 # ──────────────────────────────────────────────────────────────────────────
 #  Routing tests — the bug fix at the core of this rewrite
 # ──────────────────────────────────────────────────────────────────────────
@@ -156,7 +202,7 @@ def test_expanded_aim_without_aim_bio_id_raises_on_write(fake_install: Path) -> 
 def test_expanded_aim_without_aim_bio_id_degrades_for_read(fake_install: Path) -> None:
     """Reads fall back to per-file NPC EDT when both bio_ids are None.
 
-    Bug-review finding C3: relocator.move_within_install / duplicate
+    relocator.move_within_install / duplicate
     call read_bio (for_write=False default) on expansion-AIM slots
     without try/except. Pre-fix this raised hard and broke Move /
     Duplicate on minimal installs without the AIM binding wired.

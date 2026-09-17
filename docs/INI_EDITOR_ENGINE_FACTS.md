@@ -3,7 +3,7 @@
 Ground-truth reference for the MercForge INI editor (Phase 1, 2026-06-07).
 Every claim cites `file:line` into `Visual Studio Root\` (The Wasteland's
 custom engine source) or the live install
-(`C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy\`).
+(the root of a JA2 1.13 install).
 **This document gates write strategy in `mercwizard_core/ini_editor.py` —
 do not change write behavior without updating this doc, and vice versa.**
 

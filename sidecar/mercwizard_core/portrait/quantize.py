@@ -50,7 +50,7 @@ class PortraitPaletteTooFewColors(ValueError):
     Route handlers should map this to a 400 with the message preserved
     — the user can re-export their source PNG with anti-aliasing or
     add color variation. Mapping AssertionError to a friendlier
-    exception was bug-review finding C6.
+    exception keeps that path friendly.
     """
 
 
@@ -77,18 +77,7 @@ def quantize_with_anchor(rgba_img: Image.Image) -> Image.Image:
       - Transparent input pixels (alpha == 0) → palette index 0
       - Opaque input pixels → palette indices 1-255
 
-    Algorithm:
-
-    1. Compute binary alpha mask (any non-zero alpha is opaque).
-    2. Composite transparent pixels over (0,0,0) black so the quantizer doesn't
-       try to allocate palette slots for whatever was under the alpha mask
-       in the source PNG.
-    3. Quantize to **255 colors** (not 256) using MAXCOVERAGE.
-    4. Shift every pixel's palette index up by 1, and shift the palette entries
-       up too. Now indices 1..255 hold the 255 quantized colors; index 0 is
-       free.
-    5. Write (0,0,0) at palette[0].
-    6. Force every alpha-mask-transparent input pixel to palette index 0.
+    The six numbered steps are marked inline in the body.
 
     Because step 4 moves all opaque pixel indices into [1, 255] BEFORE we
     introduce the transparent reservation at index 0, there is no path for
@@ -122,22 +111,14 @@ def quantize_with_anchor(rgba_img: Image.Image) -> Image.Image:
     #    - Palette: insert a (0,0,0) entry at position 0, push the other 255
     #      entries up. Resulting palette has 256 entries, indices 0..255.
     pal = list(p_img.getpalette())  # 255 colors × 3 = 765 bytes
-    # Bug-review #100: assert the palette is at least the size we requested
-    # before slicing. PIL returns 768 bytes (256 colors × 3) when padded,
-    # 765 bytes (255 × 3) when not — both fine. But a quantizer that emitted
-    # fewer colors than asked (zero-pixel input, totally-transparent frame
-    # passing through here by mistake) would slice shorter than expected and
-    # the resulting palette would be malformed without an error trace. The
-    # safety net is cheap; the corner-case is hard to debug without it.
+    # PIL returns 768 bytes when it pads and 765 when it doesn't — both fine.
+    # Fewer means the quantizer emitted fewer colors than asked (a near-
+    # monochrome or fully transparent frame), which would slice into a
+    # malformed palette with no error trace.
     if len(pal) < 255 * 3:
-        # Surface a stable, catchable exception rather than AssertionError
-        # — sti.py and the portrait/animation pipelines don't catch
-        # AssertionError, so a near-monochrome animation frame (e.g. a
-        # hand-painted blink with ~20 distinct colors, well under 255)
-        # propagated up as an uncaught 500 with no recovery path.
-        # PortraitPaletteTooFewColors keeps the same diagnostic message
-        # but lets route handlers map it to a friendly 400. Bug-review
-        # finding C6.
+        # A typed exception, not AssertionError: nothing downstream catches
+        # AssertionError, so this surfaced as an uncaught 500 with no recovery
+        # path. Route handlers map this one to a 400.
         raise PortraitPaletteTooFewColors(
             f"PIL quantizer returned only {len(pal) // 3} palette colors "
             f"when 255 were requested — input image may have been empty / "
@@ -149,7 +130,6 @@ def quantize_with_anchor(rgba_img: Image.Image) -> Image.Image:
         # exactly the 255 quantized colors before shifting up.
         pal = pal[:255 * 3]
     new_pal = [0, 0, 0] + pal  # palette[0] = (0,0,0); quantized colors at 1..255
-    # Pad to 256 entries if needed
     while len(new_pal) < 256 * 3:
         new_pal.append(0)
 
@@ -199,7 +179,6 @@ def quantize_against_palette(rgba_img: Image.Image, reference_p: Image.Image) ->
     black_bg = Image.new("RGB", rgba_img.size, (0, 0, 0))
     composited = Image.composite(rgb, black_bg, a_bin)
 
-    # Quantize against the reference's palette
     p_img = composited.quantize(palette=reference_p, dither=Image.Dither.NONE)
 
     # Defensive remap: any opaque pixel that PIL mapped to index 0 must go
@@ -254,11 +233,9 @@ def _remap_opaque_index_0_to_nearest_nonzero(
     remap_ref = Image.new("P", (1, 1))
     remap_ref.putpalette(bytes(remap_pal), rawmode="RGB")
 
-    # Re-quantize the composited image against the remap palette. We need
-    # the same composited RGB the caller produced, but it's not retained;
-    # the cheapest path is to reconstruct via the alpha mask and palette
-    # lookup. Simpler: convert p_img back to RGB via its current palette,
-    # then quantize against remap_ref.
+    # The caller's composited RGB isn't retained, so reconstruct it by
+    # converting p_img back through its current palette, then quantize that
+    # against the remap palette.
     rgb_via_current = p_img.convert("RGB")
     remapped = rgb_via_current.quantize(palette=remap_ref, dither=Image.Dither.NONE)
     remapped_pixels = list(remapped.getdata())

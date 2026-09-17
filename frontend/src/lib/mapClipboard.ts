@@ -1,5 +1,5 @@
 /**
- * Pure region copy/paste transforms for MapForge (A5, Phase 3).
+ * Pure region copy/paste transforms for MapForge.
  *
  * No I/O, no React, no runtime imports — only TYPE imports from ./mapforge —
  * so this module transpiles + runs standalone for assertion tests (there is
@@ -144,8 +144,8 @@ export function stripBuddyShadows(
   };
 }
 
-/** Cross-tileset slot remap (for the DEFERRED cross-tileset paste path —
- * revisit after Phase 5). `mapSlot(layer, slot, sub)` returns the target
+/** Cross-tileset slot remap, for the DEFERRED cross-tileset paste path.
+ * `mapSlot(layer, slot, sub)` returns the target
  * tileset's [slot, sub] or null when no match exists. Unmappable entries are
  * dropped and reported. WARNING before wiring: per-entry silent drop is unsafe
  * for MULTI-TILE structures (dropping one footprint tile leaves a broken half)

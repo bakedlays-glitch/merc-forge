@@ -30,8 +30,8 @@ rather than queried from the graph.
 Family keys are the EXISTING palette categories (``PALETTE_CATEGORY_ORDER``
 in ``routes/mapforge.py`` + ``CATEGORY_TO_LAYER`` in ``MapForgePalette.tsx``)
 plus one new ``"shadow"`` key, so the frontend needs no new label/layer
-wiring beyond adding ``shadow``. The struct split follows Will's call
-(2026-06-13): outdoor O/FULL-structs → vegetation, interior I-structs →
+wiring beyond adding ``shadow``. The struct split is deliberate:
+outdoor O/FULL-structs → vegetation, interior I-structs →
 furniture, loose debris/decals/blood → scatter.
 """
 from __future__ import annotations

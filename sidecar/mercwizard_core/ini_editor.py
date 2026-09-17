@@ -74,7 +74,7 @@ HANDS_OFF = {
 }
 
 # Key/value sanitization: keys are engine identifiers; values must not
-# break the line model. (INI injection guard — review finding D7.)
+# break the line model. (INI injection guard.)
 _VALID_KEY = re.compile(r"^[A-Za-z0-9_.\-]+$")
 _VALID_SECTION = re.compile(r"^[^\[\]\r\n;#]+$")
 
@@ -202,6 +202,28 @@ class IniChange:
             raise IniEditorError("BAD_KEY", f"Invalid key name: {self.key!r}")
         if self.value is not None and re.search(r"[\r\n]", self.value):
             raise IniEditorError("BAD_VALUE", "Value must not contain newlines")
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """tmp + os.replace in the same dir — a crash mid-write can't leave a
+    half-INI in the engine's write profile. The XML/EDT writers got this
+    treatment in `inject/_atomic_xml.py`; this writer (including its own
+    restore-on-mismatch path) had been left behind."""
+    import os
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{path.stem}.", suffix=".ini.tmp", dir=str(path.parent))
+    try:
+        os.close(fd)
+        Path(tmp).write_bytes(data)
+        os.replace(tmp, str(path))
+    except Exception:
+        try:
+            Path(tmp).unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def surgical_upsert(path: Path, changes: list[IniChange],
@@ -348,7 +370,7 @@ def surgical_upsert(path: Path, changes: list[IniChange],
 
     if _norm(post_map) != _norm(expected):
         if existed:
-            path.write_bytes(pre_raw)   # restore pre-image
+            _atomic_write_bytes(path, pre_raw)   # restore pre-image
         else:
             path.unlink(missing_ok=True)
         raise IniWriteError(
@@ -357,14 +379,13 @@ def surgical_upsert(path: Path, changes: list[IniChange],
             "result; file restored to its pre-write state.",
         )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_encode(new_text, bom))
+    _atomic_write_bytes(path, _encode(new_text, bom))
 
     # belt-and-braces: re-read from disk and re-verify
     post_disk = parse_ini_map(_decode(path.read_bytes())[0])
     if _norm(post_disk) != _norm(expected):
         if existed:
-            path.write_bytes(pre_raw)
+            _atomic_write_bytes(path, pre_raw)
         else:
             path.unlink(missing_ok=True)
         raise IniWriteError(

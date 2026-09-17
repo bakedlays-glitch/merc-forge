@@ -18,6 +18,15 @@ import { useSlotPicker } from "./slotPicker";
 
 export type SlotLockTier = "safe" | "vanilla_overwrite" | "quest_bound" | "locked";
 
+/** Every tier, for anything that has to act on all of them — the Settings
+ * page's "show dismissed warnings again", for one. */
+export const SLOT_LOCK_TIERS: readonly SlotLockTier[] = [
+  "safe",
+  "vanilla_overwrite",
+  "quest_bound",
+  "locked",
+];
+
 export interface SlotLockInfo {
   slot: number;
   tier: SlotLockTier;
@@ -96,8 +105,13 @@ export function useSlotLockGuard() {
     { lock: SlotLockInfo; callback: () => void } | null
   >(null);
 
-  const guard = (slot: number, callback: () => void): void => {
-    const info = picker.data?.slots[slot];
+  const decide = (
+    slot: number,
+    callback: () => void,
+    slots: Record<number, { tier: string; engine_name: string | null;
+                            engine_role: string | null }> | undefined,
+  ): void => {
+    const info = slots?.[slot];
     const tier = (info?.tier ?? "safe") as SlotLockTier;
     if (!info || tier === "safe" || isLockSuppressed(tier)) {
       callback();
@@ -112,6 +126,34 @@ export function useSlotLockGuard() {
       },
       callback,
     });
+  };
+
+  const guard = (slot: number, callback: () => void): void => {
+    // Fail CLOSED while the picker query is still loading. The old
+    // `!info → callback()` path ran destructive writes with zero
+    // warning when the user deep-linked in and clicked before
+    // /slots/picker resolved (cold cache, slow sidecar). Fetch first,
+    // then decide; if the fetch itself fails, show the warning modal
+    // with a caution tier rather than silently proceeding or silently
+    // doing nothing.
+    if (picker.data === undefined) {
+      void picker
+        .refetch()
+        .then((r) => decide(slot, callback, r.data?.slots))
+        .catch(() => {
+          setPending({
+            lock: {
+              slot,
+              tier: "quest_bound",
+              name: null,
+              role: "slot safety data unavailable — proceed with care",
+            },
+            callback,
+          });
+        });
+      return;
+    }
+    decide(slot, callback, picker.data.slots);
   };
 
   const confirm = () => {

@@ -5,8 +5,8 @@ verbatim. This module SYNTHESIZES the appendix so MapForge can AUTHOR
 exit grids, ambient lighting, and edge entry points on a map that had
 none (e.g. a flags=0 sector like A9/Junktown).
 
-Byte layout source-verified against the engine (engine-navigator crawl,
-2026-06-14) — NOT paraphrased; a wrong byte crashes the map on load:
+Byte layout source-verified against the engine
+— NOT paraphrased; a wrong byte crashes the map on load:
 
   Flag bits (worlddef.cpp:60-68):
     FULLSOLDIER=0x01 WORLDLIGHTS=0x04 WORLDITEMS=0x08 EXITGRIDS=0x10
@@ -58,10 +58,51 @@ _EXITGRID_FMT = "<iiBBBx"      # 12 bytes
 assert struct.calcsize(_TAIL_FMT) == 32
 assert struct.calcsize(_EXITGRID_FMT) == 12
 
+_DEFAULT_WORLD_MAX = 160 * 160
+_MAX_EXIT_GRIDS = 0xFFFF
+_MAX_INDIVIDUALS = 1284
+
+
+def _require_int(name: str, value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    return value
+
+
+def _require_uint8(name: str, value: Any) -> int:
+    value = _require_int(name, value)
+    if not 0 <= value <= 0xFF:
+        raise ValueError(f"{name} must be from 0 through 255")
+    return value
+
+
+def _require_gridno(name: str, value: Any, world_max: int,
+                    *, allow_nowhere: bool = True) -> int:
+    value = _require_int(name, value)
+    if (value == NOWHERE and allow_nowhere):
+        return value
+    if not 0 <= value < world_max:
+        raise ValueError(
+            f"{name} must be from 0 through {world_max - 1}"
+            + (" or -1 (NOWHERE)" if allow_nowhere else ""))
+    return value
+
+
+def _require_world_max(world_max: Any) -> int:
+    world_max = _require_int("world_max", world_max)
+    if world_max <= 0:
+        raise ValueError("world_max must be positive")
+    return world_max
+
 
 def pack_ambient(basement: int, caves: int, level: int) -> bytes:
     """3-byte ambient section (worlddef.cpp:2261-2266)."""
-    return struct.pack("<BBB", basement & 0xFF, caves & 0xFF, level & 0xFF)
+    return struct.pack(
+        "<BBB",
+        _require_uint8("ambient.basement", basement),
+        _require_uint8("ambient.caves", caves),
+        _require_uint8("ambient.level", level),
+    )
 
 
 def pack_map_tail(
@@ -69,25 +110,61 @@ def pack_map_tail(
     west: int = NOWHERE, center: int = NOWHERE, isolated: int = NOWHERE,
     num_individuals: int = 0, map_version: int = 31,
     restricted_scroll_id: int = 0, smoothing_type: int = 0,
+    *, world_max: int = _DEFAULT_WORLD_MAX,
 ) -> bytes:
     """32-byte MAPCREATE_STRUCT (modern major>=7.0). map_version must be the
     file's minor version (>=15, and >=17 to avoid the legacy edgepoint path)."""
+    world_max = _require_world_max(world_max)
+    north = _require_gridno("tail.north", north, world_max)
+    east = _require_gridno("tail.east", east, world_max)
+    south = _require_gridno("tail.south", south, world_max)
+    west = _require_gridno("tail.west", west, world_max)
+    center = _require_gridno("tail.center", center, world_max)
+    isolated = _require_gridno("tail.isolated", isolated, world_max)
+    num_individuals = _require_int("tail.num_individuals", num_individuals)
+    if not 0 <= num_individuals <= _MAX_INDIVIDUALS:
+        raise ValueError("tail.num_individuals must be from 0 through 1284")
+    map_version = _require_int("tail.map_version", map_version)
+    if not 15 <= map_version <= 255:
+        raise ValueError("map_version must be from 15 through 255")
+    restricted_scroll_id = _require_int(
+        "tail.restricted_scroll_id", restricted_scroll_id)
+    if restricted_scroll_id not in (0, 1):
+        raise ValueError("tail.restricted_scroll_id must be 0 or 1")
+    smoothing_type = _require_int("tail.smoothing_type", smoothing_type)
+    if smoothing_type not in (0, 1, 2):
+        raise ValueError("tail.smoothing_type must be 0, 1, or 2")
     return struct.pack(
         _TAIL_FMT, north, east, south, west, center, isolated,
-        num_individuals & 0xFFFF, map_version & 0xFF,
-        restricted_scroll_id & 0xFF, smoothing_type & 0xFF,
+        num_individuals, map_version, restricted_scroll_id, smoothing_type,
     )
 
 
-def pack_exit_grids(grids: List[Dict[str, int]]) -> bytes:
+def pack_exit_grids(grids: List[Dict[str, int]], *,
+                    world_max: int = _DEFAULT_WORLD_MAX) -> bytes:
     """UINT16 count + 12 bytes per exit grid.
     Each grid dict: map_index, grid_no, sx, sy, sz."""
-    out = bytearray(struct.pack("<H", len(grids) & 0xFFFF))
+    world_max = _require_world_max(world_max)
+    if len(grids) > _MAX_EXIT_GRIDS:
+        raise ValueError("exit_grids may contain at most 65535 records")
+    out = bytearray(struct.pack("<H", len(grids)))
     for g in grids:
+        map_index = _require_gridno("exit_grid.map_index", g["map_index"], world_max,
+                                    allow_nowhere=False)
+        grid_no = _require_gridno("exit_grid.grid_no", g["grid_no"], world_max,
+                                  allow_nowhere=False)
+        sx = _require_int("exit_grid.sx", g["sx"])
+        sy = _require_int("exit_grid.sy", g["sy"])
+        sz = _require_int("exit_grid.sz", g["sz"])
+        if not 1 <= sx <= 16:
+            raise ValueError("exit_grid.sx must be from 1 through 16")
+        if not 1 <= sy <= 16:
+            raise ValueError("exit_grid.sy must be from 1 through 16")
+        if not 0 <= sz <= 3:
+            raise ValueError("exit_grid.sz must be from 0 through 3")
         out += struct.pack(
             _EXITGRID_FMT,
-            int(g["map_index"]), int(g["grid_no"]),
-            int(g["sx"]) & 0xFF, int(g["sy"]) & 0xFF, int(g["sz"]) & 0xFF,
+            map_index, grid_no, sx, sy, sz,
         )
     return bytes(out)
 
@@ -111,6 +188,7 @@ def build_appendix(
     """
     if major < 7.0:
         raise ValueError("build_appendix emits the modern (major>=7.0) format only")
+    world_max = _require_world_max(model.get("_world_max", _DEFAULT_WORLD_MAX))
     flags = 0
     out = bytearray()
 
@@ -145,12 +223,13 @@ def build_appendix(
         map_version=pick("map_version", 31),
         restricted_scroll_id=pick("restricted_scroll_id", 0),
         smoothing_type=pick("smoothing_type", 0),
+        world_max=world_max,
     )
 
     # 6. exit grids (after the tail)
     grids = model.get("exit_grids") or []
     if grids:
-        out += pack_exit_grids(grids)
+        out += pack_exit_grids(grids, world_max=world_max)
         flags |= MAP_EXITGRIDS_SAVED
 
     return bytes(out), flags

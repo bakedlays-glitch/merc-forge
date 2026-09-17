@@ -5,11 +5,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUnsavedGuard } from "../lib/useUnsavedGuard";
 
 import {
+  ApiError,
   compilePortrait,
   createMerc,
   extendFaceGear,
   getFaceGearCapacity,
+  getBodyTypes,
+  getHealth,
+  getSlot,
   listGearPresets,
+  saveRpcPortrait,
+  uploadVoiceClips,
 } from "../lib/api";
 import AnimationFrameStrip from "../components/AnimationFrameStrip";
 import AppearancePaletteForm from "../components/forms/AppearancePaletteForm";
@@ -28,36 +34,25 @@ import { SlotLockWarningModal } from "../components/SlotLockWarningModal";
 import StatSlider from "../components/StatSlider";
 import VoiceFileManager from "../components/VoiceFileManager";
 import { useSlotLockGuard } from "../lib/slotLocks";
+import { bodyTypeQueryKey } from "../components/forms/DemographicsForm";
 import type { GearKit, Merc } from "../lib/schema";
 import { NATIONALITY_OPTIONS } from "../lib/nationalities";
 import { RACE_OPTIONS } from "../lib/races";
 import { ATTITUDE_OPTIONS } from "../lib/attitudes";
 import { CHARACTER_TRAIT_OPTIONS } from "../lib/characterTraits";
 import { DISABILITY_OPTIONS } from "../lib/disabilities";
+import { VANILLA_VOICE_OPTIONS } from "../lib/voices";
 
 // Vanilla appearance palette codes (UI dropdowns; engine accepts custom codes too)
 // Palette codes used to live as local arrays here; they moved into
 // AppearancePaletteForm (the shared component used by both Create and
 // Edit) as part of the palette-chip redesign.
 
-
-// Vanilla AIM merc voices the player can borrow. The wizard doesn't ship
-// voice files; in-game the merc plays whatever audio already sits in the
-// Speech folder for its chosen voice index. JA2 looks for files named by
-// voice index and bark event (e.g. 031_001.wav) and accepts .wav, .ogg, or
-// .mp3. List drawn from vanilla AIM 0-39 — the most thoroughly-voiced mercs.
-const VANILLA_VOICE_OPTIONS: ReadonlyArray<readonly [number, string]> = [
-  [0, "Chosen One"], [1, "Sulik"], [2, "Trader"], [3, "Cassidy"],
-  [4, "Ivan"], [5, "Steroid"], [6, "Wolf"], [7, "Grizzly"],
-  [8, "Hitman"], [9, "Lynx"], [10, "Magic"], [11, "Stephen"],
-  [12, "Scope"], [13, "Reaper"], [14, "Buns"], [15, "Tycho"],
-  [16, "Buzz"], [17, "Raider"], [18, "Raven"], [19, "Static"],
-  [20, "Len"], [21, "Danny"], [22, "Spider"], [23, "Igor"],
-  [24, "Razor"], [25, "Fox"], [26, "Lynx (orig)"], [27, "Shadow"],
-  [28, "Leech"], [29, "Numb"], [30, "Bull"], [31, "Vicki"],
-  [32, "Nails"], [33, "Bubba"], [34, "Killian"], [35, "Fidel"],
-  [36, "Dr. Q"], [37, "Meltdown"], [38, "Stogie"], [39, "Gus"],
-];
+// Vanilla AIM merc voices the player can borrow live in lib/voices.ts
+// (VANILLA_VOICE_OPTIONS), shared with the Edit form. The wizard doesn't
+// ship voice files; in-game the merc plays whatever audio already sits in
+// the Speech folder for its chosen voice index (JA2 looks for files named
+// by voice index + bark event, e.g. 031_001.wav; .wav/.ogg/.mp3).
 
 function blankGearKit(): GearKit {
   return {
@@ -210,7 +205,7 @@ export default function Create() {
   // Combined with `params.has("slot") === true` for the empty form, the
   // pre-fix code silently jumped past the slot picker straight to
   // Identity targeting slot 0 — vanilla AIM Barry — without ever
-  // surfacing the slot-lock warnings. Bug-review finding D4. Also
+  // surfacing the slot-lock warnings. Also
   // guard against non-numeric `?slot=abc` (Number returns NaN, which
   // is not a usable uiIndex). Falls back to 220 only when the param is
   // absent OR present-but-invalid; the preselection flag also requires
@@ -270,15 +265,57 @@ export default function Create() {
   // Default gear: empty stub (unarmed). User picks a preset in the Gear step.
   const [gearKit, setGearKit] = useState<GearKit>(() => blankGearKit());
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  // Voice clips staged in the wizard (deferred mode) — written AFTER
+  // createMerc succeeds, keeping the wizard's "nothing is committed
+  // until Compile & write" promise. Any upload failure is a warning,
+  // not a create failure (the merc exists; clips can be re-added on
+  // the Edit > Voice tab).
+  const [voiceStaged, setVoiceStaged] =
+    useState<{ file: File; bark: number | null }[]>([]);
+  const [voiceWarning, setVoiceWarning] = useState<string | null>(null);
 
   const presets = useQuery({ queryKey: ["gear-presets"], queryFn: listGearPresets });
+  const health = useQuery({ queryKey: ["health"], queryFn: getHealth });
+  const bodyTypes = useQuery({
+    queryKey: bodyTypeQueryKey(health.data?.active_install_id),
+    queryFn: () => getBodyTypes(health.data?.active_install_id ?? undefined),
+  });
+  // Creation may select only IDs proven by the target engine (or vanilla).
+  // Observed extensions exist only to keep an existing merc editable.
+  const authorableBodyTypes = (bodyTypes.data?.options ?? []).filter(
+    (option) => option.authorable !== false,
+  );
   const qc = useQueryClient();
   const lockGuard = useSlotLockGuard();
 
   const compile = useMutation({
     mutationFn: async () => {
       if (!portrait) throw new Error("No portrait selected");
-      const portraitRes = await compilePortrait(portrait, merc.ubFaceIndex, {
+      setVoiceWarning(null);
+      // Fresh slot-occupancy pre-check BEFORE the portrait compile.
+      // compilePortrait writes 4 STIs at ubFaceIndex into the live
+      // install; createMerc's own SLOT_OCCUPIED check runs AFTER that,
+      // so a stale slot-picker cache (30s staleTime) or a hand-edited
+      // ?slot= URL used to destroy the occupant's face art first and
+      // only THEN reject. This hits the sidecar directly (no query
+      // cache), matching the engine's occupancy rule: a slot is taken
+      // when zName or zNickname is non-blank.
+      try {
+        const existing = await getSlot(merc.uiIndex);
+        const occupant =
+          (existing.profile?.zNickname ?? "").trim() ||
+          (existing.profile?.zName ?? "").trim();
+        if (occupant) {
+          throw new Error(
+            `Slot ${merc.uiIndex} is already occupied by "${occupant}". ` +
+            "Pick a different slot, or delete/move the existing merc first.",
+          );
+        }
+      } catch (e) {
+        // 404 SLOT_EMPTY = no <PROFILE> block at all — free, proceed.
+        if (!(e instanceof ApiError && e.status === 404)) throw e;
+      }
+      const portraitOptions = {
         eye_x: eyeBox.x,
         eye_y: eyeBox.y,
         eye_w: eyeBox.w,
@@ -296,20 +333,54 @@ export default function Create() {
         anim_mouth_1: mouthFrames[0] ?? undefined,
         anim_mouth_2: mouthFrames[1] ?? undefined,
         anim_mouth_3: mouthFrames[2] ?? undefined,
+      };
+      if (merc.Type === 3) {
+        const rpcRes = await saveRpcPortrait(
+          portrait,
+          "create",
+          merc,
+          { mIndex: merc.uiIndex, mName: merc.zName, kits: [gearKit] },
+          portraitOptions,
+        );
+        if (voiceStaged.length > 0) {
+          try {
+            await uploadVoiceClips(
+              merc.uiIndex,
+              voiceStaged.map((v) => v.file),
+              voiceStaged.map((v) => v.bark),
+            );
+          } catch (e) {
+            setVoiceWarning(
+              `RPC created, but the ${voiceStaged.length} staged voice clip(s) failed to upload: ${
+                e instanceof Error ? e.message : String(e)
+              } — re-add them on the Edit > Voice tab.`,
+            );
+          }
+        }
+        return {
+          portrait: rpcRes,
+          merc: { ok: true, slot: rpcRes.slot, issues: rpcRes.issues },
+        };
+      }
+      const portraitRes = await compilePortrait(portrait, merc.ubFaceIndex, {
+        ...portraitOptions,
+        skip_animation: true,
+        rpc_talkface: false,
       });
       // Pass `aim_binding: null` for Type=1 (AIM) mercs and let the server
       // derive the canonical AimBioID via `aim_availability.compute_aim_bio_id`.
       // Hardcoding 71 here clobbered the canonical lookup for expanded-AIM
       // slots — see bug-sweep #44.
+      const talk = portraitRes.talkface;
       const mercRes = await createMerc({
         // Sync eye/mouth position to the merc profile before write — the
         // picker is the source of truth for these coords.
         merc: {
           ...merc,
-          usEyesX: eyeBox.x,
-          usEyesY: eyeBox.y,
-          usMouthX: mouthBox.x,
-          usMouthY: mouthBox.y,
+          usEyesX: talk?.eyes_x ?? eyeBox.x,
+          usEyesY: talk?.eyes_y ?? eyeBox.y,
+          usMouthX: talk?.mouth_x ?? mouthBox.x,
+          usMouthY: talk?.mouth_y ?? mouthBox.y,
         },
         // Server will fill aim_binding when Type==1 and the wizard hasn't supplied one
         aim_binding: undefined,
@@ -319,6 +390,26 @@ export default function Create() {
           kits: [gearKit],
         },
       });
+      // Staged voice clips — written only now that the merc exists.
+      // Failure here is a WARNING, not a create failure: rolling the
+      // whole create back over audio would be worse than pointing the
+      // user at the Edit > Voice tab.
+      if (voiceStaged.length > 0) {
+        try {
+          await uploadVoiceClips(
+            merc.uiIndex,
+            voiceStaged.map((v) => v.file),
+            voiceStaged.map((v) => v.bark),
+          );
+        } catch (e) {
+          setVoiceWarning((current) => [current,
+            `Merc created, but the ${voiceStaged.length} staged voice `
+            + `clip(s) failed to upload: `
+            + (e instanceof Error ? e.message : String(e))
+            + " — re-add them on the Edit > Voice tab.",
+          ].filter(Boolean).join(" "));
+        }
+      }
       return { portrait: portraitRes, merc: mercRes };
     },
     onSuccess: () => {
@@ -330,8 +421,7 @@ export default function Create() {
       // does NOT invalidate ["slot-picker", ...]. Without this explicit
       // call, the slot picker's 30s staleTime kept showing the just-
       // written slot as empty across rapid Create cycles, letting the
-      // user overwrite their own merc without warning. Bug-review
-      // finding E4.
+      // user overwrite their own merc without warning.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
     },
   });
@@ -516,10 +606,11 @@ export default function Create() {
               value={merc.ubBodyType}
               onChange={(e) => setMerc({ ...merc, ubBodyType: Number(e.target.value) })}
             >
-              <option value={0}>Regular Male</option>
-              <option value={1}>Big Male</option>
-              <option value={2}>Stocky Male</option>
-              <option value={3}>Regular Female</option>
+              {authorableBodyTypes.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.name}{option.category ? ` — ${option.category}` : ""}
+                </option>
+              ))}
             </select>
           </label>
 
@@ -620,8 +711,10 @@ export default function Create() {
               className="aspect-square max-w-md mx-auto"
             />
             <p className="text-xs text-wasteland-400 mt-3 text-center">
-              Required. The wizard derives all 4 STI sizes (BigFace, SmallFace, 65Face, 33Face)
-              from this one image. Skip mode is the default — the merc will be static in-game.
+              Required. The wizard derives BigFace, SmallFace, 65Face, and 33Face from this image.
+              {merc.Type === 3
+                ? " RPCs also receive a separate 90×100 talk-panel face; add animation variants below for real blinking and lip movement."
+                : " Skip mode is the default — the merc will be static in-game."}
             </p>
           </div>
 
@@ -942,7 +1035,12 @@ export default function Create() {
               </div>
             )}
           </div>
-          <VoiceFileManager slot={merc.uiIndex} />
+          <VoiceFileManager
+            slot={merc.uiIndex}
+            deferred
+            onStagedChange={setVoiceStaged}
+            previewVoiceIndex={merc.usVoiceIndex}
+          />
         </div>
       )}
 
@@ -1009,6 +1107,9 @@ export default function Create() {
               ✓ Wrote merc to slot {compile.data.merc.slot}.{" "}
               {compile.data.portrait.files_written.length} STI files written.
             </div>
+          )}
+          {voiceWarning && (
+            <div className="text-sm text-yellow-400">{voiceWarning}</div>
           )}
           {compile.isError && (
             <div className="text-sm text-rust-400">

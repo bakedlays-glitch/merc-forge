@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from mercwizard_core import item_enums
 from mercwizard_core import items_schema as schema
 from mercwizard_core.backup import snapshot
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.inject import item_class_xml as cx
 from mercwizard_core.inject import items_xml as ix
 from mercwizard_core.install_context import make_install_context
@@ -271,7 +271,7 @@ def update_item(
             })
         files.append(sister_path)
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         snap = snapshot(
             install_root=info.path,
             install_id=info.id,

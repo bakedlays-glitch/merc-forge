@@ -1,121 +1,26 @@
+/**
+ * Settings — app-level configuration that is not owned by one editor.
+ *
+ * Deliberately a composition only: every section is its own component
+ * under components/settings/. Ordered by how often it is needed —
+ * installs first, tool configuration next, About last.
+ *
+ * MapForge's own editor preferences (hotkeys, brush defaults, engine slot
+ * cap) live in the editor, not here; this page only points at them.
+ */
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 
-import {
-  addInstall,
-  ApiError,
-  deployGraphics,
-  formatApiError,
-  getAppSettings,
-  getGraphicsStatus,
-  getHealth,
-  listInstalls,
-  refreshInstalls,
-  setActiveInstall,
-  updateAppSettings,
-} from "../lib/api";
-import ConfirmModal from "../components/ConfirmModal";
-import { isRunningInTauri, pickDirectory } from "../lib/tauri";
-
-/** True when a path lives under Windows' UAC-protected program dirs.
- * Writing inside Program Files / Program Files (x86) requires
- * admin elevation — Merc Forge doesn't run elevated, so any save /
- * backup / extract op will silently fail or trigger UAC prompts.
- * Surface this BEFORE the user tries to edit. */
-function isUacProtectedPath(p: string): boolean {
-  if (!p) return false;
-  // Compare case-insensitively against common variants. Windows paths
-  // can come with either slash style; normalize then probe.
-  const norm = p.replace(/\//g, "\\").toLowerCase();
-  return (
-    norm.includes("\\program files (x86)\\")
-    || norm.includes("\\program files\\")
-    || norm.endsWith("\\program files")
-    || norm.endsWith("\\program files (x86)")
-  );
-}
+import { getHealth } from "../lib/api";
+import { SLOT_LOCK_TIERS, unsuppressLockTier } from "../lib/slotLocks";
+import AboutPanel from "../components/settings/AboutPanel";
+import InstallList from "../components/settings/InstallList";
+import ReferenceInstallField from "../components/settings/ReferenceInstallField";
+import VoiceLabSettings from "../components/settings/VoiceLabSettings";
 
 export default function Settings() {
-  const qc = useQueryClient();
-  const installs = useQuery({ queryKey: ["installs"], queryFn: listInstalls });
   const health = useQuery({ queryKey: ["health"], queryFn: getHealth });
-  const [browseError, setBrowseError] = useState<string | null>(null);
-  const [rescanFeedback, setRescanFeedback] = useState<string | null>(null);
-
-  const refresh = useMutation({
-    mutationFn: refreshInstalls,
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["installs"] });
-      setRescanFeedback(`Found ${data.length} install${data.length === 1 ? "" : "s"}.`);
-      setTimeout(() => setRescanFeedback(null), 3000);
-    },
-  });
-
-  const setActive = useMutation({
-    mutationFn: (id: string) => setActiveInstall(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["health"] });
-      qc.invalidateQueries({ queryKey: ["roster"] });
-    },
-  });
-
-  const browse = useMutation({
-    mutationFn: async () => {
-      setBrowseError(null);
-      const path = await pickDirectory(
-        "Pick the folder that contains your JA2 executable",
-      );
-      if (!path) return null;
-      // UAC pre-flight. Bail BEFORE registering if the picked path is
-      // under Program Files — writes inside there will fail or pop UAC
-      // prompts for every save/edit, and registering it just to fail
-      // later is worse UX than refusing up-front with a clear reason.
-      if (isUacProtectedPath(path)) {
-        setBrowseError(
-          `"${path}" is under Windows' Program Files folder, which is `
-          + `UAC-protected. Merc Forge can't reliably save/edit files there `
-          + `without admin elevation. Copy the JA2 install to a folder `
-          + `outside Program Files (e.g. C:\\Games\\JA2_113) and re-register `
-          + `from there.`
-        );
-        return null;
-      }
-      let info;
-      try {
-        info = await addInstall(path);
-        qc.invalidateQueries({ queryKey: ["installs"] });
-      } catch (e) {
-        if (e instanceof ApiError) {
-          const detail = e.detail as { errors?: string[]; message?: string } | null;
-          setBrowseError(
-            detail?.errors?.[0] ??
-              detail?.message ??
-              "That folder didn't look like a JA2 install.",
-          );
-        } else {
-          setBrowseError("Couldn't read that folder.");
-        }
-        return null;
-      }
-      try {
-        await setActiveInstall(info.id);
-        qc.invalidateQueries({ queryKey: ["health"] });
-        qc.invalidateQueries({ queryKey: ["roster"] });
-      } catch {
-        // The install was added successfully but activating it failed.
-        // Don't lose that work — leave it in the list and tell the user
-        // how to activate it manually.
-        setBrowseError(
-          `Added "${info.path}", but couldn't make it active automatically. ` +
-            `Click "Set active" next to it in the list below.`,
-        );
-      }
-      return info;
-    },
-  });
-
-  const activeId = health.data?.active_install_id ?? null;
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8 space-y-6">
@@ -126,466 +31,81 @@ export default function Settings() {
         </Link>
       </div>
 
-      <section className="card">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold">Game installs</h2>
-          <div className="flex items-center gap-2">
-            {rescanFeedback && (
-              <span className="text-xs text-rust-400">{rescanFeedback}</span>
-            )}
-            <button
-              className="btn-secondary text-sm"
-              onClick={() => refresh.mutate()}
-              disabled={refresh.isPending}
-            >
-              {refresh.isPending ? "Re-scanning..." : "Re-scan"}
-            </button>
-          </div>
-        </div>
-
-        <div className="mb-3 rounded border border-rust-500/40 bg-wasteland-800 p-3">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex-1">
-              <div className="text-sm font-medium">Add an install folder</div>
-              <p className="text-xs text-wasteland-300 mt-0.5">
-                Pick the folder that contains <code className="text-rust-400">JA2.exe</code>.
-                Use this when auto-detect missed an install.
-              </p>
-              {browseError && (
-                <div className="text-xs text-rust-400 mt-1.5">{browseError}</div>
-              )}
-            </div>
-            <button
-              className="btn-primary text-sm"
-              onClick={() => browse.mutate()}
-              disabled={!isRunningInTauri() || browse.isPending}
-            >
-              {browse.isPending ? "Opening..." : "Browse..."}
-            </button>
-          </div>
-        </div>
-
-        {installs.data && installs.data.length === 0 && (
-          <p className="text-sm text-wasteland-400">
-            No installs registered yet. Use Browse to add one, or Re-scan to auto-detect.
-          </p>
-        )}
-
-        <ul className="space-y-2">
-          {installs.data?.map((info) => {
-            const isActive = info.id === activeId;
-            return (
-              <li
-                key={info.id}
-                className={`flex items-center justify-between gap-4 rounded border p-3 ${
-                  isActive
-                    ? "border-rust-500/60 bg-wasteland-800"
-                    : "border-wasteland-700"
-                }`}
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-medium">{info.mod_display}</span>
-                    <span className="badge bg-wasteland-700 text-wasteland-200">
-                      {info.mod_id}
-                    </span>
-                    {isActive && (
-                      <span className="badge bg-rust-500/20 text-rust-400">Active</span>
-                    )}
-                    {isUacProtectedPath(info.path) && (
-                      <span
-                        className="badge bg-amber-500/15 text-amber-300 border border-amber-500/40"
-                        title={
-                          "This install lives under Program Files. Windows UAC blocks "
-                          + "writes there for non-admin processes, so Merc Forge's edits "
-                          + "(merc saves, backups, SLF extract, .dat paint, JSD writes) "
-                          + "may silently fail or pop UAC prompts. Recommended fix: copy "
-                          + "the JA2 install to a folder outside Program Files (e.g. "
-                          + "C:\\Games\\JA2_113), then re-register from there."
-                        }
-                      >
-                        ⚠ UAC-protected
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-wasteland-400 truncate font-mono">
-                    {info.path}
-                  </div>
-                  {isUacProtectedPath(info.path) && (
-                    <p className="mt-1 text-[11px] text-amber-300/90">
-                      This install sits under Program Files. Windows will block our edits.
-                      Copy the JA2 folder somewhere like <code>C:\Games\JA2_113</code> and
-                      re-register, or run Merc Forge as administrator (not recommended).
-                    </p>
-                  )}
-                </div>
-                {isActive ? (
-                  <span className="text-xs text-wasteland-400">Current</span>
-                ) : (
-                  <button
-                    className="btn-ghost text-sm"
-                    onClick={() => setActive.mutate(info.id)}
-                    disabled={setActive.isPending}
-                  >
-                    {setActive.isPending && setActive.variables === info.id
-                      ? "Switching..."
-                      : "Set active"}
-                  </button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      </section>
-
-      <section className="card">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-lg font-semibold">Diagnostics</h2>
-        </div>
-        <p className="text-sm text-wasteland-300 mb-3">
-          When something looks wrong, the sidecar's logs are the first place to
-          look. They live alongside the app's state and capture both Python
-          tracebacks and the Tauri shell's stderr.
-        </p>
-        <LogsLocation />
-      </section>
+      <InstallList />
 
       <section className="card">
         <h2 className="text-lg font-semibold mb-2">INI Editor — reference install</h2>
         <p className="text-sm text-wasteland-300 mb-3">
-          The INI Editor's <strong>Edit INI</strong> mode can diff your mod's settings
-          against a <strong>reference install</strong> (e.g. the frozen base copy) and
-          offer "Reset to reference value". Note: this is a reference <em>you</em> pick
-          — not necessarily stock 1.13. Engine-true defaults are always shown per key
-          regardless.
+          Edit INI can diff your mod against this install and offer "Reset to
+          reference value". It is a reference <em>you</em> pick, not necessarily
+          stock 1.13.
         </p>
         <ReferenceInstallField />
       </section>
 
-      <section className="card">
-        <h2 className="text-lg font-semibold mb-2">Graphics stack</h2>
-        <p className="text-sm text-wasteland-300 mb-3">
-          The "golden" JA2 look: cnc-ddraw (OpenGL + xBRZ upscale) + ReShade with
-          the 7-shader <code className="font-mono">ja2_remastered</code> preset.
-          Merc Forge can verify the active install's config against the golden
-          keys and re-apply them — the runtimes themselves (ddraw.dll, ReShade)
-          are external installs it checks for but doesn't ship.
-        </p>
-        <GraphicsStation />
-      </section>
+      {/* The Graphics stack section lived here. Removed for beta.4.
+          components/settings/GraphicsStation.tsx and the /graphics endpoints
+          remain; restoring it means re-adding the import and this section. */}
 
-      <section className="card">
-        <h2 className="text-lg font-semibold mb-2">Backups</h2>
-        <p className="text-sm text-wasteland-300 mb-3">
-          Every edit and save creates a snapshot of the affected files
-          so you can roll back if something goes wrong. The Backups page
-          lists every snapshot for the active install and lets you
-          restore individual ones.
-        </p>
-        <Link
+      <VoiceLabSettings />
+
+      <section className="card space-y-3">
+        <h2 className="text-lg font-semibold">Elsewhere</h2>
+        <SettingsPointer
           to="/backups"
-          className="inline-block rounded border border-wasteland-700 bg-wasteland-800 px-3 py-1.5 text-sm hover:border-rust-500 hover:bg-wasteland-700"
-        >
-          Open Backups →
-        </Link>
+          label="Backups"
+          note="Every edit snapshots the files it touches. The 50 most recent snapshots per install are kept; older ones are pruned automatically."
+        />
+        <div className="text-sm">
+          <div className="text-wasteland-200">MapForge editor</div>
+          <p className="text-xs text-wasteland-400">
+            Hotkeys, brush defaults and the engine slot cap live in the map
+            editor's own settings, reachable from its toolbar.
+          </p>
+        </div>
+        <HiddenWarningsReset />
       </section>
 
-      <section className="card">
-        <h2 className="text-lg font-semibold mb-2">About</h2>
-        <p className="text-sm text-wasteland-300 mb-3">
-          Merc Forge v2.0.0 — open source under the MIT license.
+      <AboutPanel sidecarVersion={health.data?.version} />
+    </div>
+  );
+}
+
+function SettingsPointer({ to, label, note }: { to: string; label: string; note: string }) {
+  return (
+    <div className="flex items-start justify-between gap-4 text-sm">
+      <div>
+        <div className="text-wasteland-200">{label}</div>
+        <p className="text-xs text-wasteland-400">{note}</p>
+      </div>
+      <Link to={to} className="btn-ghost shrink-0 text-sm">
+        Open →
+      </Link>
+    </div>
+  );
+}
+
+/** "Don't show this again" on a slot-lock warning writes to localStorage
+ * and there was no way back — this is the way back. */
+function HiddenWarningsReset() {
+  const [done, setDone] = useState(false);
+  return (
+    <div className="flex items-start justify-between gap-4 text-sm">
+      <div>
+        <div className="text-wasteland-200">Hidden slot warnings</div>
+        <p className="text-xs text-wasteland-400">
+          Show the overwrite warnings you dismissed with "Don't show again".
         </p>
-        <BuildInfo
-          sidecarVersion={health.data?.version}
-        />
-      </section>
-    </div>
-  );
-}
-
-/**
- * Surfaces the running app's build provenance: the frontend bundle's
- * build timestamp (injected by Vite at build time) and the sidecar
- * version reported by /health. Lets a user tell at a glance whether the
- * shell they're staring at matches what they just rebuilt — answers the
- * recurring "I edited the source but the running app shows old text"
- * question without having to dig through file mtimes. Bug-review #94.
- */
-function BuildInfo({ sidecarVersion }: { sidecarVersion?: string }) {
-  const built = __BUILD_TIMESTAMP__;
-  // Convert ISO → local-time-formatted string. The raw ISO is exact but
-  // hard to read; locale string surfaces "May 23, 2026, 4:47 PM" which
-  // is easier to compare against "when did I last rebuild?".
-  let pretty: string = built;
-  try {
-    const d = new Date(built);
-    if (!Number.isNaN(d.getTime())) {
-      pretty = d.toLocaleString();
-    }
-  } catch {
-    // Keep raw ISO if locale formatting fails for any reason.
-  }
-  // Minutes-since-build is the actually-useful answer for the "is this
-  // the rebuild I just kicked off?" question.
-  const minutesAgo = (() => {
-    try {
-      const d = new Date(built);
-      if (Number.isNaN(d.getTime())) return null;
-      const diffMs = Date.now() - d.getTime();
-      const mins = Math.floor(diffMs / 60_000);
-      if (mins < 1) return "just now";
-      if (mins < 60) return `${mins} min ago`;
-      const hours = Math.floor(mins / 60);
-      if (hours < 24) return `${hours} hr ago`;
-      const days = Math.floor(hours / 24);
-      return `${days} day${days === 1 ? "" : "s"} ago`;
-    } catch {
-      return null;
-    }
-  })();
-  return (
-    <div className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-xs">
-      <div className="text-wasteland-500">Frontend built</div>
-      <div className="text-wasteland-200 font-mono">
-        {pretty}
-        {minutesAgo && (
-          <span className="text-wasteland-500 font-sans ml-2">({minutesAgo})</span>
-        )}
       </div>
-      <div className="text-wasteland-500">Sidecar version</div>
-      <div className="text-wasteland-200 font-mono">
-        {sidecarVersion ?? <span className="text-wasteland-500">unknown</span>}
-      </div>
-    </div>
-  );
-}
-
-/** Diagnostics row that displays the sidecar log folder location and
- * offers a one-click open. Falls back to a copyable code block if the
- * Tauri shell open API isn't available. */
-function LogsLocation() {
-  const [copied, setCopied] = useState(false);
-  // The path is hard-coded to the sidecar's known log dir under %APPDATA%.
-  // This mirrors what main.py:setup_logging configures. If you change
-  // the path there, change it here too.
-  const logsPath = "%APPDATA%\\MercWizard\\logs";
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(logsPath);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard unavailable — silent.
-    }
-  };
-  return (
-    <div className="space-y-2">
-      <div className="text-xs text-wasteland-400">Log folder</div>
-      <div className="flex items-center gap-2">
-        <code className="block flex-1 truncate rounded border border-wasteland-700 bg-wasteland-900 px-2 py-1.5 font-mono text-xs">
-          {logsPath}
-        </code>
-        <button
-          type="button"
-          onClick={copy}
-          className="rounded border border-wasteland-700 bg-wasteland-800 px-3 py-1.5 text-xs hover:border-rust-500 hover:bg-wasteland-700"
-          title="Copy the logs path to the clipboard. Paste into Win+R or File Explorer to open."
-        >
-          {copied ? "Copied!" : "Copy path"}
-        </button>
-      </div>
-      <p className="text-[11px] text-wasteland-500">
-        Paste this into File Explorer's address bar or the Win+R "Run" dialog
-        to open. The main files are <code>sidecar.log</code> (Python /
-        FastAPI) and <code>shell_rCURRENT.log</code> (Tauri / Rust).
-      </p>
-    </div>
-  );
-}
-
-function ReferenceInstallField() {
-  const qc = useQueryClient();
-  const settings = useQuery({ queryKey: ["app-settings"], queryFn: getAppSettings });
-  const [draft, setDraft] = useState<string | null>(null);
-  const save = useMutation({
-    mutationFn: (path: string) => updateAppSettings({ baseline_install_path: path }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["app-settings"] });
-      qc.invalidateQueries({ queryKey: ["ini-effective"] });
-      qc.invalidateQueries({ queryKey: ["ini-summary"] });
-      setDraft(null);
-    },
-  });
-
-  const committed = settings.data?.baseline_install_path ?? "";
-  const value = draft ?? committed;
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2">
-        <input
-          className="input flex-1 font-mono text-sm"
-          placeholder="C:\Jagged Alliance 2\...  (folder containing JA2.exe + Data-1.13)"
-          value={value}
-          onChange={(e) => setDraft(e.target.value)}
-        />
-        {isRunningInTauri() && (
-          <button
-            className="btn-ghost text-sm"
-            onClick={async () => {
-              const picked = await pickDirectory("Pick the reference install folder");
-              if (picked) setDraft(picked);
-            }}
-          >
-            Browse…
-          </button>
-        )}
-        <button
-          className="btn-primary text-sm"
-          disabled={draft == null || draft === committed || save.isPending}
-          onClick={() => save.mutate(value)}
-        >
-          Save
-        </button>
-        {committed && (
-          <button
-            className="btn-ghost text-sm"
-            disabled={save.isPending}
-            onClick={() => save.mutate("")}
-            title="Clear the reference install"
-          >
-            Clear
-          </button>
-        )}
-      </div>
-      {save.isError && (
-        <div className="text-xs text-red-300">{formatApiError(save.error)}</div>
-      )}
-      {save.isSuccess && draft == null && (
-        <div className="text-xs text-emerald-300">✓ Saved.</div>
-      )}
-    </div>
-  );
-}
-
-function GraphicsStation() {
-  const qc = useQueryClient();
-  const status = useQuery({ queryKey: ["graphics-status"], queryFn: getGraphicsStatus });
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const deploy = useMutation({
-    mutationFn: deployGraphics,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["graphics-status"] });
-      setConfirmOpen(false);
-    },
-  });
-
-  const comps = status.data?.components ?? [];
-  const runtimesMissing = comps.filter((c) => c.kind === "runtime" && !c.present);
-  const customized = comps.filter(
-    (c) => c.kind !== "runtime" && c.present && !c.matches,
-  );
-  const allGreen = comps.length > 0 && comps.every((c) => c.matches);
-
-  const stateLabel = (c: (typeof comps)[number]) => {
-    if (c.kind === "runtime") {
-      return c.present ? (
-        <span className="text-emerald-400">✓ installed</span>
-      ) : (
-        <span className="text-wasteland-400">
-          ⛔ not installed
-          {c.download_url && (
-            <>
-              {" — "}
-              <a className="underline" href={c.download_url} target="_blank" rel="noreferrer">
-                download
-              </a>
-            </>
-          )}
-        </span>
-      );
-    }
-    if (!c.present) return <span className="text-amber-400">✗ missing (deploy will create)</span>;
-    if (c.matches) return <span className="text-emerald-400">✓ matches golden</span>;
-    return (
-      <span className="text-amber-300" title={(c.mismatched_keys ?? []).join(", ")}>
-        ⚠ differs — yours is customized
-        {c.mismatched_keys?.length ? ` (${c.mismatched_keys.length} key${c.mismatched_keys.length === 1 ? "" : "s"})` : ""}
-      </span>
-    );
-  };
-
-  return (
-    <div className="space-y-3">
-      {status.isError && (
-        <div className="text-xs text-red-300">{formatApiError(status.error)}</div>
-      )}
-      <table className="w-full text-sm">
-        <tbody>
-          {comps.map((c) => (
-            <tr key={c.component} className="border-b border-wasteland-800 last:border-0">
-              <td className="py-1.5 font-mono text-wasteland-200">{c.component}</td>
-              <td className="py-1.5 text-xs text-wasteland-500">{c.note}</td>
-              <td className="py-1.5 text-right text-xs">{stateLabel(c)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="flex items-center gap-3">
-        <button
-          className="btn-primary text-sm"
-          disabled={runtimesMissing.length > 0 || deploy.isPending || allGreen}
-          title={
-            runtimesMissing.length > 0
-              ? `Install the missing runtime${runtimesMissing.length === 1 ? "" : "s"} first: ${runtimesMissing.map((c) => c.component).join(", ")}`
-              : allGreen
-                ? "Everything already matches the golden config"
-                : undefined
-          }
-          onClick={() => setConfirmOpen(true)}
-        >
-          {deploy.isPending ? "Deploying…" : allGreen ? "✓ Golden config active" : "Deploy golden config"}
-        </button>
-        {deploy.isError && (
-          <span className="text-xs text-red-300">{formatApiError(deploy.error)}</span>
-        )}
-        {deploy.isSuccess && (
-          <span className="text-xs text-emerald-300">
-            ✓ {deploy.data.actions.join("; ")} (backup {deploy.data.backup_id})
-          </span>
-        )}
-      </div>
-
-      <ConfirmModal
-        open={confirmOpen}
-        title="Deploy golden graphics config?"
-        destructive={customized.length > 0}
-        body={
-          <div className="space-y-2 text-sm">
-            <p>
-              This merges the golden keys into <code className="font-mono">ddraw.ini</code> +{" "}
-              <code className="font-mono">ReShade.ini</code> (your other keys are preserved) and
-              copies the <code className="font-mono">ja2_remastered.ini</code> preset.
-            </p>
-            {customized.length > 0 && (
-              <div className="rounded border border-amber-700/60 bg-amber-900/20 p-2 text-xs text-amber-200">
-                ⚠ These files differ from golden — your customizations to the listed keys will be
-                overwritten:{" "}
-                {customized
-                  .map((c) => `${c.component} (${(c.mismatched_keys ?? []).join(", ") || "content"})`)
-                  .join("; ")}
-              </div>
-            )}
-            <p className="text-xs text-wasteland-400">
-              A backup snapshot of all three files is taken first (restorable from Backups).
-            </p>
-          </div>
-        }
-        confirmLabel="Deploy"
-        busy={deploy.isPending}
-        onConfirm={() => deploy.mutate()}
-        onCancel={() => setConfirmOpen(false)}
-      />
+      <button
+        className="btn-ghost shrink-0 text-sm"
+        onClick={() => {
+          for (const tier of SLOT_LOCK_TIERS) unsuppressLockTier(tier);
+          setDone(true);
+        }}
+      >
+        {done ? "✓ Restored" : "Show again"}
+      </button>
     </div>
   );
 }

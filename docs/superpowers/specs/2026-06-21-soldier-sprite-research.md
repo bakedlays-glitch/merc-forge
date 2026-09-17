@@ -9,7 +9,7 @@ using the *existing* sidecar SLF + STI helpers — no new decoder needed. They r
 recognizable, correctly-coloured JA2 soldier silhouettes from the STIs' own embedded palette.
 
 Source citations are from the **custom recompiled engine** tree at
-`C:\AI Projects\The Wasteland\Visual Studio Root\` (the only tree that defines the Wasteland
+`<the JA2 1.13 source tree>\` (the only tree that defines the Wasteland
 creatures; stock `Source Files\1.13 Source\source-master\` stops at `COMBAT_JEEP`; the Copy
 *install* has no source tree).
 

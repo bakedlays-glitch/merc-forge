@@ -177,7 +177,7 @@ def verify_tileset(xml_path: Path, tileset: int, dat_path: Path | None = None):
 
 if __name__ == "__main__":
     # Point these env vars at a JA2 1.13 install's Ja2Set.dat.xml (and an
-    # optional sample .dat). These are dev-machine-specific, so they're read
+    # optional sample .dat). These are machine-specific, so they're read
     # from the environment rather than hardcoded.
     #   MW2_VERIFY_XML        path to a Ja2Set.dat.xml
     #   MW2_VERIFY_TILESET    tileset index to verify (default 71)

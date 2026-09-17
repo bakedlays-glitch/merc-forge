@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { formatApiError, getHealth, getRoster, listInstalls, moveMercStreaming, type SaveProgressEvent } from "../lib/api";
+import { formatApiError, getHealth, getRoster, listInstalls, moveMercStreaming } from "../lib/api";
 import ConfirmModal from "../components/ConfirmModal";
 import SaveProgressBar from "../components/SaveProgressBar";
 import SaveSnapshotBanner from "../components/SaveSnapshotBanner";
 import SlotPicker from "../components/SlotPicker";
+import SourceMercCard from "../components/SourceMercCard";
 import { SlotLockWarningModal } from "../components/SlotLockWarningModal";
 import { useSlotLockGuard } from "../lib/slotLocks";
 import { categoryLabel, useSlotPicker } from "../lib/slotPicker";
+import { buildRelocateNotice } from "../lib/relocateNotice";
+import { useSaveProgressFade } from "../lib/useSaveProgressFade";
 
 export default function Move() {
   const qc = useQueryClient();
@@ -66,30 +69,14 @@ export default function Move() {
     toInstall: string | null;
   } | null>(null);
 
-  // Streaming progress (2026-05-23). Previously /move returned a single dict;
-  // now it streams NDJSON like /duplicate so the UI can show a progress bar.
-  const [progressEvents, setProgressEvents] = useState<SaveProgressEvent[] | null>(null);
-  const [progressDone, setProgressDone] = useState(false);
-  // Tracks the success-fade timeout so we can cancel it on unmount.
-  // See Duplicate.tsx for the full rationale (bug-review #113).
-  const fadeTimeoutRef = useRef<number | null>(null);
-  useEffect(() => {
-    return () => {
-      if (fadeTimeoutRef.current !== null) {
-        window.clearTimeout(fadeTimeoutRef.current);
-        fadeTimeoutRef.current = null;
-      }
-    };
-  }, []);
+  // Streaming progress. Previously /move returned a single dict;
+  // now it streams NDJSON like /duplicate so the UI can show a progress bar
+  // (see useSaveProgressFade for the fade rationale).
+  const progress = useSaveProgressFade();
 
   const move = useMutation({
     mutationFn: () => {
-      if (fadeTimeoutRef.current !== null) {
-        window.clearTimeout(fadeTimeoutRef.current);
-        fadeTimeoutRef.current = null;
-      }
-      setProgressEvents([]);
-      setProgressDone(false);
+      progress.begin();
       return moveMercStreaming(
         source!,
         dest!,
@@ -97,9 +84,7 @@ export default function Move() {
           to_install_id: isCrossInstall ? destInstall ?? undefined : undefined,
           force: isCrossInstall ? forceOverwrite : false,
         },
-        (ev) => {
-          setProgressEvents((prev) => (prev ? [...prev, ev] : [ev]));
-        },
+        progress.push,
       );
     },
     onMutate: () => {
@@ -108,26 +93,21 @@ export default function Move() {
       setSnapshot({ name, from: source!, to: dest!, toInstall: isCrossInstall ? destInstall : null });
     },
     onSuccess: () => {
-      setProgressDone(true);
+      progress.succeed();
       qc.invalidateQueries({ queryKey: ["roster"] });
       qc.invalidateQueries({ queryKey: ["roster", destInstall ?? "active"] });
       qc.invalidateQueries({ queryKey: ["backups"] });
       qc.invalidateQueries({ queryKey: ["slot", source] });
       qc.invalidateQueries({ queryKey: ["slot", dest] });
       // Slot picker — both source-cleared and dest-occupied affect
-      // the picker's tier/category surface. Bug-review finding E4.
+      // the picker's tier/category surface.
       qc.invalidateQueries({ queryKey: ["slot-picker"] });
-      fadeTimeoutRef.current = window.setTimeout(() => {
-        setProgressEvents(null);
-        setProgressDone(false);
-        fadeTimeoutRef.current = null;
-      }, 2500);
     },
     onError: () => {
-      setProgressDone(true);
+      progress.fail();
     },
     // No onSettled here — modal is closed in onConfirm so the progress
-    // bar isn't hidden during backup+move. Bug-review #110.
+    // bar isn't hidden during backup+move.
   });
 
   const destInstallInfo = installs.data?.find((i) => i.id === destInstall);
@@ -143,66 +123,22 @@ export default function Move() {
   const destInfo = dest !== null ? picker.data?.slots[dest] : undefined;
   const sourceClass = sourceInfo?.category ?? null;
   const destClass = destInfo?.category ?? null;
-  // Parallel structure to Duplicate's notice (see Duplicate.tsx for the
-  // full rationale). Move IS more destructive than Duplicate — the
-  // source is wiped — but the cross-category effects on the DEST are
-  // identical, so we use the same severity/text split here.
-  const crossCategoryNotice = useMemo<{ severity: "info" | "warn"; text: string } | null>(() => {
-    if (sourceClass === null || destClass === null) return null;
-    const sourceType = sourceEntry?.profile_type ?? null;
-
-    if (sourceType === 1 && destClass === "unassigned") {
-      return {
-        severity: "info",
-        text: `Slot ${dest} isn't currently on the AIM roster — MercForge will register ${sourceName} there automatically so they stay hireable on AIM after the move. (A fresh AimBioID is computed; the old AIM row at slot ${source} is removed.)`,
-      };
-    }
-
-    if (sourceType === 2 && destClass === "unassigned") {
-      return {
-        severity: "info",
-        text: `Slot ${dest} isn't currently on Speck's M.E.R.C. roster — MercForge will register ${sourceName} there automatically. (A fresh MercBioID is computed; the old row at slot ${source} is removed.)`,
-      };
-    }
-
-    if (sourceType === 1 && destClass === "merc") {
-      return {
-        severity: "warn",
-        text: `Slot ${dest} has a leftover M.E.R.C. row from a previous occupant. After the move, ${sourceName} would appear on BOTH AIM (new row) and M.E.R.C. (stale row) — pick an unassigned slot, or clear MercAvailability.xml at ${dest} first.`,
-      };
-    }
-
-    if (sourceType === 2 && destClass === "aim") {
-      return {
-        severity: "warn",
-        text: `Slot ${dest} has a leftover AIM row from a previous occupant. After the move, ${sourceName} would appear on BOTH M.E.R.C. (new row) and AIM (stale row) — pick an unassigned slot, or clear AIMAvailability.xml at ${dest} first.`,
-      };
-    }
-
-    if ((sourceType === 3 || sourceType === 4)
-        && (destClass === "aim" || destClass === "merc")) {
-      const typeLabel = sourceType === 3 ? "RPC" : "NPC";  // engine: RPC=3, NPC=4
-      const site = destClass === "aim" ? "AIM website" : "M.E.R.C. website (Speck's service)";
-      return {
-        severity: "warn",
-        text: `${sourceName} is ${typeLabel} (scripted). The move keeps Type=${typeLabel}, so they WON'T appear on the ${site} even though slot ${dest} has a row there. Change Type to 1 (AIM) or 2 (M.E.R.C.) after the move if you want them hireable.`,
-      };
-    }
-
-    if (sourceType === 1 && (destClass === "rpc" || destClass === "npc")) {
-      return {
-        severity: "warn",
-        text: `Slot ${dest} is in the engine's named ${destClass.toUpperCase()} range. Quest scripts may call this slot by name — moving ${sourceName} here redirects whatever scripted dialogue used to play for the original occupant.`,
-      };
-    }
-
-    if (sourceClass === destClass) return null;
-
-    return {
-      severity: "info",
-      text: `Slot category changes from ${categoryLabel(sourceClass)} to ${categoryLabel(destClass)}. ${sourceName}'s Type stays the same (${sourceType ?? "?"}); MercForge writes whichever XML rows are needed so they stay on the same hire list.`,
-    };
-  }, [sourceClass, destClass, source, dest, sourceName, sourceEntry]);
+  // "What changes at the destination" notice — shared case table with the
+  // Duplicate flow, phrased for move. Move IS more destructive (the source
+  // is wiped) but the cross-category effects on the DEST are identical.
+  // See lib/relocateNotice.ts.
+  const crossCategoryNotice = useMemo(
+    () => buildRelocateNotice({
+      mode: "move",
+      sourceClass,
+      destClass,
+      source,
+      dest,
+      sourceName,
+      sourceType: sourceEntry?.profile_type ?? null,
+    }),
+    [sourceClass, destClass, source, dest, sourceName, sourceEntry],
+  );
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-8 space-y-6">
@@ -211,63 +147,22 @@ export default function Move() {
         <Link to="/" className="btn-ghost text-sm">← Back to Hub</Link>
       </div>
 
-      {sourceLocked ? (
-        <>
-          <section className="card">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-xs uppercase text-wasteland-500 mb-1">Source merc</div>
-                <div className="text-wasteland-100">
-                  <span className="font-mono text-rust-400">Slot {source}</span>
-                  {" · "}
-                  <span className="font-medium">{sourceName}</span>
-                  {sourceClass && (
-                    <span className="badge bg-wasteland-700 text-wasteland-200 ml-2">{categoryLabel(sourceClass)}</span>
-                  )}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="text-xs text-rust-400 hover:underline underline-offset-2"
-                onClick={() => setSource(null)}
-              >
-                Change
-              </button>
-            </div>
-          </section>
-          {/* Save-snapshot warning for the source slot — moving a merc
-              who's hired in an existing save doesn't change anything in
-              the save; their old slot still has the SOLDIERTYPE snapshot.
-              Hidden when no existing save references this slot. */}
-          {source !== null && <SaveSnapshotBanner slot={source} action="move" />}
-        </>
-      ) : (
-        <section className="card">
-          <h2 className="text-lg font-semibold mb-3">Step 1: Pick source merc</h2>
-          <select
-            className="input max-w-md"
-            value={source ?? ""}
-            onChange={(e) => setSource(e.target.value ? Number(e.target.value) : null)}
-          >
-            <option value="">Choose a merc to move...</option>
-            {filled.map((e) => (
-              <option key={e.slot} value={e.slot}>
-                Slot {e.slot}: {e.nickname ?? e.name}
-              </option>
-            ))}
-          </select>
-          {sourceClass && (
-            <div className="mt-2 text-xs text-wasteland-400">
-              Slot {source} is <span className="badge bg-wasteland-700 text-wasteland-200">{categoryLabel(sourceClass)}</span>
-            </div>
-          )}
-        </section>
-      )}
+      <SourceMercCard
+        source={source}
+        sourceLocked={sourceLocked}
+        sourceName={sourceName}
+        sourceClass={sourceClass}
+        filled={filled}
+        stepTitle="Step 1: Pick source merc"
+        placeholder="Choose a merc to move..."
+        onChange={setSource}
+      />
 
-      {/* Save-snapshot warning shows for the source slot once one is
-          picked, in both the locked and dropdown-picked paths. Hidden
-          when no existing save references this slot. */}
-      {!sourceLocked && source !== null && <SaveSnapshotBanner slot={source} action="move" />}
+      {/* Save-snapshot warning for the source slot — moving a merc who's
+          hired in an existing save doesn't change anything in the save;
+          their old slot still has the SOLDIERTYPE snapshot. Hidden when
+          no existing save references this slot. */}
+      {source !== null && <SaveSnapshotBanner slot={source} action="move" />}
 
       {source !== null && (installs.data?.length ?? 0) > 1 && (
         <section className="card">
@@ -359,16 +254,16 @@ export default function Move() {
             new slot), MercStartingGear.xml, and relocates the EDT bio. A backup is taken
             automatically before any writes — you can roll back from Backups if needed.
           </p>
-          {progressEvents && (
+          {progress.events && (
             <div className="mb-3">
               <SaveProgressBar
-                events={progressEvents}
-                done={progressDone}
+                events={progress.events}
+                done={progress.done}
                 error={move.error}
               />
             </div>
           )}
-          {move.isError && !progressEvents && (
+          {move.isError && !progress.events && (
             <div className="mb-3 rounded border border-rust-500/40 bg-rust-500/10 p-3 text-sm text-rust-400">
               <div className="font-medium">Last attempt failed:</div>
               <div className="font-mono text-xs mt-1 break-words text-rust-300">

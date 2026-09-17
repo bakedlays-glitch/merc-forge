@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from mercwizard_core import backup as backup_mod
-from mercwizard_core.cross_lock import cross_process_install_lock
+from mercwizard_core.cross_lock import cross_process_install_root_lock
 from mercwizard_core.ini_editor import (
     EDITABLE_INIS,
     IniChange,
@@ -272,7 +272,7 @@ def apply_changes(
                            applied=0, backup_id=None,
                            files=plan["files"], results=results)
 
-    with cross_process_install_lock(info.id), state.write_lock:
+    with cross_process_install_root_lock(info.path), state.write_lock:
         # Resolve every write target first (raises before any disk touch),
         # snapshot them all in one backup entry, then apply.
         try:

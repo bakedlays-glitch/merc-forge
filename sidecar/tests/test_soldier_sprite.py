@@ -4,7 +4,7 @@ from mercwizard_core.mapforge_engine.soldier_sprite import (
     render_standing_sprite, BODYTYPE_STANDING_STI,
 )
 
-_INSTALL = r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+_INSTALL = os.environ.get("JA2_INSTALL", "")
 
 
 def test_bodytype_table_has_core_bodies():

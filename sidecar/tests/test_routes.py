@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from mercwizard_core import __version__
 from main import create_app
 from routes.state import get_state
 
@@ -60,13 +61,14 @@ def test_health(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    assert body["version"] == "2.0.0"
+    assert body["version"] == __version__
 
 
 def test_version(client: TestClient) -> None:
     r = client.get("/api/v1/version")
     assert r.status_code == 200
     assert r.json()["tool"] == "MercWizard"
+    assert r.json()["tool_version"] == __version__
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -102,7 +104,7 @@ def test_set_active_install(client: TestClient, registered_install: dict) -> Non
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Health — vfs_mismatch (bug-review B5)
+#  Health — vfs_mismatch
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -157,7 +159,7 @@ def test_health_vfs_mismatch_false_when_install_has_no_vfs_config_bound(
 def test_health_vfs_mismatch_true_when_active_config_differs_from_ja2_ini(
     client: TestClient, tmp_path: Path,
 ) -> None:
-    """Bug-review B5 concrete failure: install registered as Wildfire but
+    """Concrete failure: install registered as Wildfire but
     Ja2.ini still names AIMNAS. /health must surface this so the Hub
     banner can prompt the user to apply VFS and unify the two."""
     install_root = _make_multi_vfs_install(
@@ -256,6 +258,41 @@ def test_create_merc_happy_path(client: TestClient, registered_install: dict) ->
     assert body["slot"] == 5
 
 
+def test_create_aim_merc_writes_normalized_1120_byte_edt_record(
+    client: TestClient, registered_install: dict,
+) -> None:
+    payload = {
+        "merc": {
+            "uiIndex": 5,
+            "ubFaceIndex": 165,
+            "Type": 1,
+            "zName": "Carter",
+            "zNickname": "Carter",
+            "biographyText": "bar fights — which he settles",
+            "additionalInfoText": "“quoted” and wait…",
+        },
+        "aim_binding": {
+            "uiIndex": 5,
+            "description": "Carter",
+            "ProfilId": 5,
+            "AimBioID": 5,
+        },
+    }
+    response = client.post("/api/v1/merc", json=payload)
+    assert response.status_code == 200, response.text
+
+    from mercwizard_core.inject import edt as edt_mod
+
+    install_root = Path(registered_install["path"])
+    raw = (install_root / "Data-1.13" / "BinaryData" / "AIMBIOS.EDT").read_bytes()
+    record = raw[5 * edt_mod.RECORD_SIZE : 6 * edt_mod.RECORD_SIZE]
+    assert len(record) == 1120
+    assert edt_mod.decode_record(record) == (
+        "bar fights - which he settles",
+        '"quoted" and wait...',
+    )
+
+
 def test_create_merc_blocked_by_audit_when_npc_in_aim_slot(
     client: TestClient, registered_install: dict,
 ) -> None:
@@ -347,7 +384,12 @@ def test_delete_merc(client: TestClient, registered_install: dict) -> None:
         },
     }
     client.post("/api/v1/merc", json=payload)
+    # Slot 5 is a vanilla AIM slot (vanilla_overwrite tier) — the
+    # server-side slot-lock gate 409s a risky delete without force.
     r = client.delete("/api/v1/merc/5")
+    assert r.status_code == 409
+    assert r.json()["detail"]["error"] == "SLOT_LOCKED"
+    r = client.delete("/api/v1/merc/5?force=true")
     assert r.status_code == 200
 
 
@@ -400,6 +442,37 @@ def test_create_type2_merc_writes_bio_to_mercbios_not_mercedt(
     assert next(e for e in roster if e["slot"] == 5)["is_empty"]
 
 
+def test_create_merc_roster_bio_writes_normalized_1120_byte_edt_record(
+    client: TestClient, registered_install: dict,
+) -> None:
+    payload = {
+        "merc": {
+            "uiIndex": 198,
+            "ubFaceIndex": 198,
+            "Type": 2,
+            "zName": "Eskimo",
+            "zNickname": "Eskimo",
+            "biographyText": "Raúl — fixer",
+            "additionalInfoText": "Wait… 中",
+        },
+    }
+    response = client.post("/api/v1/merc", json=payload)
+    assert response.status_code == 200, response.text
+
+    from mercwizard_core.inject import edt as edt_mod
+    from mercwizard_core.inject import merc_availability as ma
+
+    install_root = Path(registered_install["path"])
+    merc_xml = install_root / "Data-1.13" / "TableData" / "MercAvailability.xml"
+    bio_id = ma.lookup_merc_bio_id(merc_xml, profil_id=198)
+    assert bio_id is not None
+    raw = (install_root / "Data-1.13" / "BinaryData" / "MERCBIOS.EDT").read_bytes()
+    start = bio_id * edt_mod.RECORD_SIZE
+    record = raw[start : start + edt_mod.RECORD_SIZE]
+    assert len(record) == 1120
+    assert edt_mod.decode_record(record) == ("Raúl - fixer", "Wait... ?")
+
+
 def test_move_merc(client: TestClient, registered_install: dict) -> None:
     payload = {
         "merc": {
@@ -413,7 +486,7 @@ def test_move_merc(client: TestClient, registered_install: dict) -> None:
     client.post("/api/v1/merc", json=payload)
     r = client.post("/api/v1/merc/5/move", json={"to_slot": 10})
     assert r.status_code == 200, r.text
-    # /move is NDJSON-streaming since 2026-05-23. Parse each line; the final
+    # /move is NDJSON-streaming. Parse each line; the final
     # `{done: True, ok: True, from, to, ...}` event carries the from/to fields.
     import json as _json
     events = [
@@ -441,7 +514,7 @@ def test_roster_without_active_install_returns_400(client: TestClient) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Phase 1: Streaming PUT /merc/{slot} — progress events
+#  Streaming PUT /merc/{slot} — progress events
 # ──────────────────────────────────────────────────────────────────────────
 
 import json as _json
@@ -467,7 +540,7 @@ def _create_carter(client: TestClient, slot: int = 5) -> None:
 def test_update_merc_streams_progress_events(
     client: TestClient, registered_install: dict,
 ) -> None:
-    """Phase 1: PUT /merc/{slot} emits one NDJSON event per save step,
+    """PUT /merc/{slot} emits one NDJSON event per save step,
     ending in `{done: true, ok: true, slot}`."""
     _create_carter(client, slot=5)
 
@@ -505,10 +578,99 @@ def test_update_merc_streams_progress_events(
     assert events[-1] == {"done": True, "ok": True, "slot": 5}
 
 
+def test_update_merc_gear_only_payload_still_snapshots(
+    client: TestClient, registered_install: dict,
+) -> None:
+    """A payload with no `merc` still mutates MercStartingGear.xml (and
+    can mutate availability XML) — the backup step must run for it too.
+    Regression: the snapshot used to be gated on `payload.merc is not
+    None`, so gear-only edits wrote with no recovery point and the
+    rollback path was a silent no-op."""
+    _create_carter(client, slot=5)
+
+    update_payload = {
+        "gear": {
+            "mIndex": 5,
+            "mName": "Carter",
+            "kits": [{"mGearKitName": "Standard", "mHelmet": 132}],
+        },
+    }
+    events: list[dict] = []
+    with client.stream("PUT", "/api/v1/merc/5", json=update_payload) as resp:
+        assert resp.status_code == 200, resp.read()
+        for line in resp.iter_lines():
+            if line:
+                events.append(_json.loads(line))
+
+    started = [e["step"] for e in events if e.get("status") == "start"]
+    assert started[0] == "backup", started
+    assert "gear" in started
+    assert events[-1]["ok"] is True
+
+    # And the snapshot actually landed on the Backups page.
+    backups = client.get(
+        "/api/v1/backup", params={"install_id": registered_install["id"]},
+    )
+    assert backups.status_code == 200
+    reasons = [b["reason"] for b in backups.json()]
+    assert "edit_slot_5" in reasons
+
+
+def test_gear_put_and_delete_snapshot_before_write(
+    client: TestClient, registered_install: dict,
+) -> None:
+    """Standalone gear routes must snapshot like every other destructive
+    route — a bad loadout overwrite or a wrong-slot delete has to be
+    restorable from the Backups page."""
+    _create_carter(client, slot=5)
+
+    gear = {"mIndex": 5, "mName": "Carter",
+            "kits": [{"mGearKitName": "Standard", "mHelmet": 132}]}
+    r = client.put("/api/v1/gear/5", json=gear)
+    assert r.status_code == 200, r.text
+    r = client.delete("/api/v1/gear/5")
+    assert r.status_code == 200, r.text
+
+    backups = client.get(
+        "/api/v1/backup", params={"install_id": registered_install["id"]},
+    )
+    reasons = [b["reason"] for b in backups.json()]
+    assert "gear_edit_slot_5" in reasons, reasons
+    assert "gear_delete_slot_5" in reasons, reasons
+
+
+def test_voice_delete_all_requires_voice_lab_and_preserves_clips(
+    client: TestClient, registered_install: dict,
+) -> None:
+    """Retired legacy deletion refuses before touching custom recordings."""
+    _create_carter(client, slot=5)
+    install_root = Path(registered_install["path"])
+    # Carter's profile carries the Merc-model default usVoiceIndex (15) —
+    # the route resolves the folder through the profile, not the slot.
+    speech = install_root / "Data-1.13" / "Speech" / "15"
+    speech.mkdir(parents=True)
+    clip = speech / "001.wav"
+    gap = speech / "001.gap"
+    clip.write_bytes(b"RIFFfake")
+    gap.write_bytes(b"\x00\x01")
+    before_clip = clip.read_bytes()
+    before_gap = gap.read_bytes()
+
+    r = client.delete("/api/v1/voice/5")
+    assert r.status_code == 409, r.text
+    assert r.json() == {"detail": {
+        "error": "VOICE_LAB_REQUIRED",
+        "message": "Voice changes require preview and verified deployment in Voice Lab.",
+        "voice_lab_path": "/voice-lab?profile=5",
+    }}
+    assert clip.exists() and clip.read_bytes() == before_clip
+    assert gap.exists() and gap.read_bytes() == before_gap
+
+
 def test_update_merc_rollback_on_edt_failure(
     client: TestClient, registered_install: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 1 + 2.8: if write_bio raises after profiles_xml.upsert
+    """If write_bio raises after profiles_xml.upsert
     succeeds, the rollback reverts the profile so we don't leave a
     half-written merc."""
     _create_carter(client, slot=5)
@@ -554,7 +716,7 @@ def test_update_merc_rollback_on_edt_failure(
     assert final["rollback_ok"] is True
 
     # Update rollback semantic: the slot must still hold Carter with the
-    # original bio (NOT deleted, NOT updated). Restore phase 1 copies the
+    # original bio (NOT deleted, NOT updated). The first restore phase copies the
     # snapshot's MercProfiles.xml back over the install, reverting the
     # mid-rollback upsert.
     post_profile = profiles_xml.read_slot(profiles_path, 5)
@@ -586,7 +748,7 @@ def test_update_merc_audit_failure_returns_400_no_stream(
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Phase 2.3: TYPE_SLOT_HARD_MISMATCH audit hard-block
+#  TYPE_SLOT_HARD_MISMATCH audit hard-block
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -667,14 +829,14 @@ def test_health_drops_scan_fields(client: TestClient) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-#  Phase 2.8: create_merc rollback on EDT failure
+#  create_merc rollback on EDT failure
 # ──────────────────────────────────────────────────────────────────────────
 
 
 def test_update_merc_tolerates_extra_xml_fields(
     client: TestClient, registered_install: dict,
 ) -> None:
-    """Regression for the slot-0 422 a user hit 2026-05-18.
+    """Regression for a 422 a user hit when editing slot 0.
 
     Their MercProfiles.xml row for slot 0 had been touched by another tool
     (some external editors write `bigFaceImagePath`, `alphaThreshold`,
@@ -781,6 +943,55 @@ def _seed_face_sti(install_root: Path, face_index: int) -> None:
         face_index=face_index,
         source_png_bytes=buf.getvalue(),
     )
+
+
+def test_compile_rpc_portrait_writes_talkface_and_returns_big_coords(
+    client: TestClient, registered_install: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The RPC compile option adds B<face>.sti without changing normal compiles."""
+    import io
+    from contextlib import nullcontext
+    from PIL import Image, ImageDraw
+    from mercwizard_core.portrait.sti import verify_animated_face_sti
+    from routes import portrait as portrait_routes
+
+    # The repository venv is relocatable except for pywin32's lock helper;
+    # route behavior is under test here, not Windows portalocker itself.
+    monkeypatch.setattr(portrait_routes, "cross_process_install_root_lock", lambda _root: nullcontext())
+
+    def png(eye_y: int = 65, mouth_bottom: int = 128) -> bytes:
+        img = Image.new("RGBA", (200, 200), (61, 48, 39, 255))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse((58, eye_y, 82, eye_y + 11), fill=(220, 210, 185, 255))
+        draw.ellipse((118, eye_y, 142, eye_y + 11), fill=(220, 210, 185, 255))
+        draw.rectangle((77, 122, 123, mouth_bottom), fill=(155, 55, 48, 255))
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+
+    files = {
+        "image": ("base.png", png(), "image/png"),
+        "anim_eye_1": ("eye.png", png(eye_y=72), "image/png"),
+        "anim_mouth_1": ("mouth.png", png(mouth_bottom=140), "image/png"),
+    }
+    form = {
+        "face_index": "63",
+        "eye_x": "10", "eye_y": "8", "eye_w": "17", "eye_h": "6",
+        "mouth_x": "7", "mouth_y": "28", "mouth_w": "14", "mouth_h": "6",
+        "rpc_talkface": "true",
+    }
+    response = client.post("/api/v1/portrait/compile", data=form, files=files)
+    assert response.status_code == 200, response.text
+    talk = response.json()["talkface"]
+    assert talk["written"] is True
+    assert talk["animated_eyes"] is True
+    assert talk["animated_mouth"] is True
+    assert talk["eyes_x"] >= 0 and talk["mouth_y"] >= 0
+
+    root = Path(registered_install["path"])
+    path = root / "Data-1.13" / "faces" / "B63.sti"
+    assert path.exists()
+    assert verify_animated_face_sti(path, expected_base_size=(90, 100))["valid"] is True
 
 
 def test_get_merc_portrait_returns_png_bytes(

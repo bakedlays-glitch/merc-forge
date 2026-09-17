@@ -50,7 +50,7 @@ from mercwizard_core.mapforge_engine.soldier_sprite import (
     render_standing_sprite, BODYTYPE_STANDING_STI,
 )
 
-_INSTALL = r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+_INSTALL = r"<your JA2 1.13 install>"
 
 def test_bodytype_table_has_core_bodies():
     for bt in (0, 1, 3, 4, 29):   # REGMALE, BIGMALE, REGFEMALE, monster, DOG

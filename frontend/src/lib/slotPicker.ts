@@ -47,8 +47,8 @@ export function findSlot(data: SlotPickerData | undefined, slot: number): SlotIn
  * restore + MercWizardRoster replace all do this. If you add a new
  * write handler that touches slot occupancy or AIM/MERC binding,
  * add an `invalidateQueries({queryKey: ["slot-picker"]})` call to its
- * onSuccess. Pre-fix the comment here claimed `["roster"]` churn
- * cascaded — bug-review finding E4. */
+ * onSuccess. Pre-fix, the comment here claimed `["roster"]` churn
+ * cascaded, which it does not. */
 export function useSlotPicker(installId?: string) {
   return useQuery({
     queryKey: ["slot-picker", installId ?? "active"],

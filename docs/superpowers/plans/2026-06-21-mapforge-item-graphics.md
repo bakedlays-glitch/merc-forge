@@ -43,7 +43,7 @@ from mercwizard_core.mapforge_engine.item_graphic import (
     render_item_graphic, _bigitems_stem,
 )
 
-_INSTALL = r"C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy"
+_INSTALL = r"<your JA2 1.13 install>"
 
 def test_bigitems_stem_padding():
     assert _bigitems_stem(0, 24) == "gun24"

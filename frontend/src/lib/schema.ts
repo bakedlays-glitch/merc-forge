@@ -166,7 +166,7 @@ export interface AimBinding {
 //  M.E.R.C. binding (Speck's mercenary service)
 // ───────────────────────────────────────────────────────────────────────
 // Mirror of sidecar's MercBinding Pydantic model. Used by the bundle
-// manifest preview + future M.E.R.C.-write paths. Added 2026-05-25 as
+// manifest preview + future M.E.R.C.-write paths. Added as
 // the cross-cutting review's contract-drift fix — the bundle preview
 // was rendering AIM-only metadata for Type=2 (M.E.R.C.) bundles
 // because the TS WmercManifestSummary lacked this field.
@@ -241,7 +241,7 @@ export interface InstallInfo {
 /** Response from `POST /installs/{install_id}/apply-vfs`.
  *
  * Mirrors `ApplyVfsResult` Pydantic model in `sidecar/routes/installs.py`.
- * Added per TODO #17 — pre-fix callers ad-hoc-parsed the response shape. */
+ * Added because callers previously ad-hoc-parsed the response shape. */
 export interface ApplyVfsResult {
   install_id: string;
   /** Absolute path to the Ja2.ini file we modified. */
@@ -286,7 +286,7 @@ export interface BackupEntry {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-//  INI editor (MercForge UI Phase 2 — backend: routes/ini_editor.py)
+//  INI editor (backend: routes/ini_editor.py)
 // ───────────────────────────────────────────────────────────────────────
 
 export interface IniSchemaIndexEntry {
@@ -432,7 +432,9 @@ export interface IniSummaryResponse {
 
 export interface AppSettings {
   baseline_install_path?: string;
-  backup_mode?: string;
+  voice_authoring_workspace?: string;
+  voice_ffmpeg_path?: string;
+  voice_transcriber_python?: string;
 }
 
 export interface GraphicsComponent {
@@ -457,7 +459,7 @@ export interface GraphicsDeployResult {
   backup_id: string;
 }
 
-// ---- INI presets + setup flow (MercForge UI Phase 3) ----
+// ---- INI presets + setup flow ----
 
 export interface IniPresetChange {
   ini_file: string;

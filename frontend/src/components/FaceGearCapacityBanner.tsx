@@ -12,7 +12,7 @@ interface Props {
  * Surfaces whether the active install's FaceGear STIs cover this merc's
  * face index. If any STI has fewer frames than (faceIndex + 1), equipping
  * the corresponding item in-game crashes (sgp/vobject.cpp:958
- * SGP_THROW_IFFALSE → exit(0); verified in source 2026-05-16).
+ * SGP_THROW_IFFALSE → exit(0); verified in source).
  *
  * Renders nothing while loading or if no FaceGear STIs exist in the install.
  */

@@ -93,7 +93,24 @@ export type MapForgeActionId =
   | "cycle-sub-prev"
   | "open-asset-viewer"
   | "wheel-zoom"
-  | "wheel-cycle-tool";
+  | "wheel-cycle-tool"
+  | "sel-copy"
+  | "sel-cut"
+  | "sel-paste"
+  | "sel-delete"
+  | "sel-cycle-next"
+  | "sel-cycle-prev"
+  | "nudge-left"
+  | "nudge-right"
+  | "nudge-up"
+  | "nudge-down"
+  | "cancel"
+  | "payload-room"
+  | "payload-height"
+  | "payload-erase"
+  | "shape-rect"
+  | "shape-line"
+  | "shape-flood";
 
 export interface MapForgeAction {
   id: MapForgeActionId;
@@ -215,16 +232,135 @@ export const MAPFORGE_ACTIONS: MapForgeAction[] = [
   {
     id: "wheel-cycle-tool",
     label: "Wheel: cycle tool",
-    description: "Scroll over the canvas to cycle the active tool (inspect → pencil → shape). Default = plain scroll; rebind by scrolling with a modifier in the capture.",
-    defaultBinding: "Wheel",
+    description: "Scroll over the canvas to cycle the active tool (inspect → pencil → shape). Default = Alt+scroll; rebind by scrolling with a modifier in the capture.",
+    defaultBinding: "Alt+Wheel",
     group: "Tools",
   },
   {
     id: "wheel-zoom",
     label: "Wheel: zoom",
-    description: "Hold this modifier and scroll over the canvas to zoom in/out around the cursor. Default = Alt+scroll.",
-    defaultBinding: "Alt+Wheel",
+    description: "Scroll over the canvas to zoom in/out around the cursor. Default = plain scroll (no modifier).",
+    defaultBinding: "Wheel",
     group: "View",
+  },
+  {
+    id: "sel-copy",
+    label: "Copy selection",
+    description: "Copy the selected sprites (anchors + layout) to the sprite clipboard.",
+    defaultBinding: "Ctrl+C",
+    group: "Edit",
+  },
+  {
+    id: "sel-cut",
+    label: "Cut selection",
+    description: "Copy, then remove the selected sprites (one undo).",
+    defaultBinding: "Ctrl+X",
+    group: "Edit",
+  },
+  {
+    id: "sel-paste",
+    label: "Paste sprites",
+    description: "Arm a ghost of the sprite clipboard; click to place.",
+    defaultBinding: "Ctrl+V",
+    group: "Edit",
+  },
+  {
+    id: "sel-delete",
+    label: "Delete selection",
+    description: "Remove the selected sprites (explicit shadows ride along).",
+    defaultBinding: "Delete",
+    group: "Edit",
+  },
+  {
+    id: "sel-cycle-next",
+    label: "Cycle variant",
+    description: "Next sub-frame of the armed ghost or selected sprite.",
+    defaultBinding: "R",
+    group: "Edit",
+  },
+  {
+    id: "sel-cycle-prev",
+    label: "Cycle variant back",
+    description: "Previous sub-frame.",
+    defaultBinding: "Shift+R",
+    group: "Edit",
+  },
+  {
+    id: "nudge-left",
+    label: "Nudge west",
+    description: "Move the selection or ghost one tile in −x.",
+    defaultBinding: "ArrowLeft",
+    group: "Edit",
+  },
+  {
+    id: "nudge-right",
+    label: "Nudge east",
+    description: "Move one tile in +x.",
+    defaultBinding: "ArrowRight",
+    group: "Edit",
+  },
+  {
+    id: "nudge-up",
+    label: "Nudge north",
+    description: "Move one tile in −y.",
+    defaultBinding: "ArrowUp",
+    group: "Edit",
+  },
+  {
+    id: "nudge-down",
+    label: "Nudge south",
+    description: "Move one tile in +y.",
+    defaultBinding: "ArrowDown",
+    group: "Edit",
+  },
+  {
+    id: "cancel",
+    label: "Cancel",
+    description: "Drop the queue, disarm, then clear the selection — one level per press.",
+    defaultBinding: "Escape",
+    group: "Edit",
+  },
+  {
+    id: "payload-room",
+    label: "Arm: Room",
+    description: "Arm the room payload (mode-less placement) — click paints a room id.",
+    defaultBinding: "O",
+    group: "Tools",
+  },
+  {
+    id: "payload-height",
+    label: "Arm: Height",
+    description: "Arm the height payload — click adjusts a tile's height.",
+    defaultBinding: "H",
+    group: "Tools",
+  },
+  {
+    id: "payload-erase",
+    label: "Arm: Erase",
+    description: "Arm the erase payload — click removes whatever occupies the tile.",
+    defaultBinding: "E",
+    group: "Tools",
+  },
+  {
+    id: "shape-rect",
+    label: "Shape: Rectangle",
+    description: "One-shot rectangle fill with the armed brush.",
+    defaultBinding: "T",
+    group: "Tools",
+  },
+  {
+    id: "shape-line",
+    label: "Shape: Line",
+    description: "One-shot straight line with the armed brush.",
+    defaultBinding: "L",
+    group: "Tools",
+  },
+  {
+    id: "shape-flood",
+    label: "Shape: Flood fill",
+    description: "One-shot flood fill with the armed brush.",
+    defaultBinding: "F",
+    group: "Tools",
   },
 ];
 
@@ -237,7 +373,9 @@ const ACTION_BY_ID: Record<MapForgeActionId, MapForgeAction> =
 export interface MapForgeSettings {
   /** action id → key combo. Missing keys fall back to the default. */
   keybindings: Partial<Record<MapForgeActionId, string>>;
-  /** Default brush radius for new sessions. */
+  /** Brush radius the pencil starts at when the editor mounts.
+   * Read once, not re-applied when the user switches sector without
+   * leaving the editor. */
   defaultBrushRadius: number;
   /** Default tool on session open: "inspect" or "pencil". */
   defaultTool: "inspect" | "pencil";
@@ -291,6 +429,12 @@ export interface MapForgeSettings {
    * brushes ignore this setting; it only governs stamp-eligible
    * slots (those with `slot_jsd_footprint` in the atlas manifest). */
   paintMode: "stamp" | "manual";
+  /** Show the Inspect/Pencil/Shape/Select tool bar and route input
+   * through the per-tool branches instead of the mode-less model
+   * (marquee-select always live, no tool switching). Default OFF —
+   * the mode-less StarCraft-style placement is the new default; this
+   * keeps the old tool bar reachable for anyone who prefers it. */
+  legacyTools: boolean;
 }
 
 export const DEFAULT_SETTINGS: MapForgeSettings = {
@@ -303,13 +447,22 @@ export const DEFAULT_SETTINGS: MapForgeSettings = {
   // Stock JA2 1.13 cap. Bump for installs running a custom ja2.exe
   // built with a higher NUMBEROFTILETYPES.
   engineMaxTileSlot: 150,
+  legacyTools: false,
 };
 
 const STORAGE_KEY = "mapforge.settings.v1";
 
+/** Force a stored number into range, falling back for a missing or
+ * non-numeric value. */
+function clamp(value: unknown, lo: number, hi: number, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(hi, Math.max(lo, value))
+    : fallback;
+}
+
 /** Read settings from localStorage. Returns DEFAULT_SETTINGS on any
  * parse failure or absence. Schema-tolerant: unknown keys are
- * dropped, missing keys default. */
+ * dropped, missing keys default, out-of-range numerics are clamped. */
 export function loadSettings(): MapForgeSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -322,6 +475,12 @@ export function loadSettings(): MapForgeSettings {
         ...DEFAULT_SETTINGS.keybindings,
         ...(parsed.keybindings ?? {}),
       },
+      // Re-clamp the numerics rather than trusting what is in storage.
+      // The settings UI clamps on the way in, but a stored blob can also
+      // come from a hand edit or from a future build whose valid range
+      // narrowed, and engineMaxTileSlot sizes an allocated slot grid.
+      defaultBrushRadius: clamp(parsed.defaultBrushRadius, 1, 8, DEFAULT_SETTINGS.defaultBrushRadius),
+      engineMaxTileSlot: clamp(parsed.engineMaxTileSlot, 50, 511, DEFAULT_SETTINGS.engineMaxTileSlot),
     };
     return merged;
   } catch {

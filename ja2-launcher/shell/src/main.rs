@@ -34,7 +34,7 @@ fn main() {
             list_schemas,
             load_schema,
             read_effective_setting,
-            // v1.8: presets (Phase B)
+            // v1.8: presets
             apply_preset_changes,
             clear_all_overrides
         ])

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -10,6 +10,7 @@ import {
   getSlotPicker,
 } from "./lib/api";
 import { clearCachedPort, isRunningInTauri } from "./lib/tauri";
+import { normalizeInternalRoute } from "./lib/internalRoute";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Eagerly-loaded routes: small surfaces that need to be ready on first
@@ -32,19 +33,21 @@ const Edit = lazy(() => import("./routes/Edit"));
 const Backgrounds = lazy(() => import("./routes/Backgrounds"));
 const Items = lazy(() => import("./routes/Items"));
 const Move = lazy(() => import("./routes/Move"));
-const Delete = lazy(() => import("./routes/Delete"));
 const Duplicate = lazy(() => import("./routes/Duplicate"));
 const Import = lazy(() => import("./routes/Import"));
-const Export = lazy(() => import("./routes/Export"));
 const MapForge = lazy(() => import("./routes/MapForge"));
 const MapForgeSector = lazy(() => import("./routes/MapForgeSector"));
 const TilesetEditor = lazy(() => import("./routes/TilesetEditor"));
 const TilesetEditorTileset = lazy(() => import("./routes/TilesetEditorTileset"));
 const Tools = lazy(() => import("./routes/Tools"));
 const IniEditor = lazy(() => import("./routes/IniEditor"));
-const Setup = lazy(() => import("./routes/Setup"));
+// Game Setup is hidden for the beta.4 release — the flow is not ready to
+// ship. routes/Setup.tsx and sidecar/routes/setup.py are still in the tree;
+// restoring it means re-adding this lazy import, the /setup route below,
+// and the Hub tile + SetupOfferBanner in routes/Hub.tsx.
 const ToolsStiViewer = lazy(() => import("./routes/ToolsStiViewer"));
 const ToolsSlfExtractor = lazy(() => import("./routes/ToolsSlfExtractor"));
+const VoiceLab = lazy(() => import("./routes/VoiceLab"));
 
 // Suspense fallback while a lazy route's chunk is downloading. Matches
 // the "Starting up..." style so route transitions feel consistent with
@@ -126,6 +129,39 @@ export default function App() {
     };
   }, [queryClient, warmRoster]);
 
+  // `--route` deep-link: cold start pulls the one-shot initial route from the
+  // shell; a second `mercwizard.exe --route ...` launch arrives as an
+  // `open-route` event forwarded by the single-instance plugin. Only in-app
+  // absolute paths are accepted (the shell already filters, this re-checks).
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!isRunningInTauri()) return;
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+    const goto = (route: unknown) => {
+      const safeRoute = normalizeInternalRoute(route);
+      if (safeRoute) navigate(safeRoute);
+    };
+    import("@tauri-apps/api/core").then(({ invoke }) => {
+      if (cancelled) return;
+      invoke<string | null>("take_initial_route").then(goto);
+    });
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      if (cancelled) return;
+      listen<string>("open-route", (e) => goto(e.payload)).then((unlisten) => {
+        if (cancelled) {
+          unlisten();
+        } else {
+          cleanup = unlisten;
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+      if (cleanup) cleanup();
+    };
+  }, [navigate]);
+
   const health = useQuery({
     queryKey: ["health"],
     queryFn: getHealth,
@@ -182,7 +218,7 @@ export default function App() {
           />
           <Route path="/first-run" element={<FirstRun />} />
           <Route path="/hub" element={<Hub />} />
-          {/* Legacy /roster (V1 raw table) deleted 2026-05-25;
+          {/* Legacy /roster (V1 raw table) deleted;
               redirect deep links to the new Merc Wizard roster. */}
           <Route path="/roster" element={<Navigate to="/merc-wizard" replace />} />
           <Route path="/merc-wizard" element={<MercWizardRoster />} />
@@ -191,21 +227,26 @@ export default function App() {
           <Route path="/create" element={<Create />} />
           <Route path="/edit" element={<Edit />} />
           <Route path="/backgrounds" element={<Backgrounds />} />
+          {/* Library merged into /backgrounds (slide-over drawer); keep the deep
+              link working for old bookmarks / the Hub. */}
+          <Route path="/backgrounds/library" element={<Navigate to="/backgrounds" replace />} />
           <Route path="/items" element={<Items />} />
           <Route path="/move" element={<Move />} />
           <Route path="/duplicate" element={<Duplicate />} />
-          <Route path="/delete" element={<Delete />} />
+          {/* Delete + Export retired as pages — both are
+              in-grid actions on /merc-wizard now. Redirect stale URLs. */}
+          <Route path="/delete" element={<Navigate to="/merc-wizard" replace />} />
           <Route path="/import" element={<Import />} />
-          <Route path="/export" element={<Export />} />
+          <Route path="/export" element={<Navigate to="/merc-wizard" replace />} />
           <Route path="/mapforge" element={<MapForge />} />
           <Route path="/mapforge/sector" element={<MapForgeSector />} />
           <Route path="/tileset-editor" element={<TilesetEditor />} />
           <Route path="/tileset-editor/:tileset" element={<TilesetEditorTileset />} />
           <Route path="/ini-editor" element={<IniEditor />} />
-          <Route path="/setup" element={<Setup />} />
           <Route path="/tools" element={<Tools />} />
           <Route path="/tools/sti-viewer" element={<ToolsStiViewer />} />
           <Route path="/tools/slf-extractor" element={<ToolsSlfExtractor />} />
+          <Route path="/voice-lab" element={<VoiceLab />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>

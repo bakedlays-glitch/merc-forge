@@ -1,6 +1,13 @@
 import { useMemo } from "react";
 
 import type { BackgroundFieldSpec } from "../../lib/api";
+import FieldHelp from "../items/FieldHelp";
+
+const IDENTITY_HELP = {
+  name: "Full background name shown in [[IMP]] creation and personnel screens.",
+  short_name: "Abbreviated name for the laptop display (engine cap is 19 characters).",
+  description: "In-game description of this background. Should explain the abilities.",
+};
 
 /**
  * Schema-driven editor for a single background's name/short/description plus
@@ -60,7 +67,10 @@ export default function BackgroundForm({ schema, draft, onChange, caps }: Props)
         <legend className="text-sm font-medium text-wasteland-100 px-1">Identity</legend>
         <label className="block mt-1">
           <span className="flex items-center justify-between">
-            <span className="text-xs text-wasteland-300">Name</span>
+            <span className="text-xs text-wasteland-300 flex items-center gap-1">
+              Name
+              <FieldHelp help={IDENTITY_HELP.name} />
+            </span>
             <CharCount value={draft.name} max={caps.name} />
           </span>
           <input
@@ -72,7 +82,10 @@ export default function BackgroundForm({ schema, draft, onChange, caps }: Props)
         </label>
         <label className="block mt-2">
           <span className="flex items-center justify-between">
-            <span className="text-xs text-wasteland-300">Short name (laptop display)</span>
+            <span className="text-xs text-wasteland-300 flex items-center gap-1">
+              Short name (laptop display)
+              <FieldHelp help={IDENTITY_HELP.short_name} />
+            </span>
             <CharCount value={draft.short_name} max={caps.short} />
           </span>
           <input
@@ -83,7 +96,10 @@ export default function BackgroundForm({ schema, draft, onChange, caps }: Props)
         </label>
         <label className="block mt-2">
           <span className="flex items-center justify-between">
-            <span className="text-xs text-wasteland-300">Description</span>
+            <span className="text-xs text-wasteland-300 flex items-center gap-1">
+              Description
+              <FieldHelp help={IDENTITY_HELP.description} />
+            </span>
             <CharCount value={draft.description} max={caps.description} />
           </span>
           <textarea
@@ -113,9 +129,10 @@ export default function BackgroundForm({ schema, draft, onChange, caps }: Props)
               {g.fields.map((f) => {
                 const v = draft.fields[f.key] ?? 0;
                 return (
-                  <label key={f.key} className="block" title={f.note ?? undefined}>
+                  <label key={f.key} className="block">
                     <span className="text-xs text-wasteland-300 flex items-center gap-1">
                       {f.label}
+                      {f.help && <FieldHelp help={f.help} />}
                       {f.note && <span className="text-rust-400">*</span>}
                     </span>
                     {f.kind === "flag" ? (

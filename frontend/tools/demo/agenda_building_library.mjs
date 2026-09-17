@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const INSTALL = process.env.JA2_INSTALL || "C:/Jagged Alliance 2/<your-1.13-install>";
+const INSTALL = process.env.JA2_INSTALL || "C:/Games/Jagged Alliance 2/<your-1.13-install>";
 
 export default {
   viewport: { width: 1920, height: 1080 },

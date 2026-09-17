@@ -8,9 +8,9 @@ recognizable PNGs (a FAMAS rifle and a leather jacket) using the *exact* existin
 STI/SLF helpers. Recipe below is source-cited and matches the running soldier-sprite path.
 
 All source line refs are
-`C:\AI Projects\The Wasteland\Source Files\1.13 Source\source-master\…`.
+`<the JA2 1.13 source tree>\…`.
 Install probed = the canonical Copy:
-`C:\Jagged Alliance 2\Jagged Alliance 2 Gold 1.13 Mod Prototype - Copy`.
+`<your JA2 1.13 install>`.
 
 ---
 

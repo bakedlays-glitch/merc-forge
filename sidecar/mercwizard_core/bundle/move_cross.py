@@ -112,7 +112,7 @@ def move_between_installs(
         # try/except below silently swallows AND we still return
         # `source_cleared=True`. Net: cross-install move tells the user
         # "source cleared" while the source EDT bio bytes are still on
-        # disk. Bug-review finding C2.
+        # disk.
         source_aim_bio_id = aim_availability.lookup_aim_bio_id(source_aim_path, source_slot)
         source_merc_bio_id = merc_availability.lookup_merc_bio_id(source_merc_xml_path, source_slot)
 
