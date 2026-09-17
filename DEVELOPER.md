@@ -141,7 +141,7 @@ MercWizard2/
 │   │   ├── bundle.py, backup.py, saves.py, voice.py
 │   │   ├── installs.py, portrait.py, game.py, health.py
 │   │   └── slots.py
-│   └── tests/                     — pytest suite (1,000+ tests)
+│   └── tests/                     — pytest suite (1,500+ tests)
 │       ├── conftest.py
 │       └── test_audit, test_backup, test_bundle, test_edt, test_install_detect,
 │           test_models, test_portrait, test_relocator, test_roster, test_routes,
@@ -162,6 +162,20 @@ Run the complete automated chain from the repository root:
 ```
 
 It runs the sidecar pytest suite, frontend TypeScript typecheck, and frontend Vitest suite. Browser-driven Playwright checks remain a separate live-app verification because they require the app and sidecar to be running.
+
+### What the suite does not cover
+
+Automated coverage is broad; real-world coverage is not. **Map Forge is the only
+module with sustained human use** — it is driven regularly against real installs,
+so its failure modes are the ones that have actually surfaced. Everything else
+(Voice Lab, INI Editor, Items, Backgrounds, Tileset Editor, and the
+less-travelled Merc Wizard paths — cross-install move, RPC authoring, FaceGear
+overlay authoring) has been proven mostly against fixtures and mocked installs.
+
+Practical consequence when changing those areas: a green suite is not evidence
+the feature works. Verify against a real install before claiming a fix, and
+prefer adding a test that would have caught the reported failure over trusting
+the existing ones to have covered it.
 
 For sidecar-only coverage:
 
